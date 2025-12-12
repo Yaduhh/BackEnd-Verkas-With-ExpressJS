@@ -166,10 +166,60 @@ class Branch {
         teamBranches = teamBranches.concat(branches);
       }
       
-      return [...ownerBranches, ...teamBranches];
+      // Remove duplicates
+      const allBranches = [...ownerBranches, ...teamBranches];
+      const uniqueBranches = allBranches.filter((branch, index, self) => 
+        index === self.findIndex(b => b.id === branch.id)
+      );
+      
+      return uniqueBranches;
+    } else if (userRole === 'co-owner') {
+      // Co-owner: get branches from teams they're member of
+      // Co-owner should be added to the same team as the owner who created them
+      const OwnerTeam = require('./OwnerTeam');
+      const User = require('./User');
+      const currentUser = await User.findById(userId);
+      
+      let teamBranches = [];
+      
+      // Get teams co-owner is member of
+      const teams = await OwnerTeam.findByUserId(userId);
+      
+      // Get branches from all teams co-owner is member of
+      for (const team of teams) {
+        const branches = await this.findByTeam(team.id);
+        teamBranches = teamBranches.concat(branches);
+      }
+      
+      // Also get branches from owner who created them (as fallback)
+      // This ensures co-owner gets all branches even if team membership is missing
+      if (currentUser && currentUser.created_by) {
+        // Get branches from creator's teams
+        const creatorTeams = await OwnerTeam.findByUserId(currentUser.created_by);
+        
+        for (const team of creatorTeams) {
+          const branches = await this.findByTeam(team.id);
+          teamBranches = teamBranches.concat(branches);
+        }
+        
+        // FALLBACK: Also get branches where owner_id = created_by (for branches without team_id)
+        // This handles cases where branches were created before team_id was implemented
+        const ownerBranches = await this.findByOwner(currentUser.created_by);
+        teamBranches = teamBranches.concat(ownerBranches);
+      }
+      
+      // Remove duplicates
+      const uniqueBranches = teamBranches.filter((branch, index, self) => 
+        index === self.findIndex(b => b.id === branch.id)
+      );
+      
+      return uniqueBranches;
     } else if (userRole === 'admin') {
       // Admin: get all branches where they are PIC
       return await this.findAllByPIC(userId);
+    } else if (userRole === 'master') {
+      // Master: get all branches (developer access)
+      return await query('SELECT * FROM branches WHERE status_deleted = false ORDER BY created_at DESC');
     }
     
     return [];
@@ -324,6 +374,25 @@ class Branch {
       if (hasAccess) return true;
     }
     
+    // Co-owner: check if branch belongs to owner who created them (same team)
+    if (userRole === 'co-owner') {
+      const User = require('./User');
+      const user = await User.findById(userId);
+      if (user && user.created_by) {
+        // Check if branch owner is the creator
+        if (branch.owner_id === user.created_by) return true;
+        
+        // Check if branch is in same team as creator's team
+        if (branch.team_id) {
+          const OwnerTeam = require('./OwnerTeam');
+          const creatorTeams = await OwnerTeam.findByUserId(user.created_by);
+          if (creatorTeams.some(team => team.id === branch.team_id)) {
+            return true;
+          }
+        }
+      }
+    }
+    
     return false;
   }
   
@@ -355,6 +424,52 @@ class Branch {
       }
       
       return individual[0].count + teamCount;
+    } else if (userRole === 'co-owner') {
+      // Co-owner: count branches from owner's team who created them
+      const User = require('./User');
+      const currentUser = await User.findById(userId);
+      
+      if (!currentUser || !currentUser.created_by) {
+        // If no created_by, count from teams they're member of
+        const OwnerTeam = require('./OwnerTeam');
+        const teams = await OwnerTeam.findByUserId(userId);
+        let teamCount = 0;
+        
+        for (const team of teams) {
+          const count = await query(
+            'SELECT COUNT(*) as count FROM branches WHERE team_id = ? AND status_deleted = false',
+            [team.id]
+          );
+          teamCount += count[0].count;
+        }
+        
+        return teamCount;
+      }
+      
+      // Get teams from the owner who created this co-owner
+      const OwnerTeam = require('./OwnerTeam');
+      const creatorTeams = await OwnerTeam.findByUserId(currentUser.created_by);
+      let teamCount = 0;
+      
+      for (const team of creatorTeams) {
+        const count = await query(
+          'SELECT COUNT(*) as count FROM branches WHERE team_id = ? AND status_deleted = false',
+          [team.id]
+        );
+        teamCount += count[0].count;
+      }
+      
+      // Also count from teams co-owner is direct member of
+      const coOwnerTeams = await OwnerTeam.findByUserId(userId);
+      for (const team of coOwnerTeams) {
+        const count = await query(
+          'SELECT COUNT(*) as count FROM branches WHERE team_id = ? AND status_deleted = false',
+          [team.id]
+        );
+        teamCount += count[0].count;
+      }
+      
+      return teamCount;
     } else if (userRole === 'admin') {
       // Admin: count all branches where they are PIC
       const branches = await this.findAllByPIC(userId);
@@ -366,8 +481,8 @@ class Branch {
   
   // Check if user can create more branches
   static async canCreateBranch(userId, userRole) {
-    if (userRole !== 'owner') {
-      return false; // Only owners can create branches
+    if (userRole !== 'owner' && userRole !== 'co-owner') {
+      return false; // Only owners and co-owners can create branches
     }
     
     const Subscription = require('./Subscription');

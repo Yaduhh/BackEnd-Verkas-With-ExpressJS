@@ -5,7 +5,7 @@ class User {
   // Find by ID
   static async findById(id) {
     const results = await query(
-      'SELECT id, email, name, role, created_at, updated_at FROM users WHERE id = ? AND status_deleted = false',
+      'SELECT id, email, name, role, created_by, created_at, updated_at FROM users WHERE id = ? AND status_deleted = false',
       [id]
     );
     return results[0] || null;

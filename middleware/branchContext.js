@@ -33,8 +33,15 @@ const getCurrentBranch = async (req, res, next) => {
       return next();
     }
     
-    // Owner: branch_id is required from header
+    // Owner and co-owner: branch_id from header or auto-assign first accessible branch
     if (!branchId) {
+      // Auto-assign first accessible branch for owner and co-owner
+      const branches = await Branch.findByUserAccess(req.userId, req.user.role);
+      if (branches.length > 0) {
+        req.branchId = branches[0].id;
+        return next();
+      }
+      
       return res.status(400).json({
         success: false,
         message: 'Branch ID is required. Please provide X-Branch-Id header.'
@@ -73,6 +80,12 @@ const optionalBranchContext = async (req, res, next) => {
       const branch = await Branch.getAdminBranch(req.userId);
       if (branch) {
         req.branchId = branch.id;
+      }
+    } else if (req.user.role === 'owner' || req.user.role === 'co-owner') {
+      // Auto-assign for owner and co-owner (fallback to first accessible branch if no header)
+      const branches = await Branch.findByUserAccess(req.userId, req.user.role);
+      if (branches.length > 0) {
+        req.branchId = branches[0].id;
       }
     }
     

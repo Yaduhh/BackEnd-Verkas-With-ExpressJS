@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{title}}</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: 'Helvetica', 'Arial', sans-serif;
+      color: #000000;
+      background: #ffffff;
+      padding: 40px;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    
+    .header {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+    
+    .header h1 {
+      font-size: 20px;
+      font-weight: bold;
+      color: #000000;
+      margin-bottom: 8px;
+    }
+    
+    .header .branch-name {
+      font-size: 14px;
+      color: #000000;
+      margin-bottom: 16px;
+    }
+    
+    .header .period {
+      font-size: 10px;
+      color: #666666;
+      margin-bottom: 4px;
+    }
+    
+    .header .working-days {
+      font-size: 10px;
+      color: #666666;
+    }
+    
+    .section {
+      margin-bottom: 24px;
+    }
+    
+    .section-title {
+      font-size: 12px;
+      font-weight: bold;
+      color: #000000;
+      margin-bottom: 16px;
+    }
+    
+    .section-content {
+      margin-left: 10px;
+    }
+    
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 12px;
+    }
+    
+    .row-label {
+      font-size: 11px;
+      color: #000000;
+      flex: 1;
+    }
+    
+    .row-value {
+      font-size: 14px;
+      font-weight: bold;
+      color: #000000;
+      text-align: right;
+    }
+    
+    .row-subvalue {
+      font-size: 9px;
+      color: #999999;
+      text-align: right;
+      margin-top: 2px;
+    }
+    
+    .sub-row {
+      margin-left: 10px;
+      margin-bottom: 10px;
+    }
+    
+    .sub-row-label {
+      font-size: 9px;
+      color: #000000;
+      flex: 1;
+    }
+    
+    .sub-row-value {
+      font-size: 9px;
+      color: #000000;
+      text-align: right;
+    }
+    
+    .sub-row-percentage {
+      font-size: 8px;
+      color: #999999;
+      margin-left: 8px;
+    }
+    
+    .profit-section {
+      margin-top: 20px;
+    }
+    
+    .profit-positive {
+      color: #10b981;
+    }
+    
+    .profit-negative {
+      color: #ef4444;
+    }
+    
+    .footer {
+      margin-top: 40px;
+      text-align: center;
+      font-size: 8px;
+      color: #999999;
+      border-top: 1px solid #e5e7eb;
+      padding-top: 16px;
+    }
+    
+    @media print {
+      body {
+        padding: 20px;
+      }
+      
+      .section {
+        page-break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <div class="header">
+    <h1>KESIMPULAN KAS</h1>
+    <div class="branch-name">{{branchName}}</div>
+    <div class="period">{{dateRange}}</div>
+    <div class="working-days">{{workingDays}} Hari Kerja</div>
+  </div>
+  
+  <!-- Omzet Section -->
+  <div class="section">
+    <div class="section-title">OMZET</div>
+    <div class="section-content">
+      <div class="row">
+        <div class="row-label">Total Omzet</div>
+        <div>
+          <div class="row-value">{{totalOmzet}}</div>
+        </div>
+      </div>
+      
+      {{#if salesChannels}}
+      {{#if salesChannels.length}}
+      <div style="margin-top: 12px;">
+        <div style="font-size: 10px; color: #666666; margin-bottom: 8px;">Sales Channel</div>
+        {{#each salesChannels}}
+        <div class="sub-row">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span class="sub-row-label">{{this.name}}</span>
+            <div style="display: flex; align-items: center;">
+              <span class="sub-row-value">{{this.amount}}</span>
+              <span class="sub-row-percentage">{{this.percentage}}</span>
+            </div>
+          </div>
+        </div>
+        {{/each}}
+      </div>
+      {{/if}}
+      {{/if}}
+    </div>
+  </div>
+  
+  <!-- Pengeluaran Section -->
+  <div class="section">
+    <div class="section-title">PENGELUARAN</div>
+    <div class="section-content">
+      <div class="row">
+        <div class="row-label">Total Pengeluaran</div>
+        <div>
+          <div class="row-value">{{totalPengeluaran}}</div>
+          <div class="row-subvalue">{{pengeluaranPercentage}}</div>
+        </div>
+      </div>
+      
+      {{#if expenseBreakdown}}
+      {{#if expenseBreakdown.length}}
+      <div style="margin-top: 12px;">
+        {{#each expenseBreakdown}}
+        <div class="sub-row">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span class="sub-row-label">{{this.name}}</span>
+            <div style="display: flex; align-items: center;">
+              <span class="sub-row-value">{{this.amount}}</span>
+              <span class="sub-row-percentage">{{this.percentage}}</span>
+            </div>
+          </div>
+        </div>
+        {{/each}}
+      </div>
+      {{/if}}
+      {{/if}}
+    </div>
+  </div>
+  
+  <!-- Profit Section -->
+  <div class="section profit-section">
+    <div class="section-title">PROFIT</div>
+    <div class="section-content">
+      <div class="row">
+        <div class="row-label"></div>
+        <div>
+          <div class="row-value {{profitClass}}">{{profit}}</div>
+          <div class="row-subvalue">{{profitPercentage}}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Bagi Hasil Section -->
+  <div class="section">
+    <div class="section-title">BAGI HASIL</div>
+    <div class="section-content">
+      <div class="row">
+        <div class="row-label">Pusat (30%)</div>
+        <div class="row-value">{{bagiHasilPusat}}</div>
+      </div>
+      <div class="row" style="margin-top: 12px;">
+        <div class="row-label">Mitra (70%)</div>
+        <div class="row-value">{{bagiHasilMitra}}</div>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Footer -->
+  <div class="footer">
+    Dibuat pada: {{createdAt}}
+  </div>
+</body>
+</html>
+

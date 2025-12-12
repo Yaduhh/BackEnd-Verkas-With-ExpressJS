@@ -53,10 +53,10 @@ router.delete('/:id/force', authorize('admin', 'owner'), hardDelete);
 // Request edit (admin only)
 router.post('/:id/request-edit', requestEdit);
 
-// Approve edit request (owner only)
+// Approve edit request (owner and co-owner only)
 router.post('/:id/approve-edit', approveEdit);
 
-// Reject edit request (owner only)
+// Reject edit request (owner and co-owner only)
 router.post('/:id/reject-edit', rejectEdit);
 
 module.exports = router;

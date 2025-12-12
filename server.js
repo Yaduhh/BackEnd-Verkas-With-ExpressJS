@@ -15,12 +15,18 @@ const branchRoutes = require('./routes/branchRoutes');
 const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const teamRoutes = require('./routes/teamRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
+const logRoutes = require('./routes/logRoutes');
+const masterRoutes = require('./routes/masterRoutes');
 
 // Initialize app
 const app = express();
 
 // Security middleware
-app.use(helmet());
+// Allow loading images/files from /uploads in cross-origin (web client)
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }, // allow images/files to be loaded by other origins
+}));
 
 // CORS configuration - Allow multiple origins for development
 const allowedOrigins = [
@@ -82,9 +88,29 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve uploaded files statically
+// Serve uploaded files statically with explicit CORS headers
 const path = require('path');
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+const uploadsStatic = express.static(path.join(__dirname, 'uploads'), {
+  setHeaders: (res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    // avoid stale cached response without CORS headers
+    res.setHeader('Cache-Control', 'no-store');
+  }
+});
+
+app.use(
+  '/uploads',
+  cors({ origin: true, credentials: false }),
+  (req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Headers', '*');
+    res.header('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    next();
+  },
+  uploadsStatic
+);
 
 // Health check
 app.get('/health', (req, res) => {
@@ -106,6 +132,9 @@ app.use('/api/branches', branchRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/teams', teamRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/logs', logRoutes);
+app.use('/api/master', masterRoutes);
 
 // 404 handler
 app.use(notFound);

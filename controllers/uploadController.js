@@ -11,14 +11,12 @@ const compressImage = async (filePath, originalSize) => {
     const dir = path.dirname(filePath);
     
     // Determine output format
-    let outputFormat = 'jpeg';
-    let outputExt = '.jpg';
+    // Force webp for most cases; keep png if alpha channel
+    let outputFormat = 'webp';
+    let outputExt = '.webp';
     
     const metadata = await sharp(filePath).metadata();
-    if (metadata.format === 'webp') {
-      outputFormat = 'webp';
-      outputExt = '.webp';
-    } else if (metadata.format === 'png' && metadata.hasAlpha) {
+    if (metadata.format === 'png' && metadata.hasAlpha) {
       outputFormat = 'png';
       outputExt = '.png';
     }
@@ -28,9 +26,9 @@ const compressImage = async (filePath, originalSize) => {
     const isFormatChanged = outputExt !== ext;
     
     let sharpInstance = sharp(filePath);
-    
-    // Resize if image is too large (max width 1920px, maintain aspect ratio)
-    sharpInstance = sharpInstance.resize(1920, null, {
+
+    // Resize if image is too large (max width 1280px, maintain aspect ratio)
+    sharpInstance = sharpInstance.resize(1280, null, {
       withoutEnlargement: true,
       fit: 'inside'
     });
@@ -39,7 +37,7 @@ const compressImage = async (filePath, originalSize) => {
     if (outputFormat === 'jpeg') {
       await sharpInstance
         .jpeg({ 
-          quality: 85,
+          quality: 70,
           progressive: true,
           mozjpeg: true
         })
@@ -47,14 +45,14 @@ const compressImage = async (filePath, originalSize) => {
     } else if (outputFormat === 'webp') {
       await sharpInstance
         .webp({ 
-          quality: 85,
+          quality: 70,
           effort: 4
         })
         .toFile(tempPath);
     } else if (outputFormat === 'png') {
       await sharpInstance
         .png({ 
-          quality: 85,
+          quality: 70,
           compressionLevel: 9
         })
         .toFile(tempPath);

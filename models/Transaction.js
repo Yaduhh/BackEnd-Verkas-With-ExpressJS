@@ -63,12 +63,12 @@ class Transaction {
     }
     
     if (startDate) {
-      sql += ' AND t.transaction_date >= ?';
+      sql += ' AND DATE(t.transaction_date) >= ?';
       params.push(startDate);
     }
     
     if (endDate) {
-      sql += ' AND t.transaction_date <= ?';
+      sql += ' AND DATE(t.transaction_date) <= ?';
       params.push(endDate);
     }
     
@@ -134,12 +134,12 @@ class Transaction {
     }
     
     if (startDate) {
-      sql += ' AND t.transaction_date >= ?';
+      sql += ' AND DATE(t.transaction_date) >= ?';
       params.push(startDate);
     }
     
     if (endDate) {
-      sql += ' AND t.transaction_date <= ?';
+      sql += ' AND DATE(t.transaction_date) <= ?';
       params.push(endDate);
     }
     
@@ -267,7 +267,7 @@ class Transaction {
   }
   
   // Get edit requests (for owner: pending requests, for admin: their own requests)
-  static async getEditRequests({ userId, branchId, userRole, status = 'pending' }) {
+  static async getEditRequests({ userId, branchId, userRole, status }) {
     let sql = `
       SELECT t.*, c.name as category_name, c.type as category_type,
              u.name as requester_name, u.email as requester_email
@@ -353,12 +353,12 @@ class Transaction {
     }
     
     if (startDate) {
-      sql += ' AND transaction_date >= ?';
+      sql += ' AND DATE(transaction_date) >= ?';
       params.push(startDate);
     }
     
     if (endDate) {
-      sql += ' AND transaction_date <= ?';
+      sql += ' AND DATE(transaction_date) <= ?';
       params.push(endDate);
     }
     

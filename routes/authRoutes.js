@@ -35,7 +35,7 @@ router.post('/logout', authenticate, logout);
 
 // Protected routes
 router.get('/me', authenticate, getMe);
-router.get('/admins', authenticate, authorize('owner'), getAdmins);
+router.get('/admins', authenticate, authorize('owner', 'co-owner'), getAdmins);
 
 module.exports = router;
 

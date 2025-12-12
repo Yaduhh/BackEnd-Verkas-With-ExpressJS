@@ -16,17 +16,23 @@ const getPlans = async (req, res, next) => {
   }
 };
 
-// Get current subscription (owner only)
+// Get current subscription (owner and co-owner)
 const getCurrent = async (req, res, next) => {
   try {
-    if (req.user.role !== 'owner') {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Only owners can view subscriptions'
+        message: 'Only owners and co-owners can view subscriptions'
       });
     }
     
-    const subscription = await Subscription.getActiveSubscription(req.userId);
+    // For co-owner, get subscription from the owner who created them
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner' && req.user.created_by) {
+      targetUserId = req.user.created_by;
+    }
+    
+    const subscription = await Subscription.getActiveSubscription(targetUserId);
     
     if (!subscription) {
       // Return free plan info
@@ -56,14 +62,20 @@ const getCurrent = async (req, res, next) => {
 // Get subscription history
 const getHistory = async (req, res, next) => {
   try {
-    if (req.user.role !== 'owner') {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Only owners can view subscription history'
+        message: 'Only owners and co-owners can view subscription history'
       });
     }
     
-    const subscriptions = await Subscription.findByUserId(req.userId);
+    // For co-owner, get subscriptions from the owner who created them
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner' && req.user.created_by) {
+      targetUserId = req.user.created_by;
+    }
+    
+    const subscriptions = await Subscription.findByUserId(targetUserId);
     
     res.json({
       success: true,
@@ -74,14 +86,20 @@ const getHistory = async (req, res, next) => {
   }
 };
 
-// Create subscription (owner only)
+// Create subscription (owner and co-owner)
 const create = async (req, res, next) => {
   try {
-    if (req.user.role !== 'owner') {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Only owners can create subscriptions'
+        message: 'Only owners and co-owners can create subscriptions'
       });
+    }
+    
+    // For co-owner, create subscription for the owner who created them
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner' && req.user.created_by) {
+      targetUserId = req.user.created_by;
     }
     
     const { plan_id, billing_period } = req.body;
@@ -110,7 +128,7 @@ const create = async (req, res, next) => {
     }
     
     // Check if user already has active subscription
-    const existing = await Subscription.getActiveSubscription(req.userId);
+    const existing = await Subscription.getActiveSubscription(targetUserId);
     if (existing) {
       return res.status(400).json({
         success: false,
@@ -130,7 +148,7 @@ const create = async (req, res, next) => {
     
     // Create subscription (status: pending)
     const subscription = await Subscription.create({
-      userId: req.userId,
+      userId: targetUserId,
       planId: plan_id,
       billingPeriod: billing_period,
       startDate: startDate.toISOString().split('T')[0],
@@ -162,20 +180,26 @@ const create = async (req, res, next) => {
   }
 };
 
-// Cancel subscription (owner only)
+// Cancel subscription (owner and co-owner)
 const cancel = async (req, res, next) => {
   try {
-    if (req.user.role !== 'owner') {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Only owners can cancel subscriptions'
+        message: 'Only owners and co-owners can cancel subscriptions'
       });
     }
     
     const { id } = req.params;
     const subscription = await Subscription.findById(id);
     
-    if (!subscription || subscription.user_id !== req.userId) {
+    // For co-owner, check subscription belongs to the owner who created them
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner' && req.user.created_by) {
+      targetUserId = req.user.created_by;
+    }
+    
+    if (!subscription || subscription.user_id !== targetUserId) {
       return res.status(404).json({
         success: false,
         message: 'Subscription not found'
@@ -197,17 +221,23 @@ const cancel = async (req, res, next) => {
 // Get payments for subscription
 const getPayments = async (req, res, next) => {
   try {
-    if (req.user.role !== 'owner') {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Only owners can view payments'
+        message: 'Only owners and co-owners can view payments'
       });
     }
     
     const { id } = req.params;
     const subscription = await Subscription.findById(id);
     
-    if (!subscription || subscription.user_id !== req.userId) {
+    // For co-owner, check subscription belongs to the owner who created them
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner' && req.user.created_by) {
+      targetUserId = req.user.created_by;
+    }
+    
+    if (!subscription || subscription.user_id !== targetUserId) {
       return res.status(404).json({
         success: false,
         message: 'Subscription not found'

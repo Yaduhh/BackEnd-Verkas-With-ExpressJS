@@ -47,7 +47,8 @@ function formatSection(date, items, transactions) {
         category: item.category_name,
         note: item.note || '',
         amount: item.type === 'expense' ? -parseFloat(item.amount) : parseFloat(item.amount),
-        lampiran: lampiran // Always array or null
+        lampiran: lampiran, // Always array or null
+        edit_accepted: item.edit_accepted !== undefined && item.edit_accepted !== null ? parseInt(item.edit_accepted) : 0 // 0 = default, 1 = pending, 2 = approved, 3 = rejected
       };
     })
   };

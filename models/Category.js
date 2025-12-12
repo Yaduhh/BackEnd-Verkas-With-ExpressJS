@@ -36,7 +36,7 @@ class Category {
     
     // Branch ID filter (if provided, show branch-specific + global categories)
     // If isFolder filter is used, only show exact branch match (no NULL)
-    if (branchId !== undefined) {
+    if (branchId !== undefined && branchId !== null) {
       if (isFolder !== undefined) {
         // For folder filter, only show exact branch match
         sql += ' AND c.branch_id = ?';
@@ -48,10 +48,11 @@ class Category {
       }
     }
     
-    if (userId !== undefined) {
-      sql += ' AND (c.user_id = ? OR c.is_default = true)';
-      params.push(userId);
-    }
+    // Jangan filter berdasarkan userId untuk kategori - kategori berdasarkan branch
+    // if (userId !== undefined) {
+    //   sql += ' AND (c.user_id = ? OR c.is_default = true)';
+    //   params.push(userId);
+    // }
     
     // Filter by is_folder (if provided)
     if (isFolder !== undefined) {

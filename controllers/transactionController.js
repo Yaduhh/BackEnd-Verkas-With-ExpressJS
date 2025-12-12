@@ -1,5 +1,6 @@
 const Transaction = require('../models/Transaction');
 const Category = require('../models/Category');
+const LogService = require('../services/logService');
 
 // Get all transactions
 const getAll = async (req, res, next) => {
@@ -26,8 +27,9 @@ const getAll = async (req, res, next) => {
       });
     }
     
+    // JANGAN filter berdasarkan userId karena admin bisa input transaksi
+    // Hanya filter berdasarkan branchId untuk mengambil semua transaksi di branch tersebut
     const transactions = await Transaction.findAll({
-      userId: req.userId,
       branchId: parseInt(branchId),
       type,
       category,
@@ -41,7 +43,6 @@ const getAll = async (req, res, next) => {
     });
     
     const total = await Transaction.count({
-      userId: req.userId,
       branchId: parseInt(branchId),
       type,
       category,
@@ -164,6 +165,26 @@ const create = async (req, res, next) => {
       lampiran: lampiranValue
     });
     
+    // Log activity (non-blocking, fire and forget)
+    LogService.logActivity({
+      userId: req.userId,
+      action: 'create_transaction',
+      entityType: 'transaction',
+      entityId: transaction.id,
+      branchId: parseInt(branchId),
+      newValues: {
+        type: transaction.type,
+        amount: transaction.amount,
+        category: category,
+        note: transaction.note,
+        date: transaction.transaction_date,
+      },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+      requestMethod: req.method,
+      requestPath: req.path,
+    });
+    
     res.status(201).json({
       success: true,
       message: 'Transaction created successfully',
@@ -238,17 +259,85 @@ const update = async (req, res, next) => {
     
     const transaction = await Transaction.update(id, updateData);
     
+    // Calculate changes for logging
+    const changes = {};
+    if (amount !== undefined && existing.amount !== parseFloat(amount)) {
+      changes.amount = { old: existing.amount, new: parseFloat(amount) };
+    }
+    if (category !== undefined && existing.category_name !== category) {
+      changes.category = { old: existing.category_name, new: category };
+    }
+    if (note !== undefined && existing.note !== note) {
+      changes.note = { old: existing.note, new: note };
+    }
+    if (date !== undefined && existing.transaction_date !== date) {
+      changes.date = { old: existing.transaction_date, new: date };
+    }
+    
     // If admin successfully updated, clear edit request (edit_accepted = 2)
     if (req.user.role === 'admin' && existing.edit_accepted === 2) {
       await Transaction.clearEditRequest(id);
       // Reload transaction to get updated data
       const updatedTransaction = await Transaction.findById(id);
+      
+      // Log activity
+      LogService.logActivity({
+        userId: req.userId,
+        action: 'update_transaction',
+        entityType: 'transaction',
+        entityId: transaction.id,
+        branchId: existing.branch_id,
+        oldValues: {
+          amount: existing.amount,
+          category: existing.category_name,
+          note: existing.note,
+          date: existing.transaction_date,
+        },
+        newValues: {
+          amount: updatedTransaction.amount,
+          category: updatedTransaction.category_name,
+          note: updatedTransaction.note,
+          date: updatedTransaction.transaction_date,
+        },
+        changes: Object.keys(changes).length > 0 ? changes : null,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+        requestMethod: req.method,
+        requestPath: req.path,
+      });
+      
       return res.json({
         success: true,
         message: 'Transaction updated successfully',
         data: { transaction: updatedTransaction }
       });
     }
+    
+    // Log activity
+    LogService.logActivity({
+      userId: req.userId,
+      action: 'update_transaction',
+      entityType: 'transaction',
+      entityId: transaction.id,
+      branchId: existing.branch_id,
+      oldValues: {
+        amount: existing.amount,
+        category: existing.category_name,
+        note: existing.note,
+        date: existing.transaction_date,
+      },
+      newValues: {
+        amount: transaction.amount,
+        category: transaction.category_name,
+        note: transaction.note,
+        date: transaction.transaction_date,
+      },
+      changes: Object.keys(changes).length > 0 ? changes : null,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+      requestMethod: req.method,
+      requestPath: req.path,
+    });
     
     res.json({
       success: true,
@@ -285,6 +374,26 @@ const softDelete = async (req, res, next) => {
     
     const result = await Transaction.softDelete(id);
     
+    // Log activity
+    LogService.logActivity({
+      userId: req.userId,
+      action: 'delete_transaction',
+      entityType: 'transaction',
+      entityId: existing.id,
+      branchId: existing.branch_id,
+      oldValues: {
+        type: existing.type,
+        amount: existing.amount,
+        category: existing.category_name,
+        note: existing.note,
+        date: existing.transaction_date,
+      },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+      requestMethod: req.method,
+      requestPath: req.path,
+    });
+    
     res.json({
       success: true,
       message: 'Transaction deleted successfully',
@@ -318,12 +427,35 @@ const restore = async (req, res, next) => {
       });
     }
     
-    const transaction = await Transaction.restore(id);
+    const result = await Transaction.restore(id);
+    
+    // Reload transaction to get updated data
+    const restoredTransaction = await Transaction.findById(id);
+    
+    // Log activity
+    LogService.logActivity({
+      userId: req.userId,
+      action: 'restore_transaction',
+      entityType: 'transaction',
+      entityId: existing.id,
+      branchId: existing.branch_id,
+      newValues: {
+        type: restoredTransaction.type,
+        amount: restoredTransaction.amount,
+        category: restoredTransaction.category_name,
+        note: restoredTransaction.note,
+        date: restoredTransaction.transaction_date,
+      },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+      requestMethod: req.method,
+      requestPath: req.path,
+    });
     
     res.json({
       success: true,
       message: 'Transaction restored successfully',
-      data: { transaction }
+      data: { transaction: result }
     });
   } catch (error) {
     next(error);
@@ -415,6 +547,51 @@ const requestEdit = async (req, res, next) => {
     
     const transaction = await Transaction.requestEdit(id, req.userId, reason.trim());
     
+    // Send notification to branch owner + team owners (if branch belongs to a team)
+    try {
+      const expoPushService = require('../services/expoPushService');
+      const Branch = require('../models/Branch');
+      const OwnerTeam = require('../models/OwnerTeam');
+      const branch = await Branch.findById(existing.branch_id);
+      const User = require('../models/User');
+      const admin = await User.findById(req.userId);
+
+      // Target users:
+      // - Jika branch punya team: kirim ke owner-owner aktif di team
+      // - Jika tidak punya team: kirim ke owner branch
+      const targetUserIds = new Set();
+      if (branch?.team_id) {
+        const members = await OwnerTeam.getMembers(branch.team_id);
+        members
+          .filter((m) => m.role === 'owner' && m.status === 'active')
+          .forEach((m) => targetUserIds.add(m.user_id));
+      } else if (branch?.owner_id) {
+        targetUserIds.add(branch.owner_id);
+      }
+      
+      if (targetUserIds.size > 0) {
+        const amount = new Intl.NumberFormat('id-ID', {
+          style: 'currency',
+          currency: 'IDR',
+          minimumFractionDigits: 0
+        }).format(existing.amount);
+        
+        await expoPushService.sendToUsers([...targetUserIds], {
+          title: 'Edit Request',
+          body: `Admin ${admin?.name || admin?.email || 'Admin'} meminta izin untuk mengedit transaksi ${amount}`,
+          data: {
+            screen: 'requests',
+            transactionId: parseInt(id),
+            branchId: existing.branch_id,
+            type: 'edit_request',
+          },
+        });
+      }
+    } catch (notifError) {
+      // Don't fail the request if notification fails
+      console.error('Error sending notification:', notifError);
+    }
+    
     res.json({
       success: true,
       message: 'Permintaan edit berhasil diajukan. Menunggu persetujuan owner.',
@@ -425,16 +602,16 @@ const requestEdit = async (req, res, next) => {
   }
 };
 
-// Approve edit request (owner only)
+// Approve edit request (owner and co-owner only)
 const approveEdit = async (req, res, next) => {
   try {
     const { id } = req.params;
     
-    // Only owner can approve
-    if (req.user.role !== 'owner') {
+    // Only owner and co-owner can approve
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Hanya owner yang dapat menyetujui permintaan edit'
+        message: 'Hanya owner dan co-owner yang dapat menyetujui permintaan edit'
       });
     }
     
@@ -467,6 +644,51 @@ const approveEdit = async (req, res, next) => {
     
     const transaction = await Transaction.approveEdit(id);
     
+    // Log activity
+    LogService.logActivity({
+      userId: req.userId,
+      action: 'approve_edit_transaction',
+      entityType: 'transaction',
+      entityId: existing.id,
+      branchId: existing.branch_id,
+      newValues: {
+        edit_accepted: 2,
+        edit_requested_by: existing.edit_requested_by,
+      },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+      requestMethod: req.method,
+      requestPath: req.path,
+    });
+    
+    // Send notification to admin who requested edit
+    try {
+      const expoPushService = require('../services/expoPushService');
+      const User = require('../models/User');
+      
+      if (existing.edit_requested_by) {
+        const amount = new Intl.NumberFormat('id-ID', {
+          style: 'currency',
+          currency: 'IDR',
+          minimumFractionDigits: 0
+        }).format(existing.amount);
+        
+        await expoPushService.sendToUser(existing.edit_requested_by, {
+          title: 'Edit Request Disetujui',
+          body: `Permintaan edit untuk transaksi ${amount} telah disetujui`,
+          data: {
+            screen: 'transaction_detail',
+            transactionId: parseInt(id),
+            branchId: existing.branch_id,
+            type: 'edit_approved',
+          },
+        });
+      }
+    } catch (notifError) {
+      // Don't fail the request if notification fails
+      console.error('Error sending notification:', notifError);
+    }
+    
     res.json({
       success: true,
       message: 'Permintaan edit berhasil disetujui',
@@ -477,16 +699,16 @@ const approveEdit = async (req, res, next) => {
   }
 };
 
-// Reject edit request (owner only)
+// Reject edit request (owner and co-owner only)
 const rejectEdit = async (req, res, next) => {
   try {
     const { id } = req.params;
     
-    // Only owner can reject
-    if (req.user.role !== 'owner') {
+    // Only owner and co-owner can reject
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Hanya owner yang dapat menolak permintaan edit'
+        message: 'Hanya owner dan co-owner yang dapat menolak permintaan edit'
       });
     }
     
@@ -519,6 +741,50 @@ const rejectEdit = async (req, res, next) => {
     
     const transaction = await Transaction.rejectEdit(id);
     
+    // Log activity
+    LogService.logActivity({
+      userId: req.userId,
+      action: 'reject_edit_transaction',
+      entityType: 'transaction',
+      entityId: existing.id,
+      branchId: existing.branch_id,
+      newValues: {
+        edit_accepted: 3,
+        edit_requested_by: existing.edit_requested_by,
+      },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+      requestMethod: req.method,
+      requestPath: req.path,
+    });
+    
+    // Send notification to admin who requested edit
+    try {
+      const expoPushService = require('../services/expoPushService');
+      
+      if (existing.edit_requested_by) {
+        const amount = new Intl.NumberFormat('id-ID', {
+          style: 'currency',
+          currency: 'IDR',
+          minimumFractionDigits: 0
+        }).format(existing.amount);
+        
+        await expoPushService.sendToUser(existing.edit_requested_by, {
+          title: 'Edit Request Ditolak',
+          body: `Permintaan edit untuk transaksi ${amount} telah ditolak`,
+          data: {
+            screen: 'transaction_detail',
+            transactionId: parseInt(id),
+            branchId: existing.branch_id,
+            type: 'edit_rejected',
+          },
+        });
+      }
+    } catch (notifError) {
+      // Don't fail the request if notification fails
+      console.error('Error sending notification:', notifError);
+    }
+    
     res.json({
       success: true,
       message: 'Permintaan edit ditolak',
@@ -532,16 +798,16 @@ const rejectEdit = async (req, res, next) => {
 // Get edit requests
 const getEditRequests = async (req, res, next) => {
   try {
-    const { status = 'pending' } = req.query;
+    const { status } = req.query; // Don't default to 'pending', allow 'all' or undefined
     
     // Get branch_id from header or middleware (optional for owner - can get from all branches)
     let branchId = req.branchId || req.headers['x-branch-id'];
     
-    // For owner: if no branchId provided, get from all branches owned by user
+    // For owner and co-owner: if no branchId provided, get from all branches they have access to
     // For admin: if no branchId, get from their assigned branch(es)
     if (!branchId) {
-      if (req.user.role === 'owner') {
-        // Owner: get from all their branches (pass null to getEditRequests)
+      if (req.user.role === 'owner' || req.user.role === 'co-owner') {
+        // Owner and co-owner: get from all their accessible branches (pass null to getEditRequests)
         branchId = null;
       } else if (req.user.role === 'admin') {
         // Admin: get from their assigned branch(es)
@@ -566,11 +832,14 @@ const getEditRequests = async (req, res, next) => {
       branchId = parseInt(branchId);
     }
     
+    // If status is 'all' or undefined, pass undefined to get all statuses
+    const statusFilter = status === 'all' || !status ? undefined : status;
+    
     const transactions = await Transaction.getEditRequests({
       userId: req.userId,
       branchId: branchId,
       userRole: req.user.role,
-      status
+      status: statusFilter
     });
     
     res.json({

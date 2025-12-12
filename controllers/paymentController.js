@@ -3,17 +3,23 @@ const Subscription = require('../models/Subscription');
 const xenditService = require('../services/xenditService');
 const config = require('../config/config');
 
-// Get pending payments (owner only)
+// Get pending payments (owner and co-owner)
 const getPending = async (req, res, next) => {
   try {
-    if (req.user.role !== 'owner') {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Only owners can view payments'
+        message: 'Only owners and co-owners can view payments'
       });
     }
     
-    const payments = await Payment.getPendingPayments(req.userId);
+    // For co-owner, get payments from the owner who created them
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner' && req.user.created_by) {
+      targetUserId = req.user.created_by;
+    }
+    
+    const payments = await Payment.getPendingPayments(targetUserId);
     
     res.json({
       success: true,
@@ -24,17 +30,23 @@ const getPending = async (req, res, next) => {
   }
 };
 
-// Get all payments (owner only)
+// Get all payments (owner and co-owner)
 const getAll = async (req, res, next) => {
   try {
-    if (req.user.role !== 'owner') {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Only owners can view payments'
+        message: 'Only owners and co-owners can view payments'
       });
     }
     
-    const payments = await Payment.getAllPayments(req.userId);
+    // For co-owner, get payments from the owner who created them
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner' && req.user.created_by) {
+      targetUserId = req.user.created_by;
+    }
+    
+    const payments = await Payment.getAllPayments(targetUserId);
     
     res.json({
       success: true,
@@ -126,8 +138,60 @@ const verify = async (req, res, next) => {
         
         await Subscription.updateEndDate(payment.subscription_id, endDate.toISOString().split('T')[0]);
       }
+      
+      // Send notification to user
+      try {
+        const expoPushService = require('../services/expoPushService');
+        const SubscriptionPlan = require('../models/SubscriptionPlan');
+        const plan = await SubscriptionPlan.findById(subscription.plan_id);
+        
+        const amount = new Intl.NumberFormat('id-ID', {
+          style: 'currency',
+          currency: 'IDR',
+          minimumFractionDigits: 0
+        }).format(payment.amount);
+        
+        await expoPushService.sendToUser(subscription.user_id, {
+          title: 'Pembayaran Berhasil',
+          body: `Pembayaran subscription ${plan?.name || 'Plan'} sebesar ${amount} telah berhasil`,
+          data: {
+            screen: 'subscription',
+            paymentId: payment.id,
+            subscriptionId: subscription.id,
+            type: 'payment_success',
+          },
+        });
+      } catch (notifError) {
+        // Don't fail the request if notification fails
+        console.error('Error sending notification:', notifError);
+      }
     } else if (status === 'failed') {
       await Payment.updateStatus(payment.id, 'failed', transaction_id);
+      
+      // Send notification to user
+      try {
+        const expoPushService = require('../services/expoPushService');
+        const subscription = await Subscription.findById(payment.subscription_id);
+        
+        const amount = new Intl.NumberFormat('id-ID', {
+          style: 'currency',
+          currency: 'IDR',
+          minimumFractionDigits: 0
+        }).format(payment.amount);
+        
+        await expoPushService.sendToUser(subscription.user_id, {
+          title: 'Pembayaran Gagal',
+          body: `Pembayaran sebesar ${amount} gagal. Silakan coba lagi.`,
+          data: {
+            screen: 'payment',
+            paymentId: payment.id,
+            type: 'payment_failed',
+          },
+        });
+      } catch (notifError) {
+        // Don't fail the request if notification fails
+        console.error('Error sending notification:', notifError);
+      }
     }
     
     res.json({
@@ -142,10 +206,10 @@ const verify = async (req, res, next) => {
 // Update payment status manually (for manual payment confirmation)
 const updateStatus = async (req, res, next) => {
   try {
-    if (req.user.role !== 'owner') {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Only owners can update payment status'
+        message: 'Only owners and co-owners can update payment status'
       });
     }
     

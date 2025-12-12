@@ -40,3 +40,7 @@ exports/
 *.csv
 *.pdf
 
+# Uploads folder
+uploads/
+
+

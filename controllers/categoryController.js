@@ -1,4 +1,5 @@
 const Category = require('../models/Category');
+const LogService = require('../services/logService');
 
 // Get all categories
 const getAll = async (req, res, next) => {
@@ -13,9 +14,11 @@ const getAll = async (req, res, next) => {
     // Get branchId from header or middleware (optional for categories)
     const branchId = req.branchId || req.headers['x-branch-id'] || null;
     
+    // Untuk kategori, filter berdasarkan branch_id, bukan user_id
+    // Admin dan Owner harus melihat kategori sesuai branch yang dipilih
     const categories = await Category.findAll({
       type,
-      userId: req.userId,
+      userId: undefined, // Jangan filter by userId, karena kategori berdasarkan branch
       branchId: branchId ? parseInt(branchId) : null,
       includeDeleted: include_deleted === 'true',
       onlyDeleted: only_deleted === 'true',
@@ -85,6 +88,26 @@ const create = async (req, res, next) => {
       isFolder: is_folder === 1 || is_folder === true
     });
     
+    // Log activity (only if branchId exists, because activity logs require branchId)
+    if (branchId) {
+      LogService.logActivity({
+        userId: req.userId,
+        action: 'create_category',
+        entityType: 'category',
+        entityId: category.id,
+        branchId: parseInt(branchId),
+        newValues: {
+          name: category.name,
+          type: category.type,
+          is_folder: category.is_folder,
+        },
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+        requestMethod: req.method,
+        requestPath: req.path,
+      }).catch(err => console.error('Error logging activity:', err));
+    }
+    
     res.status(201).json({
       success: true,
       message: 'Category created successfully',
@@ -129,6 +152,41 @@ const update = async (req, res, next) => {
       is_folder: is_folder !== undefined ? (is_folder === 1 || is_folder === true) : undefined
     });
     
+    // Calculate changes
+    const changes = {};
+    if (name !== undefined && existing.name !== name) {
+      changes.name = { old: existing.name, new: name };
+    }
+    if (type !== undefined && existing.type !== type) {
+      changes.type = { old: existing.type, new: type };
+    }
+    
+    // Log activity (only if branchId exists)
+    if (existing.branch_id) {
+      LogService.logActivity({
+        userId: req.userId,
+        action: 'update_category',
+        entityType: 'category',
+        entityId: category.id,
+        branchId: existing.branch_id,
+        oldValues: {
+          name: existing.name,
+          type: existing.type,
+          is_folder: existing.is_folder,
+        },
+        newValues: {
+          name: category.name,
+          type: category.type,
+          is_folder: category.is_folder,
+        },
+        changes: Object.keys(changes).length > 0 ? changes : null,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+        requestMethod: req.method,
+        requestPath: req.path,
+      }).catch(err => console.error('Error logging activity:', err));
+    }
+    
     res.json({
       success: true,
       message: 'Category updated successfully',
@@ -162,6 +220,27 @@ const softDelete = async (req, res, next) => {
     
     try {
       const result = await Category.softDelete(id);
+      
+      // Log activity (only if branchId exists)
+      if (existing.branch_id) {
+        LogService.logActivity({
+          userId: req.userId,
+          action: 'delete_category',
+          entityType: 'category',
+          entityId: existing.id,
+          branchId: existing.branch_id,
+          oldValues: {
+            name: existing.name,
+            type: existing.type,
+            is_folder: existing.is_folder,
+          },
+          ipAddress: req.ip,
+          userAgent: req.get('user-agent'),
+          requestMethod: req.method,
+          requestPath: req.path,
+        }).catch(err => console.error('Error logging activity:', err));
+      }
+      
       res.json({
         success: true,
         message: 'Category deleted successfully',

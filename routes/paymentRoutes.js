@@ -20,11 +20,11 @@ router.post('/xendit/webhook', xenditWebhook);
 // All other routes require authentication
 router.use(authenticate);
 
-// Get pending payments (owner only)
-router.get('/pending', authorize('owner'), getPending);
+// Get pending payments (owner and co-owner)
+router.get('/pending', authorize('owner', 'co-owner'), getPending);
 
-// Get all payments (owner only)
-router.get('/all', authorize('owner'), getAll);
+// Get all payments (owner and co-owner)
+router.get('/all', authorize('owner', 'co-owner'), getAll);
 
 // Get payment by ID
 router.get('/:id', getById);
@@ -37,11 +37,11 @@ router.post('/:id/xendit/verify', verifyXenditPayment);
 // Verify payment (webhook - no auth required, but should verify signature)
 router.post('/verify', verify);
 
-// Update payment status manually (owner only)
-router.put('/:id/status', authorize('owner'), updateStatus);
+// Update payment status manually (owner and co-owner)
+router.put('/:id/status', authorize('owner', 'co-owner'), updateStatus);
 
-// Simulate Xendit payment (for testing/development only - owner only)
-router.post('/:paymentId/xendit/simulate', authorize('owner'), simulateXenditPayment);
+// Simulate Xendit payment (for testing/development only - owner and co-owner)
+router.post('/:paymentId/xendit/simulate', authorize('owner', 'co-owner'), simulateXenditPayment);
 
 module.exports = router;
 

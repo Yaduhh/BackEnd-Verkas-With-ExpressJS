@@ -61,12 +61,14 @@ const getCurrent = async (req, res, next) => {
         success: true,
         data: { branch }
       });
-    } else {
-      // For owner, get from header or return first branch
+    } else if (req.user.role === 'owner' || req.user.role === 'co-owner') {
+      // For owner and co-owner, get from header or return first branch
       const branchId = req.headers['x-branch-id'];
       if (branchId) {
         const branch = await Branch.findById(branchId);
-        if (branch && branch.owner_id === req.userId) {
+        // Check access using userHasAccess for both owner and co-owner
+        const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
+        if (branch && hasAccess) {
           return res.json({
             success: true,
             data: { branch }
@@ -74,8 +76,8 @@ const getCurrent = async (req, res, next) => {
         }
       }
       
-      // Return first branch
-      const branches = await Branch.findByOwner(req.userId);
+      // Return first branch from user access
+      const branches = await Branch.findByUserAccess(req.userId, req.user.role);
       if (branches.length > 0) {
         return res.json({
           success: true,
@@ -88,18 +90,23 @@ const getCurrent = async (req, res, next) => {
         message: 'No branches found'
       });
     }
+    
+    return res.status(404).json({
+      success: false,
+      message: 'No branches found'
+    });
   } catch (error) {
     next(error);
   }
 };
 
-// Create branch (owner only)
+// Create branch (owner and co-owner only)
 const create = async (req, res, next) => {
   try {
-    if (req.user.role !== 'owner') {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Only owners can create branches'
+        message: 'Only owners and co-owners can create branches'
       });
     }
     
@@ -153,12 +160,47 @@ const create = async (req, res, next) => {
       }
     }
     
+    // Auto-determine team_id if not provided
+    let finalTeamId = team_id || null;
+    if (!finalTeamId) {
+      const OwnerTeam = require('../models/OwnerTeam');
+      
+      // Get current user to check created_by
+      const currentUser = await User.findById(req.userId);
+      
+      if (req.user.role === 'co-owner' && currentUser && currentUser.created_by) {
+        // Co-owner: always use team from the owner who created them
+        const creatorTeams = await OwnerTeam.findByUserId(currentUser.created_by);
+        if (creatorTeams.length > 0) {
+          finalTeamId = creatorTeams[0].id;
+        }
+      } else if (req.user.role === 'owner') {
+        // Owner: use their own team
+        const ownerTeams = await OwnerTeam.findByUserId(req.userId);
+        if (ownerTeams.length > 0) {
+          finalTeamId = ownerTeams[0].id;
+        }
+      } else if (currentUser && currentUser.created_by) {
+        // Fallback: User was created by another owner, use their team
+        const creatorTeams = await OwnerTeam.findByUserId(currentUser.created_by);
+        if (creatorTeams.length > 0) {
+          finalTeamId = creatorTeams[0].id;
+        }
+      } else {
+        // Last resort: use user's own team
+        const userTeams = await OwnerTeam.findByUserId(req.userId);
+        if (userTeams.length > 0) {
+          finalTeamId = userTeams[0].id;
+        }
+      }
+    }
+    
     const branch = await Branch.create({
       name,
       address,
       phone,
       ownerId: req.userId,
-      teamId: team_id || null,
+      teamId: finalTeamId,
       picId: picIds.length > 0 ? picIds[0] : null // For backward compatibility
     });
     
@@ -193,8 +235,9 @@ const update = async (req, res, next) => {
       });
     }
     
-    // Check ownership
-    if (branch.owner_id !== req.userId) {
+    // Check access (owner and co-owner)
+    const hasAccess = await Branch.userHasAccess(req.userId, parseInt(id), req.user.role);
+    if (!hasAccess) {
       return res.status(403).json({
         success: false,
         message: 'Access denied'
@@ -253,8 +296,9 @@ const assignPIC = async (req, res, next) => {
       });
     }
     
-    // Check ownership
-    if (branch.owner_id !== req.userId) {
+    // Check access (owner and co-owner)
+    const hasAccess = await Branch.userHasAccess(req.userId, parseInt(id), req.user.role);
+    if (!hasAccess) {
       return res.status(403).json({
         success: false,
         message: 'Access denied'
@@ -293,8 +337,9 @@ const removePIC = async (req, res, next) => {
       });
     }
     
-    // Check ownership
-    if (branch.owner_id !== req.userId) {
+    // Check access (owner and co-owner)
+    const hasAccess = await Branch.userHasAccess(req.userId, parseInt(id), req.user.role);
+    if (!hasAccess) {
       return res.status(403).json({
         success: false,
         message: 'Access denied'
@@ -334,8 +379,9 @@ const setPICs = async (req, res, next) => {
       });
     }
     
-    // Check ownership
-    if (branch.owner_id !== req.userId) {
+    // Check access (owner and co-owner)
+    const hasAccess = await Branch.userHasAccess(req.userId, parseInt(id), req.user.role);
+    if (!hasAccess) {
       return res.status(403).json({
         success: false,
         message: 'Access denied'
@@ -373,8 +419,9 @@ const softDelete = async (req, res, next) => {
       });
     }
     
-    // Check ownership
-    if (branch.owner_id !== req.userId) {
+    // Check access (owner and co-owner)
+    const hasAccess = await Branch.userHasAccess(req.userId, parseInt(id), req.user.role);
+    if (!hasAccess) {
       return res.status(403).json({
         success: false,
         message: 'Access denied'
@@ -399,10 +446,19 @@ const restore = async (req, res, next) => {
     const { id } = req.params;
     
     const branch = await Branch.findById(id);
-    if (!branch || branch.owner_id !== req.userId) {
+    if (!branch) {
       return res.status(404).json({
         success: false,
         message: 'Branch not found'
+      });
+    }
+    
+    // Check access (owner and co-owner)
+    const hasAccess = await Branch.userHasAccess(req.userId, parseInt(id), req.user.role);
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
       });
     }
     
@@ -421,7 +477,7 @@ const restore = async (req, res, next) => {
 // Check branch limit
 const checkLimit = async (req, res, next) => {
   try {
-    if (req.user.role !== 'owner') {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.json({
         success: true,
         data: {
@@ -431,11 +487,17 @@ const checkLimit = async (req, res, next) => {
       });
     }
     
-    const canCreate = await Branch.canCreateBranch(req.userId, req.user.role);
+    // For co-owner, use subscription from the owner who created them
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner' && req.user.created_by) {
+      targetUserId = req.user.created_by;
+    }
+    
+    const canCreate = await Branch.canCreateBranch(targetUserId, req.user.role);
     const count = await Branch.countUserBranches(req.userId, req.user.role);
     
     const Subscription = require('../models/Subscription');
-    const subscription = await Subscription.getActiveSubscription(req.userId);
+    const subscription = await Subscription.getActiveSubscription(targetUserId);
     
     let maxBranches = 1; // Free plan default
     if (subscription) {

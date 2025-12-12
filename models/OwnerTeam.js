@@ -30,7 +30,8 @@ class OwnerTeam {
   // Get team members
   static async getMembers(teamId) {
     return await query(
-      `SELECT tm.*, u.name, u.email, u.role
+      `SELECT tm.id, tm.team_id, tm.user_id, tm.role as team_role, tm.status, tm.invited_by, tm.joined_at, tm.created_at,
+              u.name as user_name, u.email as user_email, u.role as user_role
        FROM owner_team_members tm
        JOIN users u ON tm.user_id = u.id
        WHERE tm.team_id = ? AND tm.status = 'active'
@@ -106,7 +107,24 @@ class OwnerTeam {
       [teamId, userId, 'active']
     );
     
-    return members.length > 0;
+    if (members.length > 0) return true;
+    
+    // Co-owner: check if team belongs to owner who created them
+    const User = require('./User');
+    const user = await User.findById(userId);
+    if (user && user.role === 'co-owner' && user.created_by) {
+      // Check if primary owner is the creator
+      if (team.primary_owner_id === user.created_by) return true;
+      
+      // Check if creator is a member of this team
+      const creatorMembers = await query(
+        'SELECT * FROM owner_team_members WHERE team_id = ? AND user_id = ? AND status = ?',
+        [teamId, user.created_by, 'active']
+      );
+      if (creatorMembers.length > 0) return true;
+    }
+    
+    return false;
   }
   
   // Update team

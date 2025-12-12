@@ -47,9 +47,9 @@ const exportReport = async (req, res, next) => {
       });
     }
     
-    // Build query params
+    // Build query params - JANGAN filter berdasarkan userId karena admin bisa input transaksi
+    // Hanya filter berdasarkan branchId untuk mengambil semua transaksi di branch tersebut
     const queryParams = {
-      userId,
       branchId: parseInt(branchId),
       startDate: from_date,
       endDate: to_date,
@@ -60,7 +60,7 @@ const exportReport = async (req, res, next) => {
       queryParams.category = category;
     }
     
-    // Get transactions
+    // Get transactions - semua transaksi di branch, bukan hanya yang dibuat oleh user tertentu
     const transactions = await Transaction.findAll({
       ...queryParams,
       sort: 'terbaru',
@@ -88,7 +88,26 @@ const exportReport = async (req, res, next) => {
         filepath = await exportToCSV(transactions, filename);
         break;
       case 'PDF':
-        filepath = await exportToPDF(transactions, filename, title);
+        // For PDF, use BukuKas format (calculate report first)
+        const allCategories = await Category.findAll({ branchId: parseInt(branchId) });
+        const daysInMonth = from_date && to_date 
+          ? Math.ceil((new Date(to_date) - new Date(from_date)) / (1000 * 60 * 60 * 24)) + 1
+          : 30;
+        const reportData = calculateReport(transactions, allCategories, daysInMonth);
+        
+        // Get branch info
+        const Branch = require('../models/Branch');
+        const branch = await Branch.findById(parseInt(branchId));
+        const branchName = branch ? branch.name : 'Branch';
+        
+        // Create date object for selected period
+        const selectedDate = from_date ? new Date(from_date) : new Date();
+        
+        filepath = await exportBukuKasToPDF(reportData, filename, branchName, selectedDate, {
+          fromDate: from_date,
+          toDate: to_date,
+          title: title,
+        });
         break;
       default:
         return res.status(400).json({
@@ -155,7 +174,7 @@ function calculateReport(transactions, categories, workingDays) {
   const expenseBreakdown = Object.entries(expenseByCategory).map(([name, amount]) => ({
     name,
     amount,
-    percentage: totalOmzet > 0 ? (amount / totalOmzet) * 100 : 0,
+    percentage: totalPengeluaran > 0 ? (amount / totalPengeluaran) * 100 : 0,
   })).sort((a, b) => b.amount - a.amount);
 
   // Calculate Profit
@@ -254,9 +273,8 @@ const exportBukuKas = async (req, res, next) => {
     const daysInMonth = new Date(selectedYear, selectedMonth + 1, 0).getDate();
     const endDate = `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
     
-    // Get transactions
+    // Get transactions - semua transaksi di branch, bukan hanya yang dibuat oleh user tertentu
     const transactions = await Transaction.findAll({
-      userId,
       branchId: parseInt(branchId),
       startDate,
       endDate,
