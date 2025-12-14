@@ -71,13 +71,15 @@ class Transaction {
     }
     
     if (startDate && typeof startDate === 'string' && startDate.trim() !== '') {
-      sql += ' AND DATE(t.transaction_date) >= ?';
-      params.push(startDate.trim());
+      // Use simple date comparison without CAST for better compatibility
+      sql += ' AND t.transaction_date >= ?';
+      params.push(startDate.trim() + ' 00:00:00');
     }
     
     if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
-      sql += ' AND DATE(t.transaction_date) <= ?';
-      params.push(endDate.trim());
+      // Use simple date comparison without CAST for better compatibility
+      sql += ' AND t.transaction_date <= ?';
+      params.push(endDate.trim() + ' 23:59:59');
     }
     
     // Sort
@@ -94,8 +96,9 @@ class Transaction {
     const finalPage = (!isNaN(validPage) && validPage > 0) ? validPage : 1;
     const offset = (finalPage - 1) * finalLimit;
     
-    sql += ' LIMIT ? OFFSET ?';
-    params.push(finalLimit, offset);
+    // Use string interpolation for LIMIT/OFFSET since they're validated integers
+    // This avoids issues with prepared statements and LIMIT/OFFSET in some MySQL versions
+    sql += ` LIMIT ${finalLimit} OFFSET ${offset}`;
     
     // Debug: Log SQL and params to help diagnose issues
     console.log('=== Transaction.findAll Debug ===');
@@ -105,15 +108,6 @@ class Transaction {
     console.log('Placeholders in SQL:', (sql.match(/\?/g) || []).length);
     console.log('Params types:', params.map(p => typeof p));
     console.log('Params values:', params);
-    
-    // Filter out any undefined or null values and ensure all params are valid
-    const validParams = params.map((param, index) => {
-      if (param === undefined || param === null) {
-        console.error(`⚠️  Parameter at index ${index} is ${param}`);
-        return null;
-      }
-      return param;
-    }).filter(p => p !== null);
     
     // Ensure params array matches number of placeholders
     const placeholderCount = (sql.match(/\?/g) || []).length;
