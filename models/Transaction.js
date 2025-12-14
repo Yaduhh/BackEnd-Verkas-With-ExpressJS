@@ -36,13 +36,15 @@ class Transaction {
     const params = [];
     
     // Branch ID is required for data isolation - ensure it's a valid integer
-    if (branchId !== undefined && branchId !== null) {
-      const validBranchId = parseInt(branchId);
-      if (!isNaN(validBranchId)) {
-        sql += ' AND t.branch_id = ?';
-        params.push(validBranchId);
-      }
+    if (branchId === undefined || branchId === null) {
+      throw new Error('Branch ID is required for Transaction.findAll');
     }
+    const validBranchId = parseInt(branchId);
+    if (isNaN(validBranchId) || validBranchId <= 0) {
+      throw new Error(`Invalid Branch ID: ${branchId}`);
+    }
+    sql += ' AND t.branch_id = ?';
+    params.push(validBranchId);
     
     if (userId !== undefined && userId !== null) {
       const validUserId = parseInt(userId);
@@ -96,21 +98,40 @@ class Transaction {
     params.push(finalLimit, offset);
     
     // Debug: Log SQL and params to help diagnose issues
-    // console.log('SQL:', sql);
-    // console.log('Params:', params);
-    // console.log('Params count:', params.length);
-    // console.log('Placeholders in SQL:', (sql.match(/\?/g) || []).length);
+    console.log('=== Transaction.findAll Debug ===');
+    console.log('SQL:', sql.replace(/\s+/g, ' ').trim());
+    console.log('Params:', JSON.stringify(params, null, 2));
+    console.log('Params count:', params.length);
+    console.log('Placeholders in SQL:', (sql.match(/\?/g) || []).length);
+    console.log('Params types:', params.map(p => typeof p));
+    console.log('Params values:', params);
+    
+    // Filter out any undefined or null values and ensure all params are valid
+    const validParams = params.map((param, index) => {
+      if (param === undefined || param === null) {
+        console.error(`⚠️  Parameter at index ${index} is ${param}`);
+        return null;
+      }
+      return param;
+    }).filter(p => p !== null);
     
     // Ensure params array matches number of placeholders
     const placeholderCount = (sql.match(/\?/g) || []).length;
     if (params.length !== placeholderCount) {
-      console.error('Parameter mismatch!', {
-        sql,
+      console.error('❌ Parameter mismatch!', {
+        sql: sql.replace(/\s+/g, ' ').trim(),
         params,
         paramsCount: params.length,
         placeholderCount
       });
       throw new Error(`Parameter count mismatch: ${params.length} params but ${placeholderCount} placeholders`);
+    }
+    
+    // Check for undefined/null values
+    const hasInvalidParams = params.some(p => p === undefined || p === null);
+    if (hasInvalidParams) {
+      console.error('❌ Invalid parameters detected!', params);
+      throw new Error('Invalid parameters: undefined or null values detected');
     }
     
     return await query(sql, params);
