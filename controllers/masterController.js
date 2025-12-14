@@ -4,6 +4,7 @@ const OwnerTeam = require('../models/OwnerTeam');
 const Transaction = require('../models/Transaction');
 const Category = require('../models/Category');
 const Subscription = require('../models/Subscription');
+const SubscriptionPlan = require('../models/SubscriptionPlan');
 const Payment = require('../models/Payment');
 const ActivityLog = require('../models/ActivityLog');
 const LogService = require('../services/logService');
@@ -1117,6 +1118,165 @@ const getAllSubscriptions = async (req, res, next) => {
   }
 };
 
+// Plans/Packages management
+const getAllPlans = async (req, res, next) => {
+  try {
+    const { is_active, page = 1, limit = 50 } = req.query;
+    
+    let sql = 'SELECT * FROM subscription_plans WHERE 1=1';
+    const params = [];
+    
+    if (is_active !== undefined) {
+      sql += ' AND is_active = ?';
+      params.push(is_active === 'true' || is_active === true);
+    }
+    
+    // Get total count
+    const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total');
+    const countResult = await query(countSql, params);
+    const total = parseInt(countResult[0].total);
+    
+    sql += ' ORDER BY price_monthly ASC, name ASC LIMIT ? OFFSET ?';
+    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+    
+    const plans = await query(sql, params);
+    
+    // Parse features if it's a string
+    const parsedPlans = plans.map(plan => {
+      if (plan && typeof plan.features === 'string') {
+        try {
+          plan.features = JSON.parse(plan.features);
+        } catch (e) {
+          // Keep as string if parsing fails
+        }
+      }
+      return plan;
+    });
+    
+    res.json({
+      success: true,
+      data: {
+        plans: parsedPlans,
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const createPlan = async (req, res, next) => {
+  try {
+    const { name, description, max_branches, price_monthly, price_yearly, features, is_active } = req.body;
+    
+    if (!name || !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Name is required'
+      });
+    }
+    
+    const plan = await SubscriptionPlan.create({
+      name: name.trim(),
+      description: description?.trim() || null,
+      maxBranches: max_branches ? parseInt(max_branches) : null,
+      priceMonthly: price_monthly ? parseFloat(price_monthly) : null,
+      priceYearly: price_yearly ? parseFloat(price_yearly) : null,
+      features: features || []
+    });
+    
+    // Update is_active if provided
+    if (is_active !== undefined) {
+      await SubscriptionPlan.update(plan.id, { isActive: is_active });
+      plan.is_active = is_active;
+    }
+    
+    // Parse features if it's a string
+    if (plan && typeof plan.features === 'string') {
+      try {
+        plan.features = JSON.parse(plan.features);
+      } catch (e) {
+        // Keep as string if parsing fails
+      }
+    }
+    
+    res.json({
+      success: true,
+      data: { plan }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const updatePlan = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { name, description, max_branches, price_monthly, price_yearly, features, is_active } = req.body;
+    
+    const plan = await SubscriptionPlan.findById(parseInt(id), true); // Include inactive
+    if (!plan) {
+      return res.status(404).json({
+        success: false,
+        message: 'Plan not found'
+      });
+    }
+    
+    const updateData = {};
+    if (name !== undefined) updateData.name = name.trim();
+    if (description !== undefined) updateData.description = description?.trim() || null;
+    if (max_branches !== undefined) updateData.maxBranches = max_branches ? parseInt(max_branches) : null;
+    if (price_monthly !== undefined) updateData.priceMonthly = price_monthly ? parseFloat(price_monthly) : null;
+    if (price_yearly !== undefined) updateData.priceYearly = price_yearly ? parseFloat(price_yearly) : null;
+    if (features !== undefined) updateData.features = features || [];
+    if (is_active !== undefined) updateData.isActive = is_active;
+    
+    const updatedPlan = await SubscriptionPlan.update(parseInt(id), updateData);
+    
+    // Parse features if it's a string
+    if (updatedPlan && typeof updatedPlan.features === 'string') {
+      try {
+        updatedPlan.features = JSON.parse(updatedPlan.features);
+      } catch (e) {
+        // Keep as string if parsing fails
+      }
+    }
+    
+    res.json({
+      success: true,
+      data: { plan: updatedPlan }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const deletePlan = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    
+    const plan = await SubscriptionPlan.findById(parseInt(id), true); // Include inactive
+    if (!plan) {
+      return res.status(404).json({
+        success: false,
+        message: 'Plan not found'
+      });
+    }
+    
+    // Soft delete by setting is_active to false
+    await SubscriptionPlan.update(parseInt(id), { isActive: false });
+    
+    res.json({
+      success: true,
+      message: 'Plan deleted successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getOverview,
   getAllUsers,
@@ -1132,5 +1292,9 @@ module.exports = {
   getAllActivityLogs,
   getAllSystemLogs,
   getAllPayments,
-  getAllSubscriptions
+  getAllSubscriptions,
+  getAllPlans,
+  createPlan,
+  updatePlan,
+  deletePlan
 };

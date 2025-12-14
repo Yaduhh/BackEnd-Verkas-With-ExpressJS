@@ -29,6 +29,10 @@ const getAll = async (req, res, next) => {
     
     // JANGAN filter berdasarkan userId karena admin bisa input transaksi
     // Hanya filter berdasarkan branchId untuk mengambil semua transaksi di branch tersebut
+    // Ensure page and limit are valid integers
+    const validPage = parseInt(page) || 1;
+    const validLimit = parseInt(limit) || 20;
+    
     const transactions = await Transaction.findAll({
       branchId: parseInt(branchId),
       type,
@@ -38,8 +42,8 @@ const getAll = async (req, res, next) => {
       sort,
       includeDeleted: include_deleted === 'true',
       onlyDeleted: only_deleted === 'true',
-      page: parseInt(page),
-      limit: parseInt(limit)
+      page: validPage,
+      limit: validLimit
     });
     
     const total = await Transaction.count({
@@ -57,10 +61,10 @@ const getAll = async (req, res, next) => {
       data: {
         transactions,
         pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
+          page: validPage,
+          limit: validLimit,
           total,
-          totalPages: Math.ceil(total / limit)
+          totalPages: Math.ceil(total / validLimit)
         }
       }
     });

@@ -79,10 +79,12 @@ class Transaction {
       sql += ' ORDER BY t.transaction_date ASC, t.created_at ASC';
     }
     
-    // Pagination
-    const offset = (page - 1) * limit;
+    // Pagination - ensure limit and offset are valid integers
+    const validLimit = parseInt(limit) || 20;
+    const validPage = parseInt(page) || 1;
+    const offset = (validPage - 1) * validLimit;
     sql += ' LIMIT ? OFFSET ?';
-    params.push(limit, offset);
+    params.push(validLimit, offset);
     
     return await query(sql, params);
   }

@@ -15,7 +15,11 @@ const {
   getAllActivityLogs,
   getAllSystemLogs,
   getAllPayments,
-  getAllSubscriptions
+  getAllSubscriptions,
+  getAllPlans,
+  createPlan,
+  updatePlan,
+  deletePlan
 } = require('../controllers/masterController');
 const { authenticate, authorize } = require('../middleware/auth');
 
@@ -53,5 +57,11 @@ router.get('/system-logs', getAllSystemLogs);
 // Payments & Subscriptions
 router.get('/payments', getAllPayments);
 router.get('/subscriptions', getAllSubscriptions);
+
+// Plans/Packages management
+router.get('/plans', getAllPlans);
+router.post('/plans', createPlan);
+router.put('/plans/:id', updatePlan);
+router.delete('/plans/:id', deletePlan);
 
 module.exports = router;

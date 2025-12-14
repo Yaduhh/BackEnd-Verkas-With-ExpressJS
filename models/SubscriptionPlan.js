@@ -1,12 +1,13 @@
 const { query } = require('../config/database');
 
 class SubscriptionPlan {
-  // Find by ID
-  static async findById(id) {
-    const results = await query(
-      'SELECT * FROM subscription_plans WHERE id = ? AND is_active = true',
-      [id]
-    );
+  // Find by ID (include inactive)
+  static async findById(id, includeInactive = true) {
+    let sql = 'SELECT * FROM subscription_plans WHERE id = ?';
+    if (!includeInactive) {
+      sql += ' AND is_active = true';
+    }
+    const results = await query(sql, [id]);
     return results[0] || null;
   }
   
