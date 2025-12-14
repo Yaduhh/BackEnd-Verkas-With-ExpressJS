@@ -35,15 +35,21 @@ class Transaction {
     `;
     const params = [];
     
-    // Branch ID is required for data isolation
-    if (branchId) {
-      sql += ' AND t.branch_id = ?';
-      params.push(branchId);
+    // Branch ID is required for data isolation - ensure it's a valid integer
+    if (branchId !== undefined && branchId !== null) {
+      const validBranchId = parseInt(branchId);
+      if (!isNaN(validBranchId)) {
+        sql += ' AND t.branch_id = ?';
+        params.push(validBranchId);
+      }
     }
     
-    if (userId) {
-      sql += ' AND t.user_id = ?';
-      params.push(userId);
+    if (userId !== undefined && userId !== null) {
+      const validUserId = parseInt(userId);
+      if (!isNaN(validUserId)) {
+        sql += ' AND t.user_id = ?';
+        params.push(validUserId);
+      }
     }
     
     if (!includeDeleted && !onlyDeleted) {
@@ -52,24 +58,24 @@ class Transaction {
       sql += ' AND t.status_deleted = true';
     }
     
-    if (type) {
+    if (type && typeof type === 'string' && type.trim() !== '') {
       sql += ' AND t.type = ?';
-      params.push(type);
+      params.push(type.trim());
     }
     
-    if (category) {
+    if (category && typeof category === 'string' && category.trim() !== '') {
       sql += ' AND c.name = ?';
-      params.push(category);
+      params.push(category.trim());
     }
     
-    if (startDate) {
+    if (startDate && typeof startDate === 'string' && startDate.trim() !== '') {
       sql += ' AND DATE(t.transaction_date) >= ?';
-      params.push(startDate);
+      params.push(startDate.trim());
     }
     
-    if (endDate) {
+    if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
       sql += ' AND DATE(t.transaction_date) <= ?';
-      params.push(endDate);
+      params.push(endDate.trim());
     }
     
     // Sort
@@ -80,11 +86,32 @@ class Transaction {
     }
     
     // Pagination - ensure limit and offset are valid integers
-    const validLimit = parseInt(limit) || 20;
-    const validPage = parseInt(page) || 1;
-    const offset = (validPage - 1) * validLimit;
+    const validLimit = parseInt(limit);
+    const validPage = parseInt(page);
+    const finalLimit = (!isNaN(validLimit) && validLimit > 0) ? validLimit : 20;
+    const finalPage = (!isNaN(validPage) && validPage > 0) ? validPage : 1;
+    const offset = (finalPage - 1) * finalLimit;
+    
     sql += ' LIMIT ? OFFSET ?';
-    params.push(validLimit, offset);
+    params.push(finalLimit, offset);
+    
+    // Debug: Log SQL and params to help diagnose issues
+    // console.log('SQL:', sql);
+    // console.log('Params:', params);
+    // console.log('Params count:', params.length);
+    // console.log('Placeholders in SQL:', (sql.match(/\?/g) || []).length);
+    
+    // Ensure params array matches number of placeholders
+    const placeholderCount = (sql.match(/\?/g) || []).length;
+    if (params.length !== placeholderCount) {
+      console.error('Parameter mismatch!', {
+        sql,
+        params,
+        paramsCount: params.length,
+        placeholderCount
+      });
+      throw new Error(`Parameter count mismatch: ${params.length} params but ${placeholderCount} placeholders`);
+    }
     
     return await query(sql, params);
   }

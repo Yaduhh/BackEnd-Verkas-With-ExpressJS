@@ -30,20 +30,31 @@ const getAll = async (req, res, next) => {
     // JANGAN filter berdasarkan userId karena admin bisa input transaksi
     // Hanya filter berdasarkan branchId untuk mengambil semua transaksi di branch tersebut
     // Ensure page and limit are valid integers
-    const validPage = parseInt(page) || 1;
-    const validLimit = parseInt(limit) || 20;
+    const validPage = parseInt(page);
+    const validLimit = parseInt(limit);
+    const finalPage = (!isNaN(validPage) && validPage > 0) ? validPage : 1;
+    const finalLimit = (!isNaN(validLimit) && validLimit > 0) ? validLimit : 20;
+    
+    // Ensure branchId is valid integer
+    const validBranchId = parseInt(branchId);
+    if (isNaN(validBranchId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid Branch ID. Please provide a valid X-Branch-Id header.'
+      });
+    }
     
     const transactions = await Transaction.findAll({
-      branchId: parseInt(branchId),
-      type,
-      category,
-      startDate: start_date,
-      endDate: end_date,
-      sort,
+      branchId: validBranchId,
+      type: type || undefined,
+      category: category || undefined,
+      startDate: start_date || undefined,
+      endDate: end_date || undefined,
+      sort: sort || 'terbaru',
       includeDeleted: include_deleted === 'true',
       onlyDeleted: only_deleted === 'true',
-      page: validPage,
-      limit: validLimit
+      page: finalPage,
+      limit: finalLimit
     });
     
     const total = await Transaction.count({
