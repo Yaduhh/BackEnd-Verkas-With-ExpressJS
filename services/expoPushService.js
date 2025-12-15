@@ -80,11 +80,17 @@ class ExpoPushService {
         return { success: false, message: 'No valid tokens', sent: 0 };
       }
       
-      console.log(`📤 Sending notification to user ${userId}: "${title}" - ${validTokens.length}/${tokens.length} valid device(s)`);
+      console.log('═══════════════════════════════════════════════════════════');
+      console.log(`📤 [BACKEND] 📤 EXPO SERVICE: Sending notification to user ${userId}`);
+      console.log(`📊 [BACKEND] Title: "${title}"`);
+      console.log(`📊 [BACKEND] Valid tokens: ${validTokens.length}/${tokens.length}`);
+      console.log(`📊 [BACKEND] Service: Expo Push Notification Service (exp.host)`);
+      console.log(`📊 [BACKEND] Token format: ExponentPushToken[...]`);
+      console.log('═══════════════════════════════════════════════════════════');
       
       // Check if Expo access token is set (important for production)
       if (!process.env.EXPO_ACCESS_TOKEN && process.env.NODE_ENV === 'production') {
-        console.warn('⚠️ EXPO_ACCESS_TOKEN not set in production! This may cause notification delivery issues.');
+        console.warn('⚠️ [BACKEND] EXPO_ACCESS_TOKEN not set in production! This may cause notification delivery issues.');
       }
 
       // Prepare messages

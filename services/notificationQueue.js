@@ -155,19 +155,40 @@ class NotificationQueue {
   async sendToUserWithAutoDetect(userId, notification) {
     const DeviceToken = require('../models/DeviceToken');
     
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('📤 [BACKEND] 📤 SENDING NOTIFICATION TO USER:', userId);
+    console.log('═══════════════════════════════════════════════════════════');
+    
     // Get all active tokens for user
     const tokens = await DeviceToken.findActiveByUserId(userId);
     
     if (tokens.length === 0) {
+      console.log('❌ [BACKEND] No device tokens found for user', userId);
       return { success: false, message: 'No device tokens', sent: 0 };
     }
+
+    console.log(`📊 [BACKEND] Found ${tokens.length} device token(s) for user ${userId}`);
 
     // Check token formats
     const expoTokens = tokens.filter(t => expoPushService.isValidToken(t.device_token));
     const fcmTokens = tokens.filter(t => fcmService.isValidToken(t.device_token));
 
+    console.log(`📊 [BACKEND] Token Analysis:`);
+    console.log(`   - Expo tokens: ${expoTokens.length}`);
+    console.log(`   - FCM tokens: ${fcmTokens.length}`);
+    
+    if (expoTokens.length > 0) {
+      console.log(`   - Sample Expo token: ${expoTokens[0].device_token.substring(0, 40)}...`);
+    }
+    if (fcmTokens.length > 0) {
+      console.log(`   - Sample FCM token: ${fcmTokens[0].device_token.substring(0, 40)}...`);
+    }
+
     // If all tokens are Expo format, use Expo service
     if (expoTokens.length === tokens.length && expoTokens.length > 0) {
+      console.log('🔥 [BACKEND] 🔥 USING EXPO SERVICE (all tokens are Expo format)');
+      console.log('📊 [BACKEND] Will send via: Expo Push Notification Service (exp.host)');
+      console.log('═══════════════════════════════════════════════════════════');
       return await expoPushService.sendToUser(userId, notification);
     }
     
@@ -175,9 +196,14 @@ class NotificationQueue {
     if (fcmTokens.length === tokens.length && fcmTokens.length > 0) {
       if (!fcmService.initialized) {
         // FCM not initialized, fallback to Expo
-        console.warn('⚠️ FCM service not initialized, falling back to Expo');
+        console.warn('⚠️ [BACKEND] FCM service not initialized, falling back to Expo');
+        console.log('🔥 [BACKEND] 🔥 USING EXPO SERVICE (FCM not available)');
+        console.log('═══════════════════════════════════════════════════════════');
         return await expoPushService.sendToUser(userId, notification);
       }
+      console.log('🔥 [BACKEND] 🔥 USING FCM SERVICE (all tokens are FCM format)');
+      console.log('📊 [BACKEND] Will send via: Firebase Cloud Messaging (FCM)');
+      console.log('═══════════════════════════════════════════════════════════');
       return await fcmService.sendToUser(userId, notification);
     }
 

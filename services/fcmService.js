@@ -114,7 +114,13 @@ class FCMService {
         return { success: false, message: 'No valid tokens', sent: 0 };
       }
       
-      console.log(`📤 Sending FCM notification to user ${userId}: "${title}" - ${validTokens.length}/${tokens.length} valid device(s)`);
+      console.log('═══════════════════════════════════════════════════════════');
+      console.log(`📤 [BACKEND] 📤 FCM SERVICE: Sending notification to user ${userId}`);
+      console.log(`📊 [BACKEND] Title: "${title}"`);
+      console.log(`📊 [BACKEND] Valid tokens: ${validTokens.length}/${tokens.length}`);
+      console.log(`📊 [BACKEND] Service: Firebase Cloud Messaging (FCM)`);
+      console.log(`📊 [BACKEND] Token format: Direct FCM token (no Expo wrapper)`);
+      console.log('═══════════════════════════════════════════════════════════');
 
       // Prepare FCM message
       const message = {
