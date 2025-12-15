@@ -22,7 +22,9 @@ class ExpoPushService {
       const tokens = await DeviceToken.findActiveByUserId(userId);
       
       if (tokens.length === 0) {
-        console.log(`No device tokens found for user ${userId}`);
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`📱 No device tokens found for user ${userId}`);
+        }
         return { success: false, message: 'No device tokens', sent: 0 };
       }
 
@@ -32,8 +34,14 @@ class ExpoPushService {
         .filter(token => this.isValidToken(token));
 
       if (validTokens.length === 0) {
-        console.log(`No valid Expo push tokens found for user ${userId}`);
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`📱 No valid Expo push tokens found for user ${userId}`);
+        }
         return { success: false, message: 'No valid tokens', sent: 0 };
+      }
+      
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`📤 Sending notification to user ${userId}: ${title} - ${validTokens.length} device(s)`);
       }
 
       // Prepare messages
@@ -50,26 +58,91 @@ class ExpoPushService {
         },
       }));
 
-      // Send notifications in chunks
+      // Send notifications in chunks with retry mechanism
       const chunks = this.expo.chunkPushNotifications(messages);
       const tickets = [];
       let sentCount = 0;
 
       for (const chunk of chunks) {
-        try {
-          const ticketChunk = await this.expo.sendPushNotificationsAsync(chunk);
-          tickets.push(...ticketChunk);
-          
-          // Count successful sends
-          ticketChunk.forEach(ticket => {
-            if (ticket.status === 'ok') {
-              sentCount++;
-            } else {
-              console.error('Error sending notification:', ticket);
+        let retries = 3;
+        let lastError = null;
+        let attemptNumber = 0;
+        
+        while (retries > 0) {
+          attemptNumber++;
+          try {
+            if (attemptNumber > 1) {
+              console.log(`🔄 Attempt ${attemptNumber} to send push notification chunk...`);
             }
-          });
-        } catch (error) {
-          console.error('Error sending push notification chunk:', error);
+            const ticketChunk = await this.expo.sendPushNotificationsAsync(chunk);
+            tickets.push(...ticketChunk);
+            
+            // Count successful sends
+            ticketChunk.forEach(ticket => {
+              if (ticket.status === 'ok') {
+                sentCount++;
+              } else {
+                console.error('Error sending notification:', ticket);
+              }
+            });
+            
+            // Success, break retry loop
+            lastError = null;
+            break;
+          } catch (error) {
+            lastError = error;
+            retries--;
+            
+            // Check if it's a DNS/network error that might be temporary
+            const errorMessage = error.message || '';
+            const errorCode = error.code || '';
+            const errorErrno = error.errno || '';
+            
+            const isNetworkError = errorMessage.includes('getaddrinfo') || 
+                                  errorMessage.includes('EAI_AGAIN') ||
+                                  errorMessage.includes('ENOTFOUND') ||
+                                  errorMessage.includes('ETIMEDOUT') ||
+                                  errorMessage.includes('ECONNREFUSED') ||
+                                  errorCode === 'EAI_AGAIN' ||
+                                  errorCode === 'ENOTFOUND' ||
+                                  errorCode === 'ETIMEDOUT' ||
+                                  errorErrno === 'EAI_AGAIN' ||
+                                  errorErrno === 'ENOTFOUND' ||
+                                  errorErrno === 'ETIMEDOUT';
+            
+            if (isNetworkError && retries > 0) {
+              // Wait before retry (exponential backoff: 2s, 4s, 8s)
+              const waitTime = Math.pow(2, 4 - retries) * 1000;
+              console.warn(`⚠️ DNS/Network error (${errorCode || errorErrno || 'unknown'}). Retrying push notification in ${waitTime/1000}s... (${4 - retries}/3)`);
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+            } else {
+              // Not a network error or no retries left
+              console.error('❌ Error sending push notification chunk:', error);
+              if (error.message || error.code || error.errno) {
+                console.error('Error details:', {
+                  message: errorMessage,
+                  code: errorCode,
+                  errno: errorErrno,
+                  type: error.type || 'unknown'
+                });
+                
+                // Provide helpful troubleshooting info for DNS errors
+                if (isNetworkError) {
+                  console.error('\n🔍 TROUBLESHOOTING DNS Error:');
+                  console.error('1. Server tidak bisa resolve DNS untuk exp.host');
+                  console.error('2. Cek DNS configuration di server');
+                  console.error('3. Cek network connectivity dari server ke exp.host');
+                  console.error('4. Mungkin perlu configure DNS server atau use different DNS resolver\n');
+                }
+              }
+              break;
+            }
+          }
+        }
+        
+        // If all retries failed, log the error
+        if (lastError) {
+          console.error('Failed to send push notification chunk after 3 retries:', lastError);
         }
       }
 
@@ -82,8 +155,12 @@ class ExpoPushService {
         await DeviceToken.updateLastUsed(usedTokenIds);
       }
 
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`✅ Notification sent to user ${userId}: ${sentCount}/${validTokens.length} device(s)`);
+      }
+
       return { 
-        success: true, 
+        success: sentCount > 0, 
         sent: sentCount,
         total: validTokens.length,
         tickets 

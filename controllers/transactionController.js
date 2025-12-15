@@ -692,7 +692,7 @@ const requestEdit = async (req, res, next) => {
           minimumFractionDigits: 0
         }).format(existing.amount);
         
-        await expoPushService.sendToUsers([...targetUserIds], {
+        const notifResult = await expoPushService.sendToUsers([...targetUserIds], {
           title: 'Edit Request',
           body: `Admin ${admin?.name || admin?.email || 'Admin'} meminta izin untuk mengedit transaksi ${amount}`,
           data: {
@@ -702,10 +702,26 @@ const requestEdit = async (req, res, next) => {
             type: 'edit_request',
           },
         });
+        
+        if (notifResult.sent === 0) {
+          console.warn(`⚠️ No notifications sent to ${targetUserIds.size} user(s). Check device tokens.`);
+        } else {
+          console.log(`✅ Notification sent: ${notifResult.sent} device(s) notified`);
+        }
+      } else {
+        console.log(`⚠️ No target users found for notification (branch_id: ${existing.branch_id})`);
       }
     } catch (notifError) {
       // Don't fail the request if notification fails
-      console.error('Error sending notification:', notifError);
+      console.error('❌ Error sending notification:', notifError);
+      if (notifError.message) {
+        console.error('Error details:', {
+          message: notifError.message,
+          code: notifError.code,
+          errno: notifError.errno,
+          type: notifError.type
+        });
+      }
     }
     
     // Format lampiran paths to full URLs
