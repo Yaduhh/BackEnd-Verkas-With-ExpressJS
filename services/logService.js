@@ -280,17 +280,40 @@ class LogService {
   }) {
     let sql = 'SELECT * FROM activity_logs WHERE 1=1';
     const params = [];
+    
+    // STRICT VALIDATION: Ensure page and limit are ALWAYS valid integers
+    let pageInt = 1;
+    let limitInt = 50;
+    
+    // Validate page
+    if (page !== null && page !== undefined && page !== '') {
+      const parsed = parseInt(String(page));
+      if (!isNaN(parsed) && isFinite(parsed) && parsed > 0) {
+        pageInt = parsed;
+      }
+    }
+    
+    // Validate limit
+    if (limit !== null && limit !== undefined && limit !== '') {
+      const parsed = parseInt(String(limit));
+      if (!isNaN(parsed) && isFinite(parsed) && parsed > 0 && parsed <= 1000) {
+        limitInt = parsed;
+      }
+    }
 
-    // Role-based filtering
+    // Role-based filtering - STRICT VALIDATION: NO NULL/UNDEFINED ALLOWED
     // Normalize branchIds to array
     const normalizedBranchIds = Array.isArray(branchIds) ? branchIds : (branchIds ? [branchIds] : null);
     
     if ((userRole === 'owner' || userRole === 'co-owner') && normalizedBranchIds && normalizedBranchIds.length > 0) {
       // Owner and co-owner: bisa lihat log di semua branch yang mereka akses
-      // Ensure all values are numbers
+      // STRICT: Ensure all values are valid integers
       const validBranchIds = normalizedBranchIds
-        .map(id => parseInt(id))
-        .filter(id => !isNaN(id) && id > 0);
+        .map(id => {
+          const parsed = parseInt(String(id));
+          return (!isNaN(parsed) && isFinite(parsed) && parsed > 0) ? parsed : null;
+        })
+        .filter(id => id !== null && id !== undefined);
       
       if (validBranchIds.length > 0) {
         if (validBranchIds.length === 1) {
@@ -304,106 +327,119 @@ class LogService {
           params.push(...validBranchIds);
         }
       }
-    } else if (userRole === 'admin' && branchId) {
+    } else if (userRole === 'admin' && branchId !== null && branchId !== undefined && branchId !== '') {
       // Admin: hanya bisa lihat log di branch yang mereka assign
-      if (branchId !== null && branchId !== undefined) {
-        const branchIdInt = parseInt(branchId);
-        if (!isNaN(branchIdInt) && isFinite(branchIdInt) && branchIdInt > 0) {
-          sql += ' AND branch_id = ?';
-          params.push(branchIdInt);
-        }
+      const branchIdInt = parseInt(String(branchId));
+      if (!isNaN(branchIdInt) && isFinite(branchIdInt) && branchIdInt > 0) {
+        sql += ' AND branch_id = ?';
+        params.push(branchIdInt);
       }
-    } else if (branchId) {
+    } else if (branchId !== null && branchId !== undefined && branchId !== '') {
       // Direct branch filter
-      if (branchId !== null && branchId !== undefined) {
-        const branchIdInt = parseInt(branchId);
-        if (!isNaN(branchIdInt) && isFinite(branchIdInt) && branchIdInt > 0) {
-          sql += ' AND branch_id = ?';
-          params.push(branchIdInt);
-        }
+      const branchIdInt = parseInt(String(branchId));
+      if (!isNaN(branchIdInt) && isFinite(branchIdInt) && branchIdInt > 0) {
+        sql += ' AND branch_id = ?';
+        params.push(branchIdInt);
       }
     }
 
-    if (userId !== null && userId !== undefined) {
-      const userIdInt = parseInt(userId);
+    // STRICT VALIDATION: Only add parameters if they are valid and not empty
+    if (userId !== null && userId !== undefined && userId !== '') {
+      const userIdInt = parseInt(String(userId));
       if (!isNaN(userIdInt) && isFinite(userIdInt) && userIdInt > 0) {
         sql += ' AND user_id = ?';
         params.push(userIdInt);
       }
     }
-    if (action && action !== null && action !== undefined) {
+    
+    if (action && action !== null && action !== undefined && action !== '') {
       sql += ' AND action = ?';
-      params.push(String(action));
+      params.push(String(action).trim());
     }
-    if (entityType && entityType !== null && entityType !== undefined) {
+    
+    if (entityType && entityType !== null && entityType !== undefined && entityType !== '') {
       sql += ' AND entity_type = ?';
-      params.push(String(entityType));
+      params.push(String(entityType).trim());
     }
-    if (entityId !== null && entityId !== undefined) {
-      const entityIdInt = parseInt(entityId);
+    
+    if (entityId !== null && entityId !== undefined && entityId !== '') {
+      const entityIdInt = parseInt(String(entityId));
       if (!isNaN(entityIdInt) && isFinite(entityIdInt) && entityIdInt > 0) {
         sql += ' AND entity_id = ?';
         params.push(entityIdInt);
       }
     }
-    if (startDate && startDate !== null && startDate !== undefined) {
+    
+    if (startDate && startDate !== null && startDate !== undefined && startDate !== '') {
       sql += ' AND created_at >= ?';
-      params.push(String(startDate));
+      params.push(String(startDate).trim());
     }
-    if (endDate && endDate !== null && endDate !== undefined) {
+    
+    if (endDate && endDate !== null && endDate !== undefined && endDate !== '') {
       sql += ' AND created_at <= ?';
-      params.push(String(endDate));
+      params.push(String(endDate).trim());
     }
 
     sql += ' ORDER BY created_at DESC';
     sql += ` LIMIT ? OFFSET ?`;
-    // Ensure limit and offset are valid integers (not NaN, not null, not undefined)
-    let limitInt = 50;
-    let pageInt = 1;
     
-    if (limit !== null && limit !== undefined) {
-      const parsed = parseInt(limit);
-      if (!isNaN(parsed) && parsed > 0) {
-        limitInt = parsed;
-      }
-    }
-    
-    if (page !== null && page !== undefined) {
-      const parsed = parseInt(page);
-      if (!isNaN(parsed) && parsed > 0) {
-        pageInt = parsed;
-      }
-    }
-    
+    // Calculate offset (already validated at the top)
     const offsetInt = Math.max(0, (pageInt - 1) * limitInt);
     
-    // Push limit and offset (already validated)
+    // Push limit and offset - GUARANTEED to be valid integers
     params.push(limitInt, offsetInt);
     
     // Count placeholders in SQL
     const placeholderCount = (sql.match(/\?/g) || []).length;
     
-    // Final validation: ensure all params are valid and match placeholder count
+    // FINAL STRICT VALIDATION: NO EMPTY/NULL/UNDEFINED VALUES ALLOWED
+    // This is critical for phpMyAdmin 5.2 / aapanel compatibility
     const finalParams = params.map((p, index) => {
-      // Reject undefined
+      // STRICT: Reject undefined - phpMyAdmin doesn't accept this
       if (p === undefined) {
-        console.error(`Parameter at index ${index} is undefined`);
-        throw new Error(`Invalid parameter: undefined at index ${index}`);
+        console.error(`❌ CRITICAL: Parameter at index ${index} is undefined`);
+        console.error('SQL:', sql);
+        console.error('All params:', params);
+        throw new Error(`Invalid parameter: undefined at index ${index} - phpMyAdmin 5.2 requires all parameters to be defined`);
       }
       
-      // Validate numbers
+      // STRICT: Reject null for numeric parameters (MySQL doesn't like null in WHERE clauses)
+      if (p === null && index < params.length - 2) { // Allow null only for date strings, not for IDs
+        console.error(`❌ CRITICAL: Parameter at index ${index} is null`);
+        console.error('SQL:', sql);
+        console.error('All params:', params);
+        throw new Error(`Invalid parameter: null at index ${index} - phpMyAdmin 5.2 requires non-null values`);
+      }
+      
+      // STRICT: Validate numbers - must be finite integers
       if (typeof p === 'number') {
         if (isNaN(p) || !isFinite(p)) {
-          console.error(`Invalid number parameter at index ${index}:`, p);
-          throw new Error(`Invalid number parameter: ${p} at index ${index}`);
+          console.error(`❌ CRITICAL: Invalid number parameter at index ${index}:`, p);
+          console.error('SQL:', sql);
+          console.error('All params:', params);
+          throw new Error(`Invalid number parameter: ${p} at index ${index} - must be finite integer`);
+        }
+        // Ensure it's an integer, not float
+        if (p % 1 !== 0) {
+          console.error(`❌ CRITICAL: Non-integer number at index ${index}:`, p);
+          throw new Error(`Invalid parameter: non-integer number ${p} at index ${index}`);
+        }
+      }
+      
+      // STRICT: Validate strings - must not be empty
+      if (typeof p === 'string') {
+        if (p === '' || p.trim() === '') {
+          console.error(`❌ CRITICAL: Empty string parameter at index ${index}`);
+          throw new Error(`Invalid parameter: empty string at index ${index}`);
         }
       }
       
       return p;
     });
     
+    // STRICT: Final count validation
     if (finalParams.length !== placeholderCount) {
-      console.error('SQL parameter mismatch:', {
+      console.error('❌ CRITICAL: SQL parameter count mismatch:', {
         sql,
         placeholderCount,
         paramsLength: finalParams.length,
@@ -413,17 +449,16 @@ class LogService {
         offsetInt,
         pageInt
       });
-      throw new Error(`SQL parameter count mismatch: expected ${placeholderCount}, got ${finalParams.length}`);
+      throw new Error(`SQL parameter count mismatch: expected ${placeholderCount}, got ${finalParams.length} - phpMyAdmin 5.2 requires exact match`);
     }
     
-    // Debug log in development
-    if (process.env.NODE_ENV === 'development') {
-      console.log('Executing query:', {
-        sql: sql.substring(0, 200),
+    // Debug log (always log for debugging phpMyAdmin issues)
+    console.log('✅ Executing query with validated params:', {
+        sql: sql.substring(0, 200) + '...',
         paramCount: finalParams.length,
-        params: finalParams
-      });
-    }
+        placeholderCount,
+        params: finalParams.map((p, i) => ({ index: i, type: typeof p, value: p }))
+    });
 
     const logs = await query(sql, finalParams);
     

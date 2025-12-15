@@ -34,60 +34,87 @@ const getActivityLogs = async (req, res, next) => {
       const branchIds = accessibleBranches.map(b => b.id);
 
       if (branchIds.length === 0) {
+        // STRICT: Ensure page and limit are valid integers
+        let pageInt = 1;
+        let limitInt = 50;
+        
+        if (page && page !== '' && page !== null && page !== undefined) {
+          const parsed = parseInt(String(page));
+          if (!isNaN(parsed) && isFinite(parsed) && parsed > 0) {
+            pageInt = parsed;
+          }
+        }
+        
+        if (limit && limit !== '' && limit !== null && limit !== undefined) {
+          const parsed = parseInt(String(limit));
+          if (!isNaN(parsed) && isFinite(parsed) && parsed > 0 && parsed <= 1000) {
+            limitInt = parsed;
+          }
+        }
+        
         return res.json({
           success: true,
           data: {
             logs: [],
             total: 0,
-            page: parseInt(page),
-            limit: parseInt(limit),
+            page: pageInt,
+            limit: limitInt,
           },
         });
       }
 
       // Filter by specific branch if provided
-      // Ensure branchIds is always an array
-      const filterBranchIds = branch_id 
-        ? [parseInt(branch_id)].filter(id => !isNaN(id) && id > 0)
+      // STRICT: Ensure branchIds is always valid array of integers
+      const filterBranchIds = branch_id && branch_id !== '' && branch_id !== null && branch_id !== undefined
+        ? (() => {
+            const parsed = parseInt(String(branch_id));
+            return (!isNaN(parsed) && isFinite(parsed) && parsed > 0) ? [parsed] : null;
+          })()
         : (Array.isArray(branchIds) && branchIds.length > 0 
-            ? branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0) 
-            : null); // Use null instead of empty array
+            ? branchIds
+                .map(id => {
+                  const parsed = parseInt(String(id));
+                  return (!isNaN(parsed) && isFinite(parsed) && parsed > 0) ? parsed : null;
+                })
+                .filter(id => id !== null && id !== undefined)
+            : null);
 
-      // Ensure page and limit are valid integers (not NaN)
+      // STRICT: Ensure page and limit are valid integers (not NaN, not empty)
       let pageInt = 1;
       let limitInt = 50;
       
-      if (page) {
-        const parsed = parseInt(page);
-        if (!isNaN(parsed) && parsed > 0) {
+      if (page && page !== '' && page !== null && page !== undefined) {
+        const parsed = parseInt(String(page));
+        if (!isNaN(parsed) && isFinite(parsed) && parsed > 0) {
           pageInt = parsed;
         }
       }
       
-      if (limit) {
-        const parsed = parseInt(limit);
-        if (!isNaN(parsed) && parsed > 0) {
+      if (limit && limit !== '' && limit !== null && limit !== undefined) {
+        const parsed = parseInt(String(limit));
+        if (!isNaN(parsed) && isFinite(parsed) && parsed > 0 && parsed <= 1000) {
           limitInt = parsed;
         }
       }
 
+      // STRICT: Only pass valid, non-empty values
       logs = await LogService.getActivityLogs({
         userRole: 'owner',
         branchIds: filterBranchIds && filterBranchIds.length > 0 ? filterBranchIds : null,
-        userId: user_id ? (() => {
-          const parsed = parseInt(user_id);
-          return !isNaN(parsed) && parsed > 0 ? parsed : null;
+        userId: (user_id && user_id !== '' && user_id !== null && user_id !== undefined) ? (() => {
+          const parsed = parseInt(String(user_id));
+          return (!isNaN(parsed) && isFinite(parsed) && parsed > 0) ? parsed : null;
         })() : null,
-        action: action || null,
-        entityType: entity_type || null,
-        entityId: entity_id ? (() => {
-          const parsed = parseInt(entity_id);
-          return !isNaN(parsed) && parsed > 0 ? parsed : null;
+        action: (action && action !== '' && action !== null && action !== undefined) ? String(action).trim() : null,
+        entityType: (entity_type && entity_type !== '' && entity_type !== null && entity_type !== undefined) ? String(entity_type).trim() : null,
+        entityId: (entity_id && entity_id !== '' && entity_id !== null && entity_id !== undefined) ? (() => {
+          const parsed = parseInt(String(entity_id));
+          return (!isNaN(parsed) && isFinite(parsed) && parsed > 0) ? parsed : null;
         })() : null,
-        startDate: start_date || null,
-        endDate: end_date || null,
-        page: pageInt,
-        limit: limitInt,
+        startDate: (start_date && start_date !== '' && start_date !== null && start_date !== undefined) ? String(start_date).trim() : null,
+        endDate: (end_date && end_date !== '' && end_date !== null && end_date !== undefined) ? String(end_date).trim() : null,
+        page: pageInt, // GUARANTEED to be valid integer
+        limit: limitInt, // GUARANTEED to be valid integer
       });
 
       total = await ActivityLog.count({
