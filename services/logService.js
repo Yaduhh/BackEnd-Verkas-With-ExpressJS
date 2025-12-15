@@ -381,15 +381,16 @@ class LogService {
     }
 
     sql += ' ORDER BY created_at DESC';
-    sql += ` LIMIT ? OFFSET ?`;
     
     // Calculate offset (already validated at the top)
     const offsetInt = Math.max(0, (pageInt - 1) * limitInt);
     
-    // Push limit and offset - GUARANTEED to be valid integers
-    params.push(limitInt, offsetInt);
+    // CRITICAL FIX for phpMyAdmin 5.2 / aapanel:
+    // Use string interpolation for LIMIT and OFFSET instead of placeholders
+    // This avoids prepared statement issues with LIMIT/OFFSET in some MySQL configurations
+    sql += ` LIMIT ${limitInt} OFFSET ${offsetInt}`;
     
-    // Count placeholders in SQL
+    // Count placeholders in SQL (LIMIT and OFFSET are now in SQL string, not placeholders)
     const placeholderCount = (sql.match(/\?/g) || []).length;
     
     // FINAL STRICT VALIDATION: NO EMPTY/NULL/UNDEFINED VALUES ALLOWED
@@ -404,7 +405,7 @@ class LogService {
       }
       
       // STRICT: Reject null for numeric parameters (MySQL doesn't like null in WHERE clauses)
-      if (p === null && index < params.length - 2) { // Allow null only for date strings, not for IDs
+      if (p === null) {
         console.error(`❌ CRITICAL: Parameter at index ${index} is null`);
         console.error('SQL:', sql);
         console.error('All params:', params);
@@ -454,9 +455,11 @@ class LogService {
     
     // Debug log (always log for debugging phpMyAdmin issues)
     console.log('✅ Executing query with validated params:', {
-        sql: sql.substring(0, 200) + '...',
+        sql: sql.substring(0, 300),
         paramCount: finalParams.length,
         placeholderCount,
+        limitInt,
+        offsetInt,
         params: finalParams.map((p, i) => ({ index: i, type: typeof p, value: p }))
     });
 
@@ -543,12 +546,29 @@ class LogService {
     }
 
     sql += ' ORDER BY created_at DESC';
-    sql += ` LIMIT ? OFFSET ?`;
-    // Ensure limit and offset are valid integers (not NaN)
-    const limitInt = (limit && !isNaN(parseInt(limit)) && parseInt(limit) > 0) ? parseInt(limit) : 50;
-    const pageInt = (page && !isNaN(parseInt(page)) && parseInt(page) > 0) ? parseInt(page) : 1;
+    
+    // CRITICAL FIX for phpMyAdmin 5.2 / aapanel:
+    // Use string interpolation for LIMIT and OFFSET instead of placeholders
+    // Validate limit and offset first
+    let limitInt = 50;
+    let pageInt = 1;
+    
+    if (limit !== null && limit !== undefined && limit !== '') {
+      const parsed = parseInt(String(limit));
+      if (!isNaN(parsed) && isFinite(parsed) && parsed > 0 && parsed <= 1000) {
+        limitInt = parsed;
+      }
+    }
+    
+    if (page !== null && page !== undefined && page !== '') {
+      const parsed = parseInt(String(page));
+      if (!isNaN(parsed) && isFinite(parsed) && parsed > 0) {
+        pageInt = parsed;
+      }
+    }
+    
     const offsetInt = Math.max(0, (pageInt - 1) * limitInt);
-    params.push(limitInt, offsetInt);
+    sql += ` LIMIT ${limitInt} OFFSET ${offsetInt}`;
 
     const logs = await query(sql, params);
     
