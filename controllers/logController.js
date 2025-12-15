@@ -53,17 +53,37 @@ const getActivityLogs = async (req, res, next) => {
             ? branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0) 
             : null); // Use null instead of empty array
 
-      // Ensure page and limit are valid integers
-      const pageInt = parseInt(page) || 1;
-      const limitInt = parseInt(limit) || 50;
+      // Ensure page and limit are valid integers (not NaN)
+      let pageInt = 1;
+      let limitInt = 50;
+      
+      if (page) {
+        const parsed = parseInt(page);
+        if (!isNaN(parsed) && parsed > 0) {
+          pageInt = parsed;
+        }
+      }
+      
+      if (limit) {
+        const parsed = parseInt(limit);
+        if (!isNaN(parsed) && parsed > 0) {
+          limitInt = parsed;
+        }
+      }
 
       logs = await LogService.getActivityLogs({
         userRole: 'owner',
         branchIds: filterBranchIds && filterBranchIds.length > 0 ? filterBranchIds : null,
-        userId: user_id ? parseInt(user_id) : null,
+        userId: user_id ? (() => {
+          const parsed = parseInt(user_id);
+          return !isNaN(parsed) && parsed > 0 ? parsed : null;
+        })() : null,
         action: action || null,
         entityType: entity_type || null,
-        entityId: entity_id ? parseInt(entity_id) : null,
+        entityId: entity_id ? (() => {
+          const parsed = parseInt(entity_id);
+          return !isNaN(parsed) && parsed > 0 ? parsed : null;
+        })() : null,
         startDate: start_date || null,
         endDate: end_date || null,
         page: pageInt,

@@ -306,49 +306,53 @@ class LogService {
       }
     } else if (userRole === 'admin' && branchId) {
       // Admin: hanya bisa lihat log di branch yang mereka assign
-      const branchIdInt = parseInt(branchId);
-      if (!isNaN(branchIdInt) && branchIdInt > 0) {
-        sql += ' AND branch_id = ?';
-        params.push(branchIdInt);
+      if (branchId !== null && branchId !== undefined) {
+        const branchIdInt = parseInt(branchId);
+        if (!isNaN(branchIdInt) && isFinite(branchIdInt) && branchIdInt > 0) {
+          sql += ' AND branch_id = ?';
+          params.push(branchIdInt);
+        }
       }
     } else if (branchId) {
       // Direct branch filter
-      const branchIdInt = parseInt(branchId);
-      if (!isNaN(branchIdInt) && branchIdInt > 0) {
-        sql += ' AND branch_id = ?';
-        params.push(branchIdInt);
+      if (branchId !== null && branchId !== undefined) {
+        const branchIdInt = parseInt(branchId);
+        if (!isNaN(branchIdInt) && isFinite(branchIdInt) && branchIdInt > 0) {
+          sql += ' AND branch_id = ?';
+          params.push(branchIdInt);
+        }
       }
     }
 
-    if (userId) {
+    if (userId !== null && userId !== undefined) {
       const userIdInt = parseInt(userId);
-      if (!isNaN(userIdInt) && userIdInt > 0) {
+      if (!isNaN(userIdInt) && isFinite(userIdInt) && userIdInt > 0) {
         sql += ' AND user_id = ?';
         params.push(userIdInt);
       }
     }
-    if (action) {
+    if (action && action !== null && action !== undefined) {
       sql += ' AND action = ?';
-      params.push(action);
+      params.push(String(action));
     }
-    if (entityType) {
+    if (entityType && entityType !== null && entityType !== undefined) {
       sql += ' AND entity_type = ?';
-      params.push(entityType);
+      params.push(String(entityType));
     }
-    if (entityId) {
+    if (entityId !== null && entityId !== undefined) {
       const entityIdInt = parseInt(entityId);
-      if (!isNaN(entityIdInt) && entityIdInt > 0) {
+      if (!isNaN(entityIdInt) && isFinite(entityIdInt) && entityIdInt > 0) {
         sql += ' AND entity_id = ?';
         params.push(entityIdInt);
       }
     }
-    if (startDate) {
+    if (startDate && startDate !== null && startDate !== undefined) {
       sql += ' AND created_at >= ?';
-      params.push(startDate);
+      params.push(String(startDate));
     }
-    if (endDate) {
+    if (endDate && endDate !== null && endDate !== undefined) {
       sql += ' AND created_at <= ?';
-      params.push(endDate);
+      params.push(String(endDate));
     }
 
     sql += ' ORDER BY created_at DESC';
@@ -373,34 +377,55 @@ class LogService {
     
     const offsetInt = Math.max(0, (pageInt - 1) * limitInt);
     
-    // Validate all params before pushing
+    // Push limit and offset (already validated)
     params.push(limitInt, offsetInt);
-    
-    // Final validation: ensure no undefined or null values in params (except for strings)
-    const validParams = params.map(p => {
-      if (p === undefined || p === null) {
-        return null; // MySQL accepts null
-      }
-      if (typeof p === 'number' && isNaN(p)) {
-        return 0; // Replace NaN with 0
-      }
-      return p;
-    });
     
     // Count placeholders in SQL
     const placeholderCount = (sql.match(/\?/g) || []).length;
     
-    if (validParams.length !== placeholderCount) {
+    // Final validation: ensure all params are valid and match placeholder count
+    const finalParams = params.map((p, index) => {
+      // Reject undefined
+      if (p === undefined) {
+        console.error(`Parameter at index ${index} is undefined`);
+        throw new Error(`Invalid parameter: undefined at index ${index}`);
+      }
+      
+      // Validate numbers
+      if (typeof p === 'number') {
+        if (isNaN(p) || !isFinite(p)) {
+          console.error(`Invalid number parameter at index ${index}:`, p);
+          throw new Error(`Invalid number parameter: ${p} at index ${index}`);
+        }
+      }
+      
+      return p;
+    });
+    
+    if (finalParams.length !== placeholderCount) {
       console.error('SQL parameter mismatch:', {
         sql,
         placeholderCount,
-        paramsLength: validParams.length,
-        params: validParams
+        paramsLength: finalParams.length,
+        params: finalParams,
+        originalParams: params,
+        limitInt,
+        offsetInt,
+        pageInt
       });
-      throw new Error(`SQL parameter count mismatch: expected ${placeholderCount}, got ${validParams.length}`);
+      throw new Error(`SQL parameter count mismatch: expected ${placeholderCount}, got ${finalParams.length}`);
+    }
+    
+    // Debug log in development
+    if (process.env.NODE_ENV === 'development') {
+      console.log('Executing query:', {
+        sql: sql.substring(0, 200),
+        paramCount: finalParams.length,
+        params: finalParams
+      });
     }
 
-    const logs = await query(sql, validParams);
+    const logs = await query(sql, finalParams);
     
     // Parse JSON fields
     return logs.map(log => ({
