@@ -1,5 +1,11 @@
 const { Expo } = require('expo-server-sdk');
 const DeviceToken = require('../models/DeviceToken');
+const dns = require('dns');
+const { promisify } = require('util');
+
+// Custom DNS resolver untuk mengatasi EAI_AGAIN error
+const resolve4 = promisify(dns.resolve4);
+const resolve6 = promisify(dns.resolve6);
 
 class ExpoPushService {
   constructor() {
@@ -13,9 +19,33 @@ class ExpoPushService {
       console.warn('⚠️ Get your access token from: https://expo.dev/accounts/[your-account]/settings/access-tokens');
     }
     
+    // Set custom DNS servers untuk mengatasi DNS resolution issues
+    // Gunakan Google DNS (8.8.8.8) dan Cloudflare DNS (1.1.1.1) sebagai fallback
+    if (process.platform !== 'win32') {
+      // Hanya set di Linux/Unix (tidak support di Windows)
+      try {
+        dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1']);
+        console.log('✅ Custom DNS servers configured: 8.8.8.8, 8.8.4.4, 1.1.1.1, 1.0.0.1');
+      } catch (err) {
+        console.warn('⚠️ Could not set custom DNS servers:', err.message);
+      }
+    }
+    
     this.expo = new Expo({
       accessToken: accessToken, // Optional, tapi recommended untuk production
     });
+  }
+  
+  // Helper untuk test DNS resolution
+  async testDNSResolution(hostname = 'exp.host') {
+    try {
+      const addresses = await resolve4(hostname);
+      console.log(`✅ DNS resolution successful for ${hostname}:`, addresses);
+      return true;
+    } catch (error) {
+      console.error(`❌ DNS resolution failed for ${hostname}:`, error.message);
+      return false;
+    }
   }
 
   // Validate if token is valid Expo push token
@@ -77,7 +107,7 @@ class ExpoPushService {
       let sentCount = 0;
 
       for (const chunk of chunks) {
-        let retries = 2; // Reduced from 3 to 2 for faster failure
+        let retries = 3; // Increased to 3 retries for DNS issues
         let lastError = null;
         let attemptNumber = 0;
         
@@ -86,7 +116,16 @@ class ExpoPushService {
           try {
             if (attemptNumber > 1) {
               console.log(`🔄 Attempt ${attemptNumber} to send push notification chunk...`);
+              
+              // Test DNS resolution before retry
+              if (attemptNumber === 2) {
+                const dnsOk = await this.testDNSResolution('exp.host');
+                if (!dnsOk) {
+                  console.warn('⚠️ DNS resolution still failing, will retry with longer wait...');
+                }
+              }
             }
+            
             const ticketChunk = await this.expo.sendPushNotificationsAsync(chunk);
             tickets.push(...ticketChunk);
             
@@ -113,9 +152,7 @@ class ExpoPushService {
                   const invalidToken = chunk[index]?.to;
                   if (invalidToken) {
                     DeviceToken.unregisterByToken(invalidToken).catch(err => {
-                      if (process.env.NODE_ENV === 'development') {
-                        console.error('Error deactivating invalid token:', err);
-                      }
+                      console.error('Error deactivating invalid token:', err);
                     });
                   }
                 }
@@ -147,9 +184,15 @@ class ExpoPushService {
                                   errorErrno === 'ETIMEDOUT';
             
             if (isNetworkError && retries > 0) {
-              // Wait before retry (faster retry: 1s, 2s instead of 2s, 4s, 8s)
-              const waitTime = (3 - retries) * 1000; // 1s for first retry, 2s for second retry
-              console.warn(`⚠️ DNS/Network error (${errorCode || errorErrno || 'unknown'}). Retrying push notification in ${waitTime/1000}s... (${3 - retries}/2)`);
+              // Exponential backoff dengan wait time lebih lama untuk DNS issues
+              // Wait: 2s, 5s, 10s (lebih lama untuk DNS resolution)
+              const waitTimes = [2000, 5000, 10000];
+              const waitTime = waitTimes[attemptNumber - 1] || 10000;
+              console.warn(`⚠️ DNS/Network error (${errorCode || errorErrno || 'unknown'}). Retrying push notification in ${waitTime/1000}s... (${attemptNumber}/${3})`);
+              
+              // Test DNS resolution sebelum retry
+              await this.testDNSResolution('exp.host');
+              
               await new Promise(resolve => setTimeout(resolve, waitTime));
             } else {
               // Not a network error or no retries left
@@ -166,9 +209,13 @@ class ExpoPushService {
                 if (isNetworkError) {
                   console.error('\n🔍 TROUBLESHOOTING DNS Error:');
                   console.error('1. Server tidak bisa resolve DNS untuk exp.host');
-                  console.error('2. Cek DNS configuration di server');
+                  console.error('2. Cek DNS configuration di server (aapanel)');
                   console.error('3. Cek network connectivity dari server ke exp.host');
-                  console.error('4. Mungkin perlu configure DNS server atau use different DNS resolver\n');
+                  console.error('4. SOLUSI: Konfigurasi DNS di aapanel:');
+                  console.error('   - Masuk ke aapanel → System Settings → DNS Settings');
+                  console.error('   - Set DNS servers: 8.8.8.8, 8.8.4.4 (Google DNS)');
+                  console.error('   - Atau: 1.1.1.1, 1.0.0.1 (Cloudflare DNS)');
+                  console.error('   - Restart server setelah perubahan\n');
                 }
               }
               break;
@@ -176,11 +223,13 @@ class ExpoPushService {
           }
         }
         
-        // If all retries failed, log the error (silently in production)
+        // If all retries failed, log the error
         if (lastError) {
-          if (process.env.NODE_ENV === 'development') {
-            console.error('Failed to send push notification chunk after 2 retries:', lastError);
-          }
+          console.error('❌ Failed to send push notification chunk after 3 retries:', {
+            error: lastError.message,
+            code: lastError.code,
+            errno: lastError.errno
+          });
         }
       }
 
