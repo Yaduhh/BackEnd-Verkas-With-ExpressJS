@@ -2,6 +2,7 @@ const upload = require('../middleware/upload');
 const path = require('path');
 const fs = require('fs');
 const sharp = require('sharp');
+const config = require('../config/config');
 
 // Helper function to compress single image
 const compressImage = async (filePath, originalSize) => {
@@ -152,7 +153,7 @@ const uploadFile = async (req, res, next) => {
           ? Math.round((1 - finalSize / originalSizeForResponse) * 100) 
           : undefined,
         path: `/uploads/${finalFilename}`,
-        url: `${req.protocol}://${req.get('host')}/uploads/${finalFilename}`
+        url: `${config.baseUrl || `${req.protocol}://${req.get('host')}`}/uploads/${finalFilename}`
       }
     });
   } catch (error) {
@@ -204,7 +205,7 @@ const uploadFiles = async (req, res, next) => {
           ? Math.round((1 - finalSize / originalSizeForResponse) * 100) 
           : undefined,
         path: `/uploads/${finalFilename}`,
-        url: `${req.protocol}://${req.get('host')}/uploads/${finalFilename}`
+        url: `${config.baseUrl || `${req.protocol}://${req.get('host')}`}/uploads/${finalFilename}`
       });
     }
 

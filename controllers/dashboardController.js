@@ -1,5 +1,6 @@
 const Transaction = require('../models/Transaction');
 const { query } = require('../config/database');
+const config = require('../config/config');
 const {
   formatDate,
   parseDate,
@@ -22,13 +23,25 @@ function formatSection(date, items, transactions, req) {
     .filter(t => t.type === 'expense')
     .reduce((sum, t) => sum + parseFloat(t.amount), 0);
   
-  // Helper to convert path to full URL
+  // Get base URL from config (prioritize config over req)
+  const baseUrl = config.baseUrl || `${req.protocol}://${req.get('host')}`;
+  
+  // Helper to convert path to full URL using baseUrl from config
   const pathToUrl = (path) => {
     if (!path) return null;
     if (path.startsWith('http://') || path.startsWith('https://')) {
-      return path;
+      // Extract path from URL
+      try {
+        const urlObj = new URL(path);
+        const urlPath = urlObj.pathname;
+        // Always use baseUrl from config
+        return `${baseUrl}${urlPath}`;
+      } catch (e) {
+        // If URL parsing fails, return as is
+        return path;
+      }
     }
-    return `${req.protocol}://${req.get('host')}${path.startsWith('/') ? path : '/' + path}`;
+    return `${baseUrl}${path.startsWith('/') ? path : '/' + path}`;
   };
   
   return {

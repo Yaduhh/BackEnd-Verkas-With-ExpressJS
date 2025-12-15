@@ -1,38 +1,69 @@
 const Transaction = require('../models/Transaction');
 const Category = require('../models/Category');
 const LogService = require('../services/logService');
+const config = require('../config/config');
 
-// Helper: Convert lampiran paths to full URLs
+// Helper: Convert lampiran paths to full URLs using BASE_URL from config
 const formatLampiran = (lampiran, req) => {
   if (!lampiran) return null;
+  
+  // Get base URL from config (prioritize config over req)
+  const baseUrl = config.baseUrl || `${req.protocol}://${req.get('host')}`;
   
   try {
     // Try to parse as JSON (array)
     const parsed = JSON.parse(lampiran);
     if (Array.isArray(parsed)) {
       return parsed.map(path => {
-        // If already full URL, return as is
+        // If already full URL, check if it needs to be replaced with baseUrl
         if (path.startsWith('http://') || path.startsWith('https://')) {
-          return path;
+          // Extract path from URL
+          try {
+            const urlObj = new URL(path);
+            const urlPath = urlObj.pathname;
+            // Always use baseUrl from config
+            return `${baseUrl}${urlPath}`;
+          } catch (e) {
+            // If URL parsing fails, return as is
+            return path;
+          }
         }
-        // Convert path to full URL
-        return `${req.protocol}://${req.get('host')}${path.startsWith('/') ? path : '/' + path}`;
+        // Convert relative path to full URL using baseUrl
+        return `${baseUrl}${path.startsWith('/') ? path : '/' + path}`;
       });
     } else {
       // Single value
       const path = parsed;
       if (path.startsWith('http://') || path.startsWith('https://')) {
-        return [path];
+        // Extract path from URL
+        try {
+          const urlObj = new URL(path);
+          const urlPath = urlObj.pathname;
+          // Always use baseUrl from config
+          return [`${baseUrl}${urlPath}`];
+        } catch (e) {
+          // If URL parsing fails, return as is
+          return [path];
+        }
       }
-      return [`${req.protocol}://${req.get('host')}${path.startsWith('/') ? path : '/' + path}`];
+      return [`${baseUrl}${path.startsWith('/') ? path : '/' + path}`];
     }
   } catch (e) {
     // Not JSON, treat as string
     const path = lampiran;
     if (path.startsWith('http://') || path.startsWith('https://')) {
-      return [path];
+      // Extract path from URL
+      try {
+        const urlObj = new URL(path);
+        const urlPath = urlObj.pathname;
+        // Always use baseUrl from config
+        return [`${baseUrl}${urlPath}`];
+      } catch (e) {
+        // If URL parsing fails, return as is
+        return [path];
+      }
     }
-    return [`${req.protocol}://${req.get('host')}${path.startsWith('/') ? path : '/' + path}`];
+    return [`${baseUrl}${path.startsWith('/') ? path : '/' + path}`];
   }
 };
 
