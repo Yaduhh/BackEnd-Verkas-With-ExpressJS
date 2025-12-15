@@ -663,66 +663,54 @@ const requestEdit = async (req, res, next) => {
     
     const transaction = await Transaction.requestEdit(id, req.userId, reason.trim());
     
-    // Send notification to branch owner + team owners (if branch belongs to a team)
-    try {
-      const expoPushService = require('../services/expoPushService');
-      const Branch = require('../models/Branch');
-      const OwnerTeam = require('../models/OwnerTeam');
-      const branch = await Branch.findById(existing.branch_id);
-      const User = require('../models/User');
-      const admin = await User.findById(req.userId);
+    // Send notification to branch owner + team owners (if branch belongs to a team) - NON-BLOCKING
+    setImmediate(async () => {
+      try {
+        const notificationQueue = require('../services/notificationQueue');
+        const Branch = require('../models/Branch');
+        const OwnerTeam = require('../models/OwnerTeam');
+        const branch = await Branch.findById(existing.branch_id);
+        const User = require('../models/User');
+        const admin = await User.findById(req.userId);
 
-      // Target users:
-      // - Jika branch punya team: kirim ke owner-owner aktif di team
-      // - Jika tidak punya team: kirim ke owner branch
-      const targetUserIds = new Set();
-      if (branch?.team_id) {
-        const members = await OwnerTeam.getMembers(branch.team_id);
-        members
-          .filter((m) => m.role === 'owner' && m.status === 'active')
-          .forEach((m) => targetUserIds.add(m.user_id));
-      } else if (branch?.owner_id) {
-        targetUserIds.add(branch.owner_id);
-      }
-      
-      if (targetUserIds.size > 0) {
-        const amount = new Intl.NumberFormat('id-ID', {
-          style: 'currency',
-          currency: 'IDR',
-          minimumFractionDigits: 0
-        }).format(existing.amount);
-        
-        const notifResult = await expoPushService.sendToUsers([...targetUserIds], {
-          title: 'Edit Request',
-          body: `Admin ${admin?.name || admin?.email || 'Admin'} meminta izin untuk mengedit transaksi ${amount}`,
-          data: {
-            screen: 'requests',
-            transactionId: parseInt(id),
-            branchId: existing.branch_id,
-            type: 'edit_request',
-          },
-        });
-        
-        if (notifResult.sent === 0) {
-          console.warn(`⚠️ No notifications sent to ${targetUserIds.size} user(s). Check device tokens.`);
-        } else {
-          console.log(`✅ Notification sent: ${notifResult.sent} device(s) notified`);
+        // Target users:
+        // - Jika branch punya team: kirim ke owner-owner aktif di team
+        // - Jika tidak punya team: kirim ke owner branch
+        const targetUserIds = new Set();
+        if (branch?.team_id) {
+          const members = await OwnerTeam.getMembers(branch.team_id);
+          members
+            .filter((m) => m.role === 'owner' && m.status === 'active')
+            .forEach((m) => targetUserIds.add(m.user_id));
+        } else if (branch?.owner_id) {
+          targetUserIds.add(branch.owner_id);
         }
-      } else {
-        console.log(`⚠️ No target users found for notification (branch_id: ${existing.branch_id})`);
+        
+        if (targetUserIds.size > 0) {
+          const amount = new Intl.NumberFormat('id-ID', {
+            style: 'currency',
+            currency: 'IDR',
+            minimumFractionDigits: 0
+          }).format(existing.amount);
+          
+          // Queue notification (non-blocking)
+          notificationQueue.enqueue({
+            userId: [...targetUserIds],
+            title: 'Edit Request',
+            body: `Admin ${admin?.name || admin?.email || 'Admin'} meminta izin untuk mengedit transaksi ${amount}`,
+            data: {
+              screen: 'requests',
+              transactionId: parseInt(id),
+              branchId: existing.branch_id,
+              type: 'edit_request',
+            },
+          });
+        }
+      } catch (notifError) {
+        // Don't fail the request if notification fails
+        console.error('❌ Error queuing notification:', notifError);
       }
-    } catch (notifError) {
-      // Don't fail the request if notification fails
-      console.error('❌ Error sending notification:', notifError);
-      if (notifError.message) {
-        console.error('Error details:', {
-          message: notifError.message,
-          code: notifError.code,
-          errno: notifError.errno,
-          type: notifError.type
-        });
-      }
-    }
+    });
     
     // Format lampiran paths to full URLs
     const formattedTransaction = {
@@ -799,32 +787,33 @@ const approveEdit = async (req, res, next) => {
       requestPath: req.path,
     });
     
-    // Send notification to admin who requested edit
-    try {
-      const expoPushService = require('../services/expoPushService');
-      const User = require('../models/User');
-      
-      if (existing.edit_requested_by) {
-        const amount = new Intl.NumberFormat('id-ID', {
-          style: 'currency',
-          currency: 'IDR',
-          minimumFractionDigits: 0
-        }).format(existing.amount);
-        
-        await expoPushService.sendToUser(existing.edit_requested_by, {
-          title: 'Edit Request Disetujui',
-          body: `Permintaan edit untuk transaksi ${amount} telah disetujui`,
-          data: {
-            screen: 'transaction_detail',
-            transactionId: parseInt(id),
-            branchId: existing.branch_id,
-            type: 'edit_approved',
-          },
-        });
-      }
-    } catch (notifError) {
-      // Don't fail the request if notification fails
-      console.error('Error sending notification:', notifError);
+    // Send notification to admin who requested edit - NON-BLOCKING
+    if (existing.edit_requested_by) {
+      setImmediate(async () => {
+        try {
+          const notificationQueue = require('../services/notificationQueue');
+          const amount = new Intl.NumberFormat('id-ID', {
+            style: 'currency',
+            currency: 'IDR',
+            minimumFractionDigits: 0
+          }).format(existing.amount);
+          
+          // Queue notification (non-blocking)
+          notificationQueue.enqueue({
+            userId: existing.edit_requested_by,
+            title: 'Edit Request Disetujui',
+            body: `Permintaan edit untuk transaksi ${amount} telah disetujui`,
+            data: {
+              screen: 'transaction_detail',
+              transactionId: parseInt(id),
+              branchId: existing.branch_id,
+              type: 'edit_approved',
+            },
+          });
+        } catch (notifError) {
+          console.error('Error queuing notification:', notifError);
+        }
+      });
     }
     
     // Format lampiran paths to full URLs
@@ -902,31 +891,33 @@ const rejectEdit = async (req, res, next) => {
       requestPath: req.path,
     });
     
-    // Send notification to admin who requested edit
-    try {
-      const expoPushService = require('../services/expoPushService');
-      
-      if (existing.edit_requested_by) {
-        const amount = new Intl.NumberFormat('id-ID', {
-          style: 'currency',
-          currency: 'IDR',
-          minimumFractionDigits: 0
-        }).format(existing.amount);
-        
-        await expoPushService.sendToUser(existing.edit_requested_by, {
-          title: 'Edit Request Ditolak',
-          body: `Permintaan edit untuk transaksi ${amount} telah ditolak`,
-          data: {
-            screen: 'transaction_detail',
-            transactionId: parseInt(id),
-            branchId: existing.branch_id,
-            type: 'edit_rejected',
-          },
-        });
-      }
-    } catch (notifError) {
-      // Don't fail the request if notification fails
-      console.error('Error sending notification:', notifError);
+    // Send notification to admin who requested edit - NON-BLOCKING
+    if (existing.edit_requested_by) {
+      setImmediate(async () => {
+        try {
+          const notificationQueue = require('../services/notificationQueue');
+          const amount = new Intl.NumberFormat('id-ID', {
+            style: 'currency',
+            currency: 'IDR',
+            minimumFractionDigits: 0
+          }).format(existing.amount);
+          
+          // Queue notification (non-blocking)
+          notificationQueue.enqueue({
+            userId: existing.edit_requested_by,
+            title: 'Edit Request Ditolak',
+            body: `Permintaan edit untuk transaksi ${amount} telah ditolak`,
+            data: {
+              screen: 'transaction_detail',
+              transactionId: parseInt(id),
+              branchId: existing.branch_id,
+              type: 'edit_rejected',
+            },
+          });
+        } catch (notifError) {
+          console.error('Error queuing notification:', notifError);
+        }
+      });
     }
     
     // Format lampiran paths to full URLs

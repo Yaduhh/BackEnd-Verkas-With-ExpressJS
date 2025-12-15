@@ -139,59 +139,65 @@ const verify = async (req, res, next) => {
         await Subscription.updateEndDate(payment.subscription_id, endDate.toISOString().split('T')[0]);
       }
       
-      // Send notification to user
-      try {
-        const expoPushService = require('../services/expoPushService');
-        const SubscriptionPlan = require('../models/SubscriptionPlan');
-        const plan = await SubscriptionPlan.findById(subscription.plan_id);
-        
-        const amount = new Intl.NumberFormat('id-ID', {
-          style: 'currency',
-          currency: 'IDR',
-          minimumFractionDigits: 0
-        }).format(payment.amount);
-        
-        await expoPushService.sendToUser(subscription.user_id, {
-          title: 'Pembayaran Berhasil',
-          body: `Pembayaran subscription ${plan?.name || 'Plan'} sebesar ${amount} telah berhasil`,
-          data: {
-            screen: 'subscription',
-            paymentId: payment.id,
-            subscriptionId: subscription.id,
-            type: 'payment_success',
-          },
-        });
-      } catch (notifError) {
-        // Don't fail the request if notification fails
-        console.error('Error sending notification:', notifError);
-      }
+      // Send notification to user - NON-BLOCKING
+      setImmediate(async () => {
+        try {
+          const notificationQueue = require('../services/notificationQueue');
+          const SubscriptionPlan = require('../models/SubscriptionPlan');
+          const plan = await SubscriptionPlan.findById(subscription.plan_id);
+          
+          const amount = new Intl.NumberFormat('id-ID', {
+            style: 'currency',
+            currency: 'IDR',
+            minimumFractionDigits: 0
+          }).format(payment.amount);
+          
+          // Queue notification (non-blocking)
+          notificationQueue.enqueue({
+            userId: subscription.user_id,
+            title: 'Pembayaran Berhasil',
+            body: `Pembayaran subscription ${plan?.name || 'Plan'} sebesar ${amount} telah berhasil`,
+            data: {
+              screen: 'subscription',
+              paymentId: payment.id,
+              subscriptionId: subscription.id,
+              type: 'payment_success',
+            },
+          });
+        } catch (notifError) {
+          console.error('Error queuing notification:', notifError);
+        }
+      });
     } else if (status === 'failed') {
       await Payment.updateStatus(payment.id, 'failed', transaction_id);
       
-      // Send notification to user
-      try {
-        const expoPushService = require('../services/expoPushService');
-        const subscription = await Subscription.findById(payment.subscription_id);
-        
-        const amount = new Intl.NumberFormat('id-ID', {
-          style: 'currency',
-          currency: 'IDR',
-          minimumFractionDigits: 0
-        }).format(payment.amount);
-        
-        await expoPushService.sendToUser(subscription.user_id, {
-          title: 'Pembayaran Gagal',
-          body: `Pembayaran sebesar ${amount} gagal. Silakan coba lagi.`,
-          data: {
-            screen: 'payment',
-            paymentId: payment.id,
-            type: 'payment_failed',
-          },
-        });
-      } catch (notifError) {
-        // Don't fail the request if notification fails
-        console.error('Error sending notification:', notifError);
-      }
+      // Send notification to user - NON-BLOCKING
+      setImmediate(async () => {
+        try {
+          const notificationQueue = require('../services/notificationQueue');
+          const subscription = await Subscription.findById(payment.subscription_id);
+          
+          const amount = new Intl.NumberFormat('id-ID', {
+            style: 'currency',
+            currency: 'IDR',
+            minimumFractionDigits: 0
+          }).format(payment.amount);
+          
+          // Queue notification (non-blocking)
+          notificationQueue.enqueue({
+            userId: subscription.user_id,
+            title: 'Pembayaran Gagal',
+            body: `Pembayaran sebesar ${amount} gagal. Silakan coba lagi.`,
+            data: {
+              screen: 'payment',
+              paymentId: payment.id,
+              type: 'payment_failed',
+            },
+          });
+        } catch (notifError) {
+          console.error('Error queuing notification:', notifError);
+        }
+      });
     }
     
     res.json({

@@ -282,18 +282,36 @@ class LogService {
     const params = [];
 
     // Role-based filtering
-    if ((userRole === 'owner' || userRole === 'co-owner') && branchIds && branchIds.length > 0) {
+    // Normalize branchIds to array
+    const normalizedBranchIds = Array.isArray(branchIds) ? branchIds : (branchIds ? [branchIds] : null);
+    
+    if ((userRole === 'owner' || userRole === 'co-owner') && normalizedBranchIds && normalizedBranchIds.length > 0) {
       // Owner and co-owner: bisa lihat log di semua branch yang mereka akses
-      sql += ' AND branch_id IN (' + branchIds.map(() => '?').join(',') + ')';
-      params.push(...branchIds);
+      // Ensure all values are numbers
+      const validBranchIds = normalizedBranchIds
+        .map(id => parseInt(id))
+        .filter(id => !isNaN(id) && id > 0);
+      
+      if (validBranchIds.length > 0) {
+        if (validBranchIds.length === 1) {
+          // Single branch - use = instead of IN for better performance
+          sql += ' AND branch_id = ?';
+          params.push(validBranchIds[0]);
+        } else {
+          // Multiple branches - use IN with proper placeholders
+          const placeholders = validBranchIds.map(() => '?').join(',');
+          sql += ` AND branch_id IN (${placeholders})`;
+          params.push(...validBranchIds);
+        }
+      }
     } else if (userRole === 'admin' && branchId) {
       // Admin: hanya bisa lihat log di branch yang mereka assign
       sql += ' AND branch_id = ?';
-      params.push(branchId);
+      params.push(parseInt(branchId));
     } else if (branchId) {
       // Direct branch filter
       sql += ' AND branch_id = ?';
-      params.push(branchId);
+      params.push(parseInt(branchId));
     }
 
     if (userId) {
@@ -323,7 +341,11 @@ class LogService {
 
     sql += ' ORDER BY created_at DESC';
     sql += ` LIMIT ? OFFSET ?`;
-    params.push(limit, (page - 1) * limit);
+    // Ensure limit and offset are integers
+    const limitInt = parseInt(limit) || 50;
+    const pageInt = parseInt(page) || 1;
+    const offsetInt = (pageInt - 1) * limitInt;
+    params.push(limitInt, offsetInt);
 
     const logs = await query(sql, params);
     
@@ -409,7 +431,11 @@ class LogService {
 
     sql += ' ORDER BY created_at DESC';
     sql += ` LIMIT ? OFFSET ?`;
-    params.push(limit, (page - 1) * limit);
+    // Ensure limit and offset are integers
+    const limitInt = parseInt(limit) || 50;
+    const pageInt = parseInt(page) || 1;
+    const offsetInt = (pageInt - 1) * limitInt;
+    params.push(limitInt, offsetInt);
 
     const logs = await query(sql, params);
     
@@ -434,12 +460,30 @@ class LogService {
     const params = [entityType, entityId];
 
     // Role-based filtering
-    if (userRole === 'owner' && branchIds && branchIds.length > 0) {
-      sql += ' AND branch_id IN (' + branchIds.map(() => '?').join(',') + ')';
-      params.push(...branchIds);
+    // Normalize branchIds to array
+    const normalizedBranchIds = Array.isArray(branchIds) ? branchIds : (branchIds ? [branchIds] : null);
+    
+    if (userRole === 'owner' && normalizedBranchIds && normalizedBranchIds.length > 0) {
+      // Ensure all values are numbers
+      const validBranchIds = normalizedBranchIds
+        .map(id => parseInt(id))
+        .filter(id => !isNaN(id) && id > 0);
+      
+      if (validBranchIds.length > 0) {
+        if (validBranchIds.length === 1) {
+          // Single branch - use = instead of IN for better performance
+          sql += ' AND branch_id = ?';
+          params.push(validBranchIds[0]);
+        } else {
+          // Multiple branches - use IN with proper placeholders
+          const placeholders = validBranchIds.map(() => '?').join(',');
+          sql += ` AND branch_id IN (${placeholders})`;
+          params.push(...validBranchIds);
+        }
+      }
     } else if (userRole === 'admin' && branchId) {
       sql += ' AND branch_id = ?';
-      params.push(branchId);
+      params.push(parseInt(branchId));
     }
 
     sql += ' ORDER BY created_at DESC';

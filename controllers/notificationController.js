@@ -122,7 +122,8 @@ const sendTest = async (req, res, next) => {
         message: `Test notification sent to ${result.sent} device(s)`,
         data: {
           sent: result.sent,
-          total: result.total
+          total: result.total,
+          tickets: result.tickets
         }
       });
     } else {
@@ -137,10 +138,43 @@ const sendTest = async (req, res, next) => {
   }
 };
 
+// Check device token status (for debugging)
+const checkStatus = async (req, res, next) => {
+  try {
+    const userId = req.userId;
+    const tokens = await DeviceToken.findByUserId(userId);
+    
+    // Check token validity
+    const tokenStatus = tokens.map(token => ({
+      id: token.id,
+      platform: token.platform,
+      device_name: token.device_name,
+      is_active: token.is_active,
+      is_valid: expoPushService.isValidToken(token.device_token),
+      token_preview: token.device_token ? token.device_token.substring(0, 30) + '...' : 'N/A',
+      last_used_at: token.last_used_at,
+      created_at: token.created_at
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        total: tokens.length,
+        active: tokens.filter(t => t.is_active).length,
+        valid: tokens.filter(t => t.is_active && expoPushService.isValidToken(t.device_token)).length,
+        tokens: tokenStatus
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   register,
   unregister,
   getTokens,
-  sendTest
+  sendTest,
+  checkStatus
 };
 

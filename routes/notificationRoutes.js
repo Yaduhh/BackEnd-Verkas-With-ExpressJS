@@ -15,5 +15,8 @@ router.get('/tokens', authenticate, notificationController.getTokens);
 // Send test notification (requires auth)
 router.post('/test', authenticate, notificationController.sendTest);
 
+// Check device token status (for debugging)
+router.get('/status', authenticate, notificationController.checkStatus);
+
 module.exports = router;
 

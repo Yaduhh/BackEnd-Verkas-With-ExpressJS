@@ -46,7 +46,10 @@ const getActivityLogs = async (req, res, next) => {
       }
 
       // Filter by specific branch if provided
-      const filterBranchIds = branch_id ? [parseInt(branch_id)] : branchIds;
+      // Ensure branchIds is always an array
+      const filterBranchIds = branch_id 
+        ? [parseInt(branch_id)].filter(id => !isNaN(id) && id > 0)
+        : (Array.isArray(branchIds) ? branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0) : []);
 
       logs = await LogService.getActivityLogs({
         userRole: 'owner',

@@ -5,8 +5,16 @@ class ExpoPushService {
   constructor() {
     // Create Expo client
     // Access token is optional, but recommended for production
+    const accessToken = process.env.EXPO_ACCESS_TOKEN;
+    
+    if (!accessToken && process.env.NODE_ENV === 'production') {
+      console.warn('⚠️ WARNING: EXPO_ACCESS_TOKEN not set in production environment!');
+      console.warn('⚠️ Push notifications may fail or be rate-limited without access token.');
+      console.warn('⚠️ Get your access token from: https://expo.dev/accounts/[your-account]/settings/access-tokens');
+    }
+    
     this.expo = new Expo({
-      accessToken: process.env.EXPO_ACCESS_TOKEN, // Optional, untuk production
+      accessToken: accessToken, // Optional, tapi recommended untuk production
     });
   }
 
@@ -22,26 +30,31 @@ class ExpoPushService {
       const tokens = await DeviceToken.findActiveByUserId(userId);
       
       if (tokens.length === 0) {
-        if (process.env.NODE_ENV === 'development') {
-          console.log(`📱 No device tokens found for user ${userId}`);
-        }
+        console.log(`📱 No device tokens found for user ${userId}`);
         return { success: false, message: 'No device tokens', sent: 0 };
       }
 
       // Filter valid Expo tokens
       const validTokens = tokens
         .map(t => t.device_token)
-        .filter(token => this.isValidToken(token));
+        .filter(token => {
+          const isValid = this.isValidToken(token);
+          if (!isValid) {
+            console.warn(`⚠️ Invalid Expo token format for user ${userId}: ${token?.substring(0, 30)}...`);
+          }
+          return isValid;
+        });
 
       if (validTokens.length === 0) {
-        if (process.env.NODE_ENV === 'development') {
-          console.log(`📱 No valid Expo push tokens found for user ${userId}`);
-        }
+        console.warn(`📱 No valid Expo push tokens found for user ${userId} (${tokens.length} total tokens, all invalid)`);
         return { success: false, message: 'No valid tokens', sent: 0 };
       }
       
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`📤 Sending notification to user ${userId}: ${title} - ${validTokens.length} device(s)`);
+      console.log(`📤 Sending notification to user ${userId}: "${title}" - ${validTokens.length}/${tokens.length} valid device(s)`);
+      
+      // Check if Expo access token is set (important for production)
+      if (!process.env.EXPO_ACCESS_TOKEN && process.env.NODE_ENV === 'production') {
+        console.warn('⚠️ EXPO_ACCESS_TOKEN not set in production! This may cause notification delivery issues.');
       }
 
       // Prepare messages
@@ -77,12 +90,35 @@ class ExpoPushService {
             const ticketChunk = await this.expo.sendPushNotificationsAsync(chunk);
             tickets.push(...ticketChunk);
             
-            // Count successful sends
-            ticketChunk.forEach(ticket => {
+            // Count successful sends and handle errors
+            ticketChunk.forEach((ticket, index) => {
               if (ticket.status === 'ok') {
                 sentCount++;
               } else {
-                console.error('Error sending notification:', ticket);
+                // Log error details for debugging
+                const errorDetails = ticket.status === 'error' ? ticket.message : ticket.details;
+                console.error(`❌ Error sending notification to token ${index}:`, {
+                  status: ticket.status,
+                  message: ticket.message || errorDetails,
+                  details: ticket.details,
+                  token: chunk[index]?.to ? chunk[index].to.substring(0, 30) + '...' : 'unknown'
+                });
+                
+                // If token is invalid, deactivate it
+                if (ticket.details?.error === 'DeviceNotRegistered' || 
+                    ticket.details?.error === 'InvalidCredentials' ||
+                    ticket.message?.includes('DeviceNotRegistered') ||
+                    ticket.message?.includes('InvalidCredentials')) {
+                  // Find and deactivate invalid token
+                  const invalidToken = chunk[index]?.to;
+                  if (invalidToken) {
+                    DeviceToken.unregisterByToken(invalidToken).catch(err => {
+                      if (process.env.NODE_ENV === 'development') {
+                        console.error('Error deactivating invalid token:', err);
+                      }
+                    });
+                  }
+                }
               }
             });
             
@@ -157,8 +193,21 @@ class ExpoPushService {
         await DeviceToken.updateLastUsed(usedTokenIds);
       }
 
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`✅ Notification sent to user ${userId}: ${sentCount}/${validTokens.length} device(s)`);
+      if (sentCount > 0) {
+        console.log(`✅ Notification sent to user ${userId}: ${sentCount}/${validTokens.length} device(s) successful`);
+      } else {
+        console.warn(`⚠️ Notification failed for user ${userId}: 0/${validTokens.length} device(s) successful`);
+        // Log ticket details for debugging
+        if (tickets.length > 0) {
+          const errors = tickets.filter(t => t.status !== 'ok');
+          if (errors.length > 0) {
+            console.error('❌ Ticket errors:', errors.map(e => ({
+              status: e.status,
+              message: e.message,
+              details: e.details
+            })));
+          }
+        }
       }
 
       return { 
