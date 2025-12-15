@@ -3,6 +3,8 @@ const DeviceToken = require('../models/DeviceToken');
 
 class FCMService {
   constructor() {
+    this.initialized = false;
+    
     // Initialize Firebase Admin SDK
     if (!admin.apps.length) {
       // Check if we have service account credentials
@@ -12,14 +14,29 @@ class FCMService {
       if (serviceAccountPath) {
         // Use service account file
         try {
-          const serviceAccount = require(serviceAccountPath);
+          // Use path.resolve untuk handle relative paths
+          const path = require('path');
+          const fs = require('fs');
+          const resolvedPath = path.resolve(process.cwd(), serviceAccountPath);
+          
+          // Check if file exists
+          if (!fs.existsSync(resolvedPath)) {
+            console.warn('⚠️ WARNING: FCM service account file not found:', resolvedPath);
+            console.warn('⚠️ FCM notifications will be disabled. Set FCM_SERVICE_ACCOUNT_PATH in .env');
+            return;
+          }
+          
+          const serviceAccount = require(resolvedPath);
           admin.initializeApp({
             credential: admin.credential.cert(serviceAccount),
           });
+          this.initialized = true;
           console.log('✅ Firebase Admin SDK initialized from service account file');
         } catch (error) {
-          console.error('❌ Error initializing Firebase Admin SDK from file:', error.message);
-          throw error;
+          console.warn('⚠️ WARNING: Error initializing Firebase Admin SDK from file:', error.message);
+          console.warn('⚠️ FCM notifications will be disabled. Check FCM_SERVICE_ACCOUNT_PATH in .env');
+          // Don't throw error, just disable FCM
+          return;
         }
       } else if (serviceAccountKey) {
         // Use service account JSON string from env
@@ -28,16 +45,23 @@ class FCMService {
           admin.initializeApp({
             credential: admin.credential.cert(serviceAccount),
           });
+          this.initialized = true;
           console.log('✅ Firebase Admin SDK initialized from environment variable');
         } catch (error) {
-          console.error('❌ Error parsing FCM_SERVICE_ACCOUNT_KEY:', error.message);
-          throw error;
+          console.warn('⚠️ WARNING: Error parsing FCM_SERVICE_ACCOUNT_KEY:', error.message);
+          console.warn('⚠️ FCM notifications will be disabled. Check FCM_SERVICE_ACCOUNT_KEY in .env');
+          // Don't throw error, just disable FCM
+          return;
         }
       } else {
         console.warn('⚠️ WARNING: FCM credentials not found!');
-        console.warn('⚠️ Set FCM_SERVICE_ACCOUNT_PATH or FCM_SERVICE_ACCOUNT_KEY in .env');
-        console.warn('⚠️ Push notifications will fail without Firebase credentials');
+        console.warn('⚠️ Set FCM_SERVICE_ACCOUNT_PATH or FCM_SERVICE_ACCOUNT_KEY in .env to enable FCM');
+        console.warn('⚠️ Backend will fallback to Expo Push Notification Service');
       }
+    } else {
+      // Firebase already initialized (maybe by another service)
+      this.initialized = true;
+      console.log('✅ Firebase Admin SDK already initialized');
     }
   }
 
@@ -50,6 +74,11 @@ class FCMService {
 
   // Send notification to single user
   async sendToUser(userId, { title, body, data = {}, sound = 'default', priority = 'high' }) {
+    // Check if FCM is initialized
+    if (!this.initialized) {
+      throw new Error('FCM service not initialized. Set FCM_SERVICE_ACCOUNT_PATH or FCM_SERVICE_ACCOUNT_KEY in .env');
+    }
+    
     try {
       // Get all active device tokens for user
       const tokens = await DeviceToken.findActiveByUserId(userId);
@@ -172,6 +201,11 @@ class FCMService {
 
   // Send notification to specific token
   async sendToToken(token, { title, body, data = {}, sound = 'default', priority = 'high' }) {
+    // Check if FCM is initialized
+    if (!this.initialized) {
+      throw new Error('FCM service not initialized. Set FCM_SERVICE_ACCOUNT_PATH or FCM_SERVICE_ACCOUNT_KEY in .env');
+    }
+    
     try {
       if (!this.isValidToken(token)) {
         return { success: false, message: 'Invalid token format' };
