@@ -64,7 +64,7 @@ class ExpoPushService {
       let sentCount = 0;
 
       for (const chunk of chunks) {
-        let retries = 3;
+        let retries = 2; // Reduced from 3 to 2 for faster failure
         let lastError = null;
         let attemptNumber = 0;
         
@@ -111,9 +111,9 @@ class ExpoPushService {
                                   errorErrno === 'ETIMEDOUT';
             
             if (isNetworkError && retries > 0) {
-              // Wait before retry (exponential backoff: 2s, 4s, 8s)
-              const waitTime = Math.pow(2, 4 - retries) * 1000;
-              console.warn(`⚠️ DNS/Network error (${errorCode || errorErrno || 'unknown'}). Retrying push notification in ${waitTime/1000}s... (${4 - retries}/3)`);
+              // Wait before retry (faster retry: 1s, 2s instead of 2s, 4s, 8s)
+              const waitTime = (3 - retries) * 1000; // 1s for first retry, 2s for second retry
+              console.warn(`⚠️ DNS/Network error (${errorCode || errorErrno || 'unknown'}). Retrying push notification in ${waitTime/1000}s... (${3 - retries}/2)`);
               await new Promise(resolve => setTimeout(resolve, waitTime));
             } else {
               // Not a network error or no retries left
@@ -140,9 +140,11 @@ class ExpoPushService {
           }
         }
         
-        // If all retries failed, log the error
+        // If all retries failed, log the error (silently in production)
         if (lastError) {
-          console.error('Failed to send push notification chunk after 3 retries:', lastError);
+          if (process.env.NODE_ENV === 'development') {
+            console.error('Failed to send push notification chunk after 2 retries:', lastError);
+          }
         }
       }
 
