@@ -43,4 +43,10 @@ exports/
 # Uploads folder
 uploads/
 
+# Firebase credentials (sensitive - DO NOT COMMIT!)
+config/firebase-service-account.json
+**/firebase-service-account.json
+**/*firebase*service*account*.json
+firebase-service-account*.json
+
 

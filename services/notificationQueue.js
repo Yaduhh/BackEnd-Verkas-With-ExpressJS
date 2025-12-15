@@ -1,4 +1,5 @@
 const expoPushService = require('./expoPushService');
+const fcmService = require('./fcmService');
 
 /**
  * Simple in-memory notification queue
@@ -92,15 +93,28 @@ class NotificationQueue {
     try {
       job.attempts++;
 
+      let result;
+      
       if (Array.isArray(job.userId)) {
-        // Multiple users
-        const result = await expoPushService.sendToUsers(job.userId, {
-          title: job.title,
-          body: job.body,
-          data: job.data,
-          sound: job.sound,
-          priority: job.priority
-        });
+        // Multiple users - Try FCM first, fallback to Expo
+        try {
+          result = await fcmService.sendToUsers(job.userId, {
+            title: job.title,
+            body: job.body,
+            data: job.data,
+            sound: job.sound,
+            priority: job.priority
+          });
+        } catch (fcmError) {
+          console.warn('⚠️ FCM service failed, falling back to Expo:', fcmError.message);
+          result = await expoPushService.sendToUsers(job.userId, {
+            title: job.title,
+            body: job.body,
+            data: job.data,
+            sound: job.sound,
+            priority: job.priority
+          });
+        }
 
         if (result.sent > 0) {
           console.log(`✅ Queued notification sent: "${job.title}" to ${result.sent} device(s)`);
@@ -108,14 +122,25 @@ class NotificationQueue {
           console.warn(`⚠️ Queued notification failed: "${job.title}" - ${result.message || 'No devices'}`);
         }
       } else {
-        // Single user
-        const result = await expoPushService.sendToUser(job.userId, {
-          title: job.title,
-          body: job.body,
-          data: job.data,
-          sound: job.sound,
-          priority: job.priority
-        });
+        // Single user - Try FCM first, fallback to Expo
+        try {
+          result = await fcmService.sendToUser(job.userId, {
+            title: job.title,
+            body: job.body,
+            data: job.data,
+            sound: job.sound,
+            priority: job.priority
+          });
+        } catch (fcmError) {
+          console.warn('⚠️ FCM service failed, falling back to Expo:', fcmError.message);
+          result = await expoPushService.sendToUser(job.userId, {
+            title: job.title,
+            body: job.body,
+            data: job.data,
+            sound: job.sound,
+            priority: job.priority
+          });
+        }
 
         if (result.sent > 0) {
           console.log(`✅ Queued notification sent: "${job.title}" to user ${job.userId} (${result.sent} device(s))`);

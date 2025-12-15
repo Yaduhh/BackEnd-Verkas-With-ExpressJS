@@ -1,5 +1,6 @@
 const DeviceToken = require('../models/DeviceToken');
 const expoPushService = require('../services/expoPushService');
+const fcmService = require('../services/fcmService');
 
 // Register device token
 const register = async (req, res, next) => {
@@ -21,11 +22,14 @@ const register = async (req, res, next) => {
       });
     }
 
-    // Validate Expo push token format
-    if (!expoPushService.isValidToken(device_token)) {
+    // Validate token format (FCM or Expo)
+    const isExpoToken = expoPushService.isValidToken(device_token);
+    const isFCMToken = fcmService.isValidToken(device_token);
+    
+    if (!isExpoToken && !isFCMToken) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid Expo push token format'
+        message: 'Invalid token format (must be FCM or Expo push token)'
       });
     }
 
@@ -110,11 +114,22 @@ const sendTest = async (req, res, next) => {
     const userId = req.userId;
     const { title, body, data } = req.body;
 
-    const result = await expoPushService.sendTest(userId, {
-      title: title || 'Test Notification',
-      body: body || 'This is a test notification from VERKAS',
-      data: data || {}
-    });
+    // Try FCM first, fallback to Expo
+    let result;
+    try {
+      result = await fcmService.sendToUser(userId, {
+        title: title || 'Test Notification',
+        body: body || 'This is a test notification from VERKAS',
+        data: data || {}
+      });
+    } catch (fcmError) {
+      console.warn('⚠️ FCM service failed, falling back to Expo:', fcmError.message);
+      result = await expoPushService.sendTest(userId, {
+        title: title || 'Test Notification',
+        body: body || 'This is a test notification from VERKAS',
+        data: data || {}
+      });
+    }
 
     if (result.success) {
       res.json({
@@ -146,7 +161,9 @@ const checkStatus = async (req, res, next) => {
     
     // Check token validity and test sending
     const tokenStatus = tokens.map(token => {
-      const isValid = expoPushService.isValidToken(token.device_token);
+      const isExpoToken = expoPushService.isValidToken(token.device_token);
+      const isFCMToken = fcmService.isValidToken(token.device_token);
+      const isValid = isExpoToken || isFCMToken;
       const tokenPreview = token.device_token ? token.device_token.substring(0, 30) + '...' : 'N/A';
       
       // Check token format
@@ -156,6 +173,8 @@ const checkStatus = async (req, res, next) => {
           formatCheck = 'valid_expo_format';
         } else if (token.device_token.startsWith('ExpoPushToken[')) {
           formatCheck = 'valid_expo_format_alt';
+        } else if (isFCMToken) {
+          formatCheck = 'valid_fcm_format';
         } else {
           formatCheck = 'invalid_format';
         }
@@ -179,6 +198,7 @@ const checkStatus = async (req, res, next) => {
     // Check backend configuration
     const backendConfig = {
       hasExpoAccessToken: !!process.env.EXPO_ACCESS_TOKEN,
+      hasFCMCredentials: !!(process.env.FCM_SERVICE_ACCOUNT_PATH || process.env.FCM_SERVICE_ACCOUNT_KEY),
       nodeEnv: process.env.NODE_ENV,
       expoAccessTokenLength: process.env.EXPO_ACCESS_TOKEN ? process.env.EXPO_ACCESS_TOKEN.length : 0
     };
@@ -188,7 +208,7 @@ const checkStatus = async (req, res, next) => {
       data: {
         total: tokens.length,
         active: tokens.filter(t => t.is_active).length,
-        valid: tokens.filter(t => t.is_active && expoPushService.isValidToken(t.device_token)).length,
+        valid: tokens.filter(t => t.is_active && (expoPushService.isValidToken(t.device_token) || fcmService.isValidToken(t.device_token))).length,
         backend_config: backendConfig,
         tokens: tokenStatus
       }
@@ -207,14 +227,28 @@ const testSend = async (req, res, next) => {
     // Get tokens for debugging
     const tokens = await DeviceToken.findActiveByUserId(userId);
     
-    const result = await expoPushService.sendTest(userId, {
-      title: title || 'Test Notification',
-      body: body || 'This is a test notification from VERKAS',
-      data: {
-        test: true,
-        timestamp: new Date().toISOString()
-      }
-    });
+    // Try FCM first, fallback to Expo
+    let result;
+    try {
+      result = await fcmService.sendToUser(userId, {
+        title: title || 'Test Notification',
+        body: body || 'This is a test notification from VERKAS',
+        data: {
+          test: true,
+          timestamp: new Date().toISOString()
+        }
+      });
+    } catch (fcmError) {
+      console.warn('⚠️ FCM service failed, falling back to Expo:', fcmError.message);
+      result = await expoPushService.sendTest(userId, {
+        title: title || 'Test Notification',
+        body: body || 'This is a test notification from VERKAS',
+        data: {
+          test: true,
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
 
     res.json({
       success: result.success,
@@ -228,7 +262,7 @@ const testSend = async (req, res, next) => {
         tokens_found: tokens.length,
         tokens_preview: tokens.map(t => ({
           platform: t.platform,
-          is_valid: expoPushService.isValidToken(t.device_token),
+          is_valid: expoPushService.isValidToken(t.device_token) || fcmService.isValidToken(t.device_token),
           token_preview: t.device_token?.substring(0, 30) + '...'
         }))
       }

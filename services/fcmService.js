@@ -1,0 +1,234 @@
+const admin = require('firebase-admin');
+const DeviceToken = require('../models/DeviceToken');
+
+class FCMService {
+  constructor() {
+    // Initialize Firebase Admin SDK
+    if (!admin.apps.length) {
+      // Check if we have service account credentials
+      const serviceAccountPath = process.env.FCM_SERVICE_ACCOUNT_PATH;
+      const serviceAccountKey = process.env.FCM_SERVICE_ACCOUNT_KEY;
+      
+      if (serviceAccountPath) {
+        // Use service account file
+        try {
+          const serviceAccount = require(serviceAccountPath);
+          admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount),
+          });
+          console.log('✅ Firebase Admin SDK initialized from service account file');
+        } catch (error) {
+          console.error('❌ Error initializing Firebase Admin SDK from file:', error.message);
+          throw error;
+        }
+      } else if (serviceAccountKey) {
+        // Use service account JSON string from env
+        try {
+          const serviceAccount = JSON.parse(serviceAccountKey);
+          admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount),
+          });
+          console.log('✅ Firebase Admin SDK initialized from environment variable');
+        } catch (error) {
+          console.error('❌ Error parsing FCM_SERVICE_ACCOUNT_KEY:', error.message);
+          throw error;
+        }
+      } else {
+        console.warn('⚠️ WARNING: FCM credentials not found!');
+        console.warn('⚠️ Set FCM_SERVICE_ACCOUNT_PATH or FCM_SERVICE_ACCOUNT_KEY in .env');
+        console.warn('⚠️ Push notifications will fail without Firebase credentials');
+      }
+    }
+  }
+
+  // Validate if token is valid FCM token
+  isValidToken(token) {
+    // FCM tokens are typically long strings (152+ characters)
+    // They don't have a specific prefix like Expo tokens
+    return token && typeof token === 'string' && token.length > 50;
+  }
+
+  // Send notification to single user
+  async sendToUser(userId, { title, body, data = {}, sound = 'default', priority = 'high' }) {
+    try {
+      // Get all active device tokens for user
+      const tokens = await DeviceToken.findActiveByUserId(userId);
+      
+      if (tokens.length === 0) {
+        console.log(`📱 No device tokens found for user ${userId}`);
+        return { success: false, message: 'No device tokens', sent: 0 };
+      }
+
+      // Filter valid FCM tokens
+      const validTokens = tokens
+        .map(t => t.device_token)
+        .filter(token => {
+          const isValid = this.isValidToken(token);
+          if (!isValid) {
+            console.warn(`⚠️ Invalid FCM token format for user ${userId}: ${token?.substring(0, 30)}...`);
+          }
+          return isValid;
+        });
+
+      if (validTokens.length === 0) {
+        console.warn(`📱 No valid FCM tokens found for user ${userId} (${tokens.length} total tokens, all invalid)`);
+        return { success: false, message: 'No valid tokens', sent: 0 };
+      }
+      
+      console.log(`📤 Sending FCM notification to user ${userId}: "${title}" - ${validTokens.length}/${tokens.length} valid device(s)`);
+
+      // Prepare FCM message
+      const message = {
+        notification: {
+          title,
+          body,
+        },
+        data: {
+          ...data,
+          userId: userId.toString(),
+          timestamp: new Date().toISOString(),
+        },
+        android: {
+          priority: priority === 'high' ? 'high' : 'normal',
+          notification: {
+            sound: sound === 'default' ? 'default' : sound,
+            channelId: 'default', // Must match channel ID in app
+          },
+        },
+        apns: {
+          payload: {
+            aps: {
+              sound: sound === 'default' ? 'default.aiff' : sound,
+            },
+          },
+        },
+      };
+
+      // Send to all tokens
+      const results = await admin.messaging().sendEachForMulticast({
+        tokens: validTokens,
+        ...message,
+      });
+
+      // Count successful sends
+      let sentCount = 0;
+      const failedTokens = [];
+
+      results.responses.forEach((response, index) => {
+        if (response.success) {
+          sentCount++;
+        } else {
+          const token = validTokens[index];
+          console.error(`❌ Failed to send to token ${index}:`, response.error);
+          
+          // Handle invalid tokens
+          if (response.error?.code === 'messaging/invalid-registration-token' ||
+              response.error?.code === 'messaging/registration-token-not-registered') {
+            failedTokens.push(token);
+            // Deactivate invalid token
+            DeviceToken.unregisterByToken(token).catch(err => {
+              console.error('Error deactivating invalid token:', err);
+            });
+          }
+        }
+      });
+
+      console.log(`✅ FCM notification sent: ${sentCount}/${validTokens.length} successful`);
+
+      return {
+        success: sentCount > 0,
+        message: sentCount > 0 ? `Sent to ${sentCount} device(s)` : 'Failed to send',
+        sent: sentCount,
+        failed: validTokens.length - sentCount,
+        failedTokens,
+      };
+    } catch (error) {
+      console.error('❌ Error sending FCM notification:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to send notification',
+        sent: 0,
+      };
+    }
+  }
+
+  // Send notification to multiple users
+  async sendToUsers(userIds, { title, body, data = {}, sound = 'default', priority = 'high' }) {
+    const results = await Promise.all(
+      userIds.map(userId => this.sendToUser(userId, { title, body, data, sound, priority }))
+    );
+
+    const totalSent = results.reduce((sum, r) => sum + (r.sent || 0), 0);
+    const totalFailed = results.reduce((sum, r) => sum + (r.failed || 0), 0);
+
+    return {
+      success: totalSent > 0,
+      message: `Sent to ${totalSent} device(s), ${totalFailed} failed`,
+      sent: totalSent,
+      failed: totalFailed,
+      results,
+    };
+  }
+
+  // Send notification to specific token
+  async sendToToken(token, { title, body, data = {}, sound = 'default', priority = 'high' }) {
+    try {
+      if (!this.isValidToken(token)) {
+        return { success: false, message: 'Invalid token format' };
+      }
+
+      const message = {
+        token,
+        notification: {
+          title,
+          body,
+        },
+        data: {
+          ...data,
+          timestamp: new Date().toISOString(),
+        },
+        android: {
+          priority: priority === 'high' ? 'high' : 'normal',
+          notification: {
+            sound: sound === 'default' ? 'default' : sound,
+            channelId: 'default',
+          },
+        },
+        apns: {
+          payload: {
+            aps: {
+              sound: sound === 'default' ? 'default.aiff' : sound,
+            },
+          },
+        },
+      };
+
+      const response = await admin.messaging().send(message);
+      console.log(`✅ FCM notification sent successfully: ${response}`);
+
+      return {
+        success: true,
+        message: 'Notification sent successfully',
+        messageId: response,
+      };
+    } catch (error) {
+      console.error('❌ Error sending FCM notification to token:', error);
+      
+      // Handle invalid token
+      if (error.code === 'messaging/invalid-registration-token' ||
+          error.code === 'messaging/registration-token-not-registered') {
+        DeviceToken.unregisterByToken(token).catch(err => {
+          console.error('Error deactivating invalid token:', err);
+        });
+      }
+
+      return {
+        success: false,
+        message: error.message || 'Failed to send notification',
+      };
+    }
+  }
+}
+
+module.exports = new FCMService();
+
