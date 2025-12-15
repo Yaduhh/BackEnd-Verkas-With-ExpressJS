@@ -67,9 +67,19 @@ class FCMService {
 
   // Validate if token is valid FCM token
   isValidToken(token) {
+    if (!token || typeof token !== 'string') {
+      return false;
+    }
+    
     // FCM tokens are typically long strings (152+ characters)
     // They don't have a specific prefix like Expo tokens
-    return token && typeof token === 'string' && token.length > 50;
+    // But they should NOT start with "ExponentPushToken" or "ExpoPushToken"
+    if (token.startsWith('ExponentPushToken[') || token.startsWith('ExpoPushToken[')) {
+      return false; // This is an Expo token, not FCM
+    }
+    
+    // FCM tokens are usually longer and don't have brackets
+    return token.length > 50 && !token.includes('[') && !token.includes(']');
   }
 
   // Send notification to single user

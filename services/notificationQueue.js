@@ -96,25 +96,14 @@ class NotificationQueue {
       let result;
       
       if (Array.isArray(job.userId)) {
-        // Multiple users - Try FCM first, fallback to Expo
-        try {
-          result = await fcmService.sendToUsers(job.userId, {
-            title: job.title,
-            body: job.body,
-            data: job.data,
-            sound: job.sound,
-            priority: job.priority
-          });
-        } catch (fcmError) {
-          console.warn('⚠️ FCM service failed, falling back to Expo:', fcmError.message);
-          result = await expoPushService.sendToUsers(job.userId, {
-            title: job.title,
-            body: job.body,
-            data: job.data,
-            sound: job.sound,
-            priority: job.priority
-          });
-        }
+        // Multiple users - Check token format first, then use appropriate service
+        result = await this.sendToUsersWithAutoDetect(job.userId, {
+          title: job.title,
+          body: job.body,
+          data: job.data,
+          sound: job.sound,
+          priority: job.priority
+        });
 
         if (result.sent > 0) {
           console.log(`✅ Queued notification sent: "${job.title}" to ${result.sent} device(s)`);
@@ -122,25 +111,14 @@ class NotificationQueue {
           console.warn(`⚠️ Queued notification failed: "${job.title}" - ${result.message || 'No devices'}`);
         }
       } else {
-        // Single user - Try FCM first, fallback to Expo
-        try {
-          result = await fcmService.sendToUser(job.userId, {
-            title: job.title,
-            body: job.body,
-            data: job.data,
-            sound: job.sound,
-            priority: job.priority
-          });
-        } catch (fcmError) {
-          console.warn('⚠️ FCM service failed, falling back to Expo:', fcmError.message);
-          result = await expoPushService.sendToUser(job.userId, {
-            title: job.title,
-            body: job.body,
-            data: job.data,
-            sound: job.sound,
-            priority: job.priority
-          });
-        }
+        // Single user - Check token format first, then use appropriate service
+        result = await this.sendToUserWithAutoDetect(job.userId, {
+          title: job.title,
+          body: job.body,
+          data: job.data,
+          sound: job.sound,
+          priority: job.priority
+        });
 
         if (result.sent > 0) {
           console.log(`✅ Queued notification sent: "${job.title}" to user ${job.userId} (${result.sent} device(s))`);
@@ -169,6 +147,87 @@ class NotificationQueue {
         });
       }
     }
+  }
+
+  /**
+   * Auto-detect token format and use appropriate service for single user
+   */
+  async sendToUserWithAutoDetect(userId, notification) {
+    const DeviceToken = require('../models/DeviceToken');
+    
+    // Get all active tokens for user
+    const tokens = await DeviceToken.findActiveByUserId(userId);
+    
+    if (tokens.length === 0) {
+      return { success: false, message: 'No device tokens', sent: 0 };
+    }
+
+    // Check token formats
+    const expoTokens = tokens.filter(t => expoPushService.isValidToken(t.device_token));
+    const fcmTokens = tokens.filter(t => fcmService.isValidToken(t.device_token));
+
+    // If all tokens are Expo format, use Expo service
+    if (expoTokens.length === tokens.length && expoTokens.length > 0) {
+      return await expoPushService.sendToUser(userId, notification);
+    }
+    
+    // If all tokens are FCM format, use FCM service
+    if (fcmTokens.length === tokens.length && fcmTokens.length > 0) {
+      if (!fcmService.initialized) {
+        // FCM not initialized, fallback to Expo
+        console.warn('⚠️ FCM service not initialized, falling back to Expo');
+        return await expoPushService.sendToUser(userId, notification);
+      }
+      return await fcmService.sendToUser(userId, notification);
+    }
+
+    // Mixed tokens - try both services
+    let totalSent = 0;
+    let totalFailed = 0;
+    
+    if (expoTokens.length > 0) {
+      const expoResult = await expoPushService.sendToUser(userId, notification);
+      totalSent += expoResult.sent || 0;
+    }
+    
+    if (fcmTokens.length > 0 && fcmService.initialized) {
+      try {
+        const fcmResult = await fcmService.sendToUser(userId, notification);
+        totalSent += fcmResult.sent || 0;
+      } catch (fcmError) {
+        console.warn('⚠️ FCM service failed:', fcmError.message);
+        totalFailed += fcmTokens.length;
+      }
+    } else if (fcmTokens.length > 0) {
+      totalFailed += fcmTokens.length;
+    }
+
+    return {
+      success: totalSent > 0,
+      message: `Sent to ${totalSent} device(s), ${totalFailed} failed`,
+      sent: totalSent,
+      failed: totalFailed
+    };
+  }
+
+  /**
+   * Auto-detect token format and use appropriate service for multiple users
+   */
+  async sendToUsersWithAutoDetect(userIds, notification) {
+    const results = await Promise.all(
+      userIds.map(userId => this.sendToUserWithAutoDetect(userId, notification))
+    );
+
+    const totalSent = results.reduce((sum, r) => sum + (r.sent || 0), 0);
+    const totalFailed = results.reduce((sum, r) => sum + (r.failed || 0), 0);
+
+    return {
+      success: totalSent > 0,
+      message: `Sent to ${totalSent} device(s), ${totalFailed} failed`,
+      sent: totalSent,
+      failed: totalFailed,
+      results
+    };
   }
 
   /**
