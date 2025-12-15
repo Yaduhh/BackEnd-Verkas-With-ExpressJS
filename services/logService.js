@@ -91,6 +91,40 @@ class LogService {
           return; // Silent fail jika branch tidak ditemukan
         }
 
+        // Helper function to safely stringify JSON for MySQL JSON columns
+        const safeStringify = (data) => {
+          if (!data) return null;
+          try {
+            // First, clean the data to remove any problematic values
+            const cleaned = JSON.parse(JSON.stringify(data, (key, value) => {
+              // Skip functions and undefined
+              if (typeof value === 'function' || value === undefined) {
+                return null;
+              }
+              // Convert Buffer to string if present
+              if (Buffer.isBuffer(value)) {
+                return value.toString('utf8');
+              }
+              // Ensure all strings are valid UTF-8
+              if (typeof value === 'string') {
+                // Remove any invalid UTF-8 characters and control characters
+                return value.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+              }
+              return value;
+            }));
+            // Stringify and ensure it's a valid UTF-8 string
+            const jsonString = JSON.stringify(cleaned);
+            // Convert to Buffer and back to ensure UTF-8 encoding
+            return Buffer.from(jsonString, 'utf8').toString('utf8');
+          } catch (error) {
+            // If stringify fails, return null instead of throwing
+            if (process.env.NODE_ENV === 'development') {
+              console.error('Error stringifying JSON for log:', error);
+            }
+            return null;
+          }
+        };
+
         const sql = `
           INSERT INTO activity_logs (
             user_id, user_name, user_email, user_role,
@@ -101,8 +135,13 @@ class LogService {
             ip_address, user_agent, request_method, request_path,
             metadata,
             created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS CHAR CHARACTER SET utf8mb4), CAST(? AS CHAR CHARACTER SET utf8mb4), CAST(? AS CHAR CHARACTER SET utf8mb4), ?, ?, ?, ?, ?, ?, CAST(? AS CHAR CHARACTER SET utf8mb4), NOW())
         `;
+
+        const oldValuesJson = safeStringify(oldValues);
+        const newValuesJson = safeStringify(newValues);
+        const changesJson = safeStringify(changes);
+        const metadataJson = safeStringify(metadata);
 
         await query(sql, [
           userId,
@@ -114,16 +153,16 @@ class LogService {
           entityId,
           branchId,
           branchInfo.name || null,
-          oldValues ? JSON.stringify(oldValues) : null,
-          newValues ? JSON.stringify(newValues) : null,
-          changes ? JSON.stringify(changes) : null,
+          oldValuesJson,
+          newValuesJson,
+          changesJson,
           status,
           errorMessage,
           ipAddress,
           userAgent,
           requestMethod,
           requestPath,
-          metadata ? JSON.stringify(metadata) : null,
+          metadataJson,
         ]);
       } catch (error) {
         // Silent fail - logging should not break the main flow
@@ -155,19 +194,55 @@ class LogService {
     // Fire and forget - tidak blocking main flow
     setImmediate(async () => {
       try {
+        // Helper function to safely stringify JSON for MySQL JSON columns
+        const safeStringify = (data) => {
+          if (!data) return null;
+          try {
+            // First, clean the data to remove any problematic values
+            const cleaned = JSON.parse(JSON.stringify(data, (key, value) => {
+              // Skip functions and undefined
+              if (typeof value === 'function' || value === undefined) {
+                return null;
+              }
+              // Convert Buffer to string if present
+              if (Buffer.isBuffer(value)) {
+                return value.toString('utf8');
+              }
+              // Ensure all strings are valid UTF-8
+              if (typeof value === 'string') {
+                // Remove any invalid UTF-8 characters and control characters
+                return value.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+              }
+              return value;
+            }));
+            // Stringify and ensure it's a valid UTF-8 string
+            const jsonString = JSON.stringify(cleaned);
+            // Convert to Buffer and back to ensure UTF-8 encoding
+            return Buffer.from(jsonString, 'utf8').toString('utf8');
+          } catch (error) {
+            // If stringify fails, return null instead of throwing
+            if (process.env.NODE_ENV === 'development') {
+              console.error('Error stringifying JSON for log:', error);
+            }
+            return null;
+          }
+        };
+
         const sql = `
           INSERT INTO system_logs (
             level, category, message, context, user_id, branch_id,
             ip_address, request_method, request_path,
             stack_trace, error_code, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+          ) VALUES (?, ?, ?, CAST(? AS CHAR CHARACTER SET utf8mb4), ?, ?, ?, ?, ?, ?, ?, NOW())
         `;
+
+        const contextJson = safeStringify(context);
 
         await query(sql, [
           level,
           category,
           message,
-          context ? JSON.stringify(context) : null,
+          contextJson,
           userId,
           branchId,
           ipAddress,
