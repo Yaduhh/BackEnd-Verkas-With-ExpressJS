@@ -6,20 +6,22 @@ const User = require('../models/User');
 const authenticate = async (req, res, next) => {
   try {
     // Get token from header
-    const authHeader = req.headers.authorization;
-    
+    // Note: React Native fetch may convert headers to lowercase
+    // So we check both 'authorization' and 'Authorization'
+    const authHeader = req.headers.authorization || req.headers.Authorization;
+
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({
         success: false,
         message: 'No token provided'
       });
     }
-    
+
     const token = authHeader.substring(7); // Remove 'Bearer ' prefix
-    
+
     // Verify token
     const decoded = jwt.verify(token, config.jwtSecret);
-    
+
     // Get user
     const user = await User.findById(decoded.userId);
     if (!user) {
@@ -28,11 +30,11 @@ const authenticate = async (req, res, next) => {
         message: 'User not found'
       });
     }
-    
+
     // Attach user to request
     req.user = user;
     req.userId = user.id;
-    
+
     next();
   } catch (error) {
     if (error.name === 'JsonWebTokenError') {
@@ -54,8 +56,9 @@ const authenticate = async (req, res, next) => {
 // Optional authentication (for endpoints that work with or without auth)
 const optionalAuth = async (req, res, next) => {
   try {
-    const authHeader = req.headers.authorization;
-    
+    // Note: React Native fetch may convert headers to lowercase
+    const authHeader = req.headers.authorization || req.headers.Authorization;
+
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.substring(7);
       try {
@@ -69,7 +72,7 @@ const optionalAuth = async (req, res, next) => {
         // Ignore token errors for optional auth
       }
     }
-    
+
     next();
   } catch (error) {
     next(error);
@@ -85,14 +88,14 @@ const authorize = (...roles) => {
         message: 'Authentication required'
       });
     }
-    
+
     if (!roles.includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Insufficient permissions'
       });
     }
-    
+
     next();
   };
 };
@@ -110,4 +113,3 @@ module.exports = {
   authorize,
   generateToken
 };
-
