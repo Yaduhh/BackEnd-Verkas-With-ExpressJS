@@ -465,14 +465,51 @@ class LogService {
 
     const logs = await query(sql, finalParams);
     
-    // Parse JSON fields
-    return logs.map(log => ({
-      ...log,
-      old_values: log.old_values ? JSON.parse(log.old_values) : null,
-      new_values: log.new_values ? JSON.parse(log.new_values) : null,
-      changes: log.changes ? JSON.parse(log.changes) : null,
-      metadata: log.metadata ? JSON.parse(log.metadata) : null,
-    }));
+    // Parse JSON fields - SAFE parsing with error handling
+    return logs.map(log => {
+      const safeParseJSON = (value) => {
+        if (!value || value === null || value === 'null' || value === '') {
+          return null;
+        }
+        
+        // If already an object, return as is
+        if (typeof value === 'object' && !Array.isArray(value)) {
+          return value;
+        }
+        
+        // If it's a string, try to parse
+        if (typeof value === 'string') {
+          try {
+            // Check if it looks like JSON
+            const trimmed = value.trim();
+            if (trimmed === '' || trimmed === 'null' || trimmed === 'undefined') {
+              return null;
+            }
+            
+            // Try to parse
+            const parsed = JSON.parse(trimmed);
+            return parsed;
+          } catch (e) {
+            // If parsing fails, log and return null
+            console.warn('Failed to parse JSON field:', {
+              value: value?.substring(0, 100),
+              error: e.message
+            });
+            return null;
+          }
+        }
+        
+        return null;
+      };
+      
+      return {
+        ...log,
+        old_values: safeParseJSON(log.old_values),
+        new_values: safeParseJSON(log.new_values),
+        changes: safeParseJSON(log.changes),
+        metadata: safeParseJSON(log.metadata),
+      };
+    });
   }
 
   /**
@@ -572,10 +609,37 @@ class LogService {
 
     const logs = await query(sql, params);
     
-    // Parse JSON fields
+    // Parse JSON fields - SAFE parsing with error handling
+    const safeParseJSON = (value) => {
+      if (!value || value === null || value === 'null' || value === '') {
+        return null;
+      }
+      
+      // If already an object, return as is
+      if (typeof value === 'object' && !Array.isArray(value)) {
+        return value;
+      }
+      
+      // If it's a string, try to parse
+      if (typeof value === 'string') {
+        try {
+          const trimmed = value.trim();
+          if (trimmed === '' || trimmed === 'null' || trimmed === 'undefined') {
+            return null;
+          }
+          return JSON.parse(trimmed);
+        } catch (e) {
+          console.warn('Failed to parse JSON field:', e.message);
+          return null;
+        }
+      }
+      
+      return null;
+    };
+    
     return logs.map(log => ({
       ...log,
-      context: log.context ? JSON.parse(log.context) : null,
+      context: safeParseJSON(log.context),
     }));
   }
 
@@ -623,13 +687,40 @@ class LogService {
 
     const logs = await query(sql, params);
     
-    // Parse JSON fields
+    // Parse JSON fields - SAFE parsing with error handling
+    const safeParseJSON = (value) => {
+      if (!value || value === null || value === 'null' || value === '') {
+        return null;
+      }
+      
+      // If already an object, return as is
+      if (typeof value === 'object' && !Array.isArray(value)) {
+        return value;
+      }
+      
+      // If it's a string, try to parse
+      if (typeof value === 'string') {
+        try {
+          const trimmed = value.trim();
+          if (trimmed === '' || trimmed === 'null' || trimmed === 'undefined') {
+            return null;
+          }
+          return JSON.parse(trimmed);
+        } catch (e) {
+          console.warn('Failed to parse JSON field:', e.message);
+          return null;
+        }
+      }
+      
+      return null;
+    };
+    
     return logs.map(log => ({
       ...log,
-      old_values: log.old_values ? JSON.parse(log.old_values) : null,
-      new_values: log.new_values ? JSON.parse(log.new_values) : null,
-      changes: log.changes ? JSON.parse(log.changes) : null,
-      metadata: log.metadata ? JSON.parse(log.metadata) : null,
+      old_values: safeParseJSON(log.old_values),
+      new_values: safeParseJSON(log.new_values),
+      changes: safeParseJSON(log.changes),
+      metadata: safeParseJSON(log.metadata),
     }));
   }
 
