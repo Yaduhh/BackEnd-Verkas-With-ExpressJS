@@ -18,5 +18,8 @@ router.post('/test', authenticate, notificationController.sendTest);
 // Check device token status (for debugging)
 router.get('/status', authenticate, notificationController.checkStatus);
 
+// Test send notification (for debugging production issues)
+router.post('/test-send', authenticate, notificationController.testSend);
+
 module.exports = router;
 

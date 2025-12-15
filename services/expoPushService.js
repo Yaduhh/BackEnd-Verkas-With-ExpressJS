@@ -197,16 +197,48 @@ class ExpoPushService {
         console.log(`✅ Notification sent to user ${userId}: ${sentCount}/${validTokens.length} device(s) successful`);
       } else {
         console.warn(`⚠️ Notification failed for user ${userId}: 0/${validTokens.length} device(s) successful`);
-        // Log ticket details for debugging
+        // Log ticket details for debugging - CRITICAL for production debugging
         if (tickets.length > 0) {
           const errors = tickets.filter(t => t.status !== 'ok');
           if (errors.length > 0) {
-            console.error('❌ Ticket errors:', errors.map(e => ({
+            console.error('❌ CRITICAL: Ticket errors (production debugging):', errors.map((e, idx) => ({
+              index: idx,
               status: e.status,
               message: e.message,
-              details: e.details
+              details: e.details,
+              error: e.details?.error,
+              errorCode: e.details?.errorCode,
+              tokenPreview: validTokens[idx]?.substring(0, 30) + '...'
             })));
+            
+            // Check for common production issues
+            const deviceNotRegistered = errors.filter(e => 
+              e.details?.error === 'DeviceNotRegistered' || 
+              e.message?.includes('DeviceNotRegistered')
+            );
+            const invalidCredentials = errors.filter(e => 
+              e.details?.error === 'InvalidCredentials' || 
+              e.message?.includes('InvalidCredentials')
+            );
+            const messageTooBig = errors.filter(e => 
+              e.details?.error === 'MessageTooBig' || 
+              e.message?.includes('MessageTooBig')
+            );
+            
+            if (deviceNotRegistered.length > 0) {
+              console.error('🔴 PRODUCTION ISSUE: DeviceNotRegistered - Token mungkin expired atau app di-uninstall');
+            }
+            if (invalidCredentials.length > 0) {
+              console.error('🔴 PRODUCTION ISSUE: InvalidCredentials - Cek EXPO_ACCESS_TOKEN atau Firebase credentials');
+            }
+            if (messageTooBig.length > 0) {
+              console.error('🔴 PRODUCTION ISSUE: MessageTooBig - Notifikasi terlalu besar (>4KB)');
+            }
+          } else {
+            console.error('❌ CRITICAL: All tickets returned but none successful. Check ticket status:', tickets);
           }
+        } else {
+          console.error('❌ CRITICAL: No tickets returned from Expo API');
         }
       }
 
