@@ -306,17 +306,26 @@ class LogService {
       }
     } else if (userRole === 'admin' && branchId) {
       // Admin: hanya bisa lihat log di branch yang mereka assign
-      sql += ' AND branch_id = ?';
-      params.push(parseInt(branchId));
+      const branchIdInt = parseInt(branchId);
+      if (!isNaN(branchIdInt) && branchIdInt > 0) {
+        sql += ' AND branch_id = ?';
+        params.push(branchIdInt);
+      }
     } else if (branchId) {
       // Direct branch filter
-      sql += ' AND branch_id = ?';
-      params.push(parseInt(branchId));
+      const branchIdInt = parseInt(branchId);
+      if (!isNaN(branchIdInt) && branchIdInt > 0) {
+        sql += ' AND branch_id = ?';
+        params.push(branchIdInt);
+      }
     }
 
     if (userId) {
-      sql += ' AND user_id = ?';
-      params.push(userId);
+      const userIdInt = parseInt(userId);
+      if (!isNaN(userIdInt) && userIdInt > 0) {
+        sql += ' AND user_id = ?';
+        params.push(userIdInt);
+      }
     }
     if (action) {
       sql += ' AND action = ?';
@@ -327,8 +336,11 @@ class LogService {
       params.push(entityType);
     }
     if (entityId) {
-      sql += ' AND entity_id = ?';
-      params.push(entityId);
+      const entityIdInt = parseInt(entityId);
+      if (!isNaN(entityIdInt) && entityIdInt > 0) {
+        sql += ' AND entity_id = ?';
+        params.push(entityIdInt);
+      }
     }
     if (startDate) {
       sql += ' AND created_at >= ?';
@@ -341,13 +353,54 @@ class LogService {
 
     sql += ' ORDER BY created_at DESC';
     sql += ` LIMIT ? OFFSET ?`;
-    // Ensure limit and offset are integers
-    const limitInt = parseInt(limit) || 50;
-    const pageInt = parseInt(page) || 1;
-    const offsetInt = (pageInt - 1) * limitInt;
+    // Ensure limit and offset are valid integers (not NaN, not null, not undefined)
+    let limitInt = 50;
+    let pageInt = 1;
+    
+    if (limit !== null && limit !== undefined) {
+      const parsed = parseInt(limit);
+      if (!isNaN(parsed) && parsed > 0) {
+        limitInt = parsed;
+      }
+    }
+    
+    if (page !== null && page !== undefined) {
+      const parsed = parseInt(page);
+      if (!isNaN(parsed) && parsed > 0) {
+        pageInt = parsed;
+      }
+    }
+    
+    const offsetInt = Math.max(0, (pageInt - 1) * limitInt);
+    
+    // Validate all params before pushing
     params.push(limitInt, offsetInt);
+    
+    // Final validation: ensure no undefined or null values in params (except for strings)
+    const validParams = params.map(p => {
+      if (p === undefined || p === null) {
+        return null; // MySQL accepts null
+      }
+      if (typeof p === 'number' && isNaN(p)) {
+        return 0; // Replace NaN with 0
+      }
+      return p;
+    });
+    
+    // Count placeholders in SQL
+    const placeholderCount = (sql.match(/\?/g) || []).length;
+    
+    if (validParams.length !== placeholderCount) {
+      console.error('SQL parameter mismatch:', {
+        sql,
+        placeholderCount,
+        paramsLength: validParams.length,
+        params: validParams
+      });
+      throw new Error(`SQL parameter count mismatch: expected ${placeholderCount}, got ${validParams.length}`);
+    }
 
-    const logs = await query(sql, params);
+    const logs = await query(sql, validParams);
     
     // Parse JSON fields
     return logs.map(log => ({
@@ -431,10 +484,10 @@ class LogService {
 
     sql += ' ORDER BY created_at DESC';
     sql += ` LIMIT ? OFFSET ?`;
-    // Ensure limit and offset are integers
-    const limitInt = parseInt(limit) || 50;
-    const pageInt = parseInt(page) || 1;
-    const offsetInt = (pageInt - 1) * limitInt;
+    // Ensure limit and offset are valid integers (not NaN)
+    const limitInt = (limit && !isNaN(parseInt(limit)) && parseInt(limit) > 0) ? parseInt(limit) : 50;
+    const pageInt = (page && !isNaN(parseInt(page)) && parseInt(page) > 0) ? parseInt(page) : 1;
+    const offsetInt = Math.max(0, (pageInt - 1) * limitInt);
     params.push(limitInt, offsetInt);
 
     const logs = await query(sql, params);

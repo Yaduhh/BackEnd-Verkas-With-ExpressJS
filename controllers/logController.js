@@ -49,19 +49,25 @@ const getActivityLogs = async (req, res, next) => {
       // Ensure branchIds is always an array
       const filterBranchIds = branch_id 
         ? [parseInt(branch_id)].filter(id => !isNaN(id) && id > 0)
-        : (Array.isArray(branchIds) ? branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0) : []);
+        : (Array.isArray(branchIds) && branchIds.length > 0 
+            ? branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0) 
+            : null); // Use null instead of empty array
+
+      // Ensure page and limit are valid integers
+      const pageInt = parseInt(page) || 1;
+      const limitInt = parseInt(limit) || 50;
 
       logs = await LogService.getActivityLogs({
         userRole: 'owner',
-        branchIds: filterBranchIds,
+        branchIds: filterBranchIds && filterBranchIds.length > 0 ? filterBranchIds : null,
         userId: user_id ? parseInt(user_id) : null,
-        action,
-        entityType: entity_type,
+        action: action || null,
+        entityType: entity_type || null,
         entityId: entity_id ? parseInt(entity_id) : null,
-        startDate: start_date,
-        endDate: end_date,
-        page: parseInt(page),
-        limit: parseInt(limit),
+        startDate: start_date || null,
+        endDate: end_date || null,
+        page: pageInt,
+        limit: limitInt,
       });
 
       total = await ActivityLog.count({
