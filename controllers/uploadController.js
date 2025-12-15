@@ -271,7 +271,7 @@ const deleteFile = async (req, res, next) => {
 
 module.exports = {
   uploadFile: [upload.single('file'), uploadFile],
-  uploadFiles: [upload.array('files', 10), uploadFiles], // Max 10 files
+  uploadFiles: [upload.array('files'), uploadFiles], // No file count limit
   getFile,
   deleteFile
 };

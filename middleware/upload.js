@@ -48,12 +48,13 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-// Configure multer
+// Configure multer - No file size limit, support unlimited files
 const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB max file size
+    fileSize: 500 * 1024 * 1024, // 500MB max file size (practically unlimited for most use cases)
+    files: undefined // No limit on number of files
   }
 });
 

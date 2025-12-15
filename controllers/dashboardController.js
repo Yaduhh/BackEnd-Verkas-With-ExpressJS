@@ -13,7 +13,7 @@ const {
 } = require('../utils/dateHelper');
 
 // Helper: Format section for response
-function formatSection(date, items, transactions) {
+function formatSection(date, items, transactions, req) {
   const d = parseDate(date);
   const income = transactions
     .filter(t => t.type === 'income')
@@ -21,6 +21,15 @@ function formatSection(date, items, transactions) {
   const expense = transactions
     .filter(t => t.type === 'expense')
     .reduce((sum, t) => sum + parseFloat(t.amount), 0);
+  
+  // Helper to convert path to full URL
+  const pathToUrl = (path) => {
+    if (!path) return null;
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return path;
+    }
+    return `${req.protocol}://${req.get('host')}${path.startsWith('/') ? path : '/' + path}`;
+  };
   
   return {
     dateLabel: formatDateLabel(d, 'day'),
@@ -34,11 +43,16 @@ function formatSection(date, items, transactions) {
       if (item.lampiran) {
         try {
           const parsed = JSON.parse(item.lampiran);
-          // If parsed is array, use it; if string, wrap in array
-          lampiran = Array.isArray(parsed) ? parsed : [parsed];
+          // If parsed is array, convert each path to URL
+          if (Array.isArray(parsed)) {
+            lampiran = parsed.map(pathToUrl);
+          } else {
+            // Single value, convert to URL and wrap in array
+            lampiran = [pathToUrl(parsed)];
+          }
         } catch (e) {
-          // If not JSON, use as string and wrap in array
-          lampiran = [item.lampiran];
+          // If not JSON, use as string and convert to URL
+          lampiran = [pathToUrl(item.lampiran)];
         }
       }
       
@@ -47,7 +61,7 @@ function formatSection(date, items, transactions) {
         category: item.category_name,
         note: item.note || '',
         amount: item.type === 'expense' ? -parseFloat(item.amount) : parseFloat(item.amount),
-        lampiran: lampiran, // Always array or null
+        lampiran: lampiran, // Always array or null with full URLs
         edit_accepted: item.edit_accepted !== undefined && item.edit_accepted !== null ? parseInt(item.edit_accepted) : 0 // 0 = default, 1 = pending, 2 = approved, 3 = rejected
       };
     })
@@ -94,7 +108,7 @@ const getHarian = async (req, res, next) => {
     const title = `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
     
     // Group by date (should be same date for harian)
-    const sections = transactions.length > 0 ? [formatSection(date, transactions, transactions)] : [];
+    const sections = transactions.length > 0 ? [formatSection(date, transactions, transactions, req)] : [];
     
     res.json({
       success: true,
@@ -200,7 +214,7 @@ const getMingguan = async (req, res, next) => {
     // Format sections
     const sections = weeks.map(w => {
       const startDate = parseDate(w.range.start);
-      return formatSection(w.range.start, w.transactions, w.transactions);
+      return formatSection(w.range.start, w.transactions, w.transactions, req);
     });
     
     res.json({
@@ -340,7 +354,7 @@ const getBulananAll = async (req, res, next) => {
         return null;
       }
       
-      const section = formatSection(firstDate, transactionsByMonth[monthKey], transactionsByMonth[monthKey]);
+      const section = formatSection(firstDate, transactionsByMonth[monthKey], transactionsByMonth[monthKey], req);
       
       // Override dengan format untuk bulanan (per bulan dalam tahun)
       const monthName = months[monthIndex - 1]; // monthIndex is 1-12, array is 0-11
@@ -451,7 +465,7 @@ const getBulanan = async (req, res, next) => {
     
     // Format sections (sorted by date descending)
     const dates = Object.keys(transactionsByDate).sort((a, b) => b.localeCompare(a));
-    const sections = dates.map(date => formatSection(date, transactionsByDate[date], transactionsByDate[date]));
+    const sections = dates.map(date => formatSection(date, transactionsByDate[date], transactionsByDate[date], req));
     
     res.json({
       success: true,
@@ -590,7 +604,7 @@ const getTahunan = async (req, res, next) => {
         return null;
       }
       
-      const section = formatSection(firstDate, transactionsByYear[yearKey], transactionsByYear[yearKey]);
+      const section = formatSection(firstDate, transactionsByYear[yearKey], transactionsByYear[yearKey], req);
       
       // Override dengan format untuk tahunan (per tahun, bukan per bulan)
       section.dateLabel = yearKey; // Tahun sebagai dateLabel

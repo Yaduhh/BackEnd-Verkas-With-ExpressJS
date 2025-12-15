@@ -89,6 +89,7 @@ const create = async (req, res, next) => {
     });
     
     // Log activity (only if branchId exists, because activity logs require branchId)
+    // Note: logActivity is fire-and-forget, no need to await or catch
     if (branchId) {
       LogService.logActivity({
         userId: req.userId,
@@ -105,7 +106,7 @@ const create = async (req, res, next) => {
         userAgent: req.get('user-agent'),
         requestMethod: req.method,
         requestPath: req.path,
-      }).catch(err => console.error('Error logging activity:', err));
+      });
     }
     
     res.status(201).json({
@@ -162,6 +163,7 @@ const update = async (req, res, next) => {
     }
     
     // Log activity (only if branchId exists)
+    // Note: logActivity is fire-and-forget, no need to await or catch
     if (existing.branch_id) {
       LogService.logActivity({
         userId: req.userId,
@@ -184,7 +186,7 @@ const update = async (req, res, next) => {
         userAgent: req.get('user-agent'),
         requestMethod: req.method,
         requestPath: req.path,
-      }).catch(err => console.error('Error logging activity:', err));
+      });
     }
     
     res.json({
@@ -222,6 +224,7 @@ const softDelete = async (req, res, next) => {
       const result = await Category.softDelete(id);
       
       // Log activity (only if branchId exists)
+      // Note: logActivity is fire-and-forget, no need to await or catch
       if (existing.branch_id) {
         LogService.logActivity({
           userId: req.userId,
@@ -238,7 +241,7 @@ const softDelete = async (req, res, next) => {
           userAgent: req.get('user-agent'),
           requestMethod: req.method,
           requestPath: req.path,
-        }).catch(err => console.error('Error logging activity:', err));
+        });
       }
       
       res.json({

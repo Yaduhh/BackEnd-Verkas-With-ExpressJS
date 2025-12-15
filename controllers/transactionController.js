@@ -2,6 +2,40 @@ const Transaction = require('../models/Transaction');
 const Category = require('../models/Category');
 const LogService = require('../services/logService');
 
+// Helper: Convert lampiran paths to full URLs
+const formatLampiran = (lampiran, req) => {
+  if (!lampiran) return null;
+  
+  try {
+    // Try to parse as JSON (array)
+    const parsed = JSON.parse(lampiran);
+    if (Array.isArray(parsed)) {
+      return parsed.map(path => {
+        // If already full URL, return as is
+        if (path.startsWith('http://') || path.startsWith('https://')) {
+          return path;
+        }
+        // Convert path to full URL
+        return `${req.protocol}://${req.get('host')}${path.startsWith('/') ? path : '/' + path}`;
+      });
+    } else {
+      // Single value
+      const path = parsed;
+      if (path.startsWith('http://') || path.startsWith('https://')) {
+        return [path];
+      }
+      return [`${req.protocol}://${req.get('host')}${path.startsWith('/') ? path : '/' + path}`];
+    }
+  } catch (e) {
+    // Not JSON, treat as string
+    const path = lampiran;
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return [path];
+    }
+    return [`${req.protocol}://${req.get('host')}${path.startsWith('/') ? path : '/' + path}`];
+  }
+};
+
 // Get all transactions
 const getAll = async (req, res, next) => {
   try {
@@ -67,10 +101,16 @@ const getAll = async (req, res, next) => {
       onlyDeleted: only_deleted === 'true'
     });
     
+    // Format lampiran paths to full URLs for all transactions
+    const formattedTransactions = transactions.map(t => ({
+      ...t,
+      lampiran: formatLampiran(t.lampiran, req)
+    }));
+    
     res.json({
       success: true,
       data: {
-        transactions,
+        transactions: formattedTransactions,
         pagination: {
           page: validPage,
           limit: validLimit,
@@ -107,9 +147,15 @@ const getById = async (req, res, next) => {
       });
     }
     
+    // Format lampiran paths to full URLs
+    const formattedTransaction = {
+      ...transaction,
+      lampiran: formatLampiran(transaction.lampiran, req)
+    };
+    
     res.json({
       success: true,
-      data: { transaction }
+      data: { transaction: formattedTransaction }
     });
   } catch (error) {
     next(error);
@@ -200,10 +246,16 @@ const create = async (req, res, next) => {
       requestPath: req.path,
     });
     
+    // Format lampiran paths to full URLs
+    const formattedTransaction = {
+      ...transaction,
+      lampiran: formatLampiran(transaction.lampiran, req)
+    };
+    
     res.status(201).json({
       success: true,
       message: 'Transaction created successfully',
-      data: { transaction }
+      data: { transaction: formattedTransaction }
     });
   } catch (error) {
     next(error);
@@ -321,10 +373,16 @@ const update = async (req, res, next) => {
         requestPath: req.path,
       });
       
+      // Format lampiran paths to full URLs
+      const formattedUpdatedTransaction = {
+        ...updatedTransaction,
+        lampiran: formatLampiran(updatedTransaction.lampiran, req)
+      };
+      
       return res.json({
         success: true,
         message: 'Transaction updated successfully',
-        data: { transaction: updatedTransaction }
+        data: { transaction: formattedUpdatedTransaction }
       });
     }
     
@@ -354,10 +412,16 @@ const update = async (req, res, next) => {
       requestPath: req.path,
     });
     
+    // Format lampiran paths to full URLs
+    const formattedTransaction = {
+      ...transaction,
+      lampiran: formatLampiran(transaction.lampiran, req)
+    };
+    
     res.json({
       success: true,
       message: 'Transaction updated successfully',
-      data: { transaction }
+      data: { transaction: formattedTransaction }
     });
   } catch (error) {
     next(error);
@@ -467,10 +531,16 @@ const restore = async (req, res, next) => {
       requestPath: req.path,
     });
     
+    // Format lampiran paths to full URLs
+    const formattedRestoredTransaction = {
+      ...restoredTransaction,
+      lampiran: formatLampiran(restoredTransaction.lampiran, req)
+    };
+    
     res.json({
       success: true,
       message: 'Transaction restored successfully',
-      data: { transaction: result }
+      data: { transaction: formattedRestoredTransaction }
     });
   } catch (error) {
     next(error);
@@ -607,10 +677,16 @@ const requestEdit = async (req, res, next) => {
       console.error('Error sending notification:', notifError);
     }
     
+    // Format lampiran paths to full URLs
+    const formattedTransaction = {
+      ...transaction,
+      lampiran: formatLampiran(transaction.lampiran, req)
+    };
+    
     res.json({
       success: true,
       message: 'Permintaan edit berhasil diajukan. Menunggu persetujuan owner.',
-      data: { transaction }
+      data: { transaction: formattedTransaction }
     });
   } catch (error) {
     next(error);
@@ -704,10 +780,16 @@ const approveEdit = async (req, res, next) => {
       console.error('Error sending notification:', notifError);
     }
     
+    // Format lampiran paths to full URLs
+    const formattedTransaction = {
+      ...transaction,
+      lampiran: formatLampiran(transaction.lampiran, req)
+    };
+    
     res.json({
       success: true,
       message: 'Permintaan edit berhasil disetujui',
-      data: { transaction }
+      data: { transaction: formattedTransaction }
     });
   } catch (error) {
     next(error);
@@ -800,10 +882,16 @@ const rejectEdit = async (req, res, next) => {
       console.error('Error sending notification:', notifError);
     }
     
+    // Format lampiran paths to full URLs
+    const formattedTransaction = {
+      ...transaction,
+      lampiran: formatLampiran(transaction.lampiran, req)
+    };
+    
     res.json({
       success: true,
       message: 'Permintaan edit ditolak',
-      data: { transaction }
+      data: { transaction: formattedTransaction }
     });
   } catch (error) {
     next(error);
@@ -857,9 +945,15 @@ const getEditRequests = async (req, res, next) => {
       status: statusFilter
     });
     
+    // Format lampiran paths to full URLs for all transactions
+    const formattedTransactions = transactions.map(t => ({
+      ...t,
+      lampiran: formatLampiran(t.lampiran, req)
+    }));
+    
     res.json({
       success: true,
-      data: { transactions }
+      data: { transactions: formattedTransactions }
     });
   } catch (error) {
     next(error);

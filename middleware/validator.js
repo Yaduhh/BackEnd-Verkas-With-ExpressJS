@@ -47,30 +47,27 @@ const validateCreateTransaction = [
     .trim(),
   body('lampiran')
     .custom((value, { req }) => {
-      // Lampiran wajib untuk expense, optional untuk income
+      // Lampiran wajib untuk semua transaksi (expense dan income)
       // Bisa berupa array (multiple files) atau string (single file/text)
-      if (req.body.type === 'expense') {
-        if (!value) {
-          throw new Error('Lampiran is required for expense transactions');
+      if (!value) {
+        throw new Error('Lampiran is required for all transactions');
+      }
+      // Check if array
+      if (Array.isArray(value)) {
+        if (value.length === 0) {
+          throw new Error('Lampiran is required for all transactions');
         }
-        // Check if array
-        if (Array.isArray(value)) {
-          if (value.length === 0) {
-            throw new Error('Lampiran is required for expense transactions');
+        // Validate each item in array
+        for (const item of value) {
+          if (!item || (typeof item === 'string' && item.trim() === '')) {
+            throw new Error('Lampiran array cannot contain empty values');
           }
-          // Validate each item in array
-          for (const item of value) {
-            if (!item || (typeof item === 'string' && item.trim() === '')) {
-              throw new Error('Lampiran array cannot contain empty values');
-            }
-          }
-        } else if (typeof value === 'string' && value.trim() === '') {
-          throw new Error('Lampiran is required for expense transactions');
         }
+      } else if (typeof value === 'string' && value.trim() === '') {
+        throw new Error('Lampiran is required for all transactions');
       }
       return true;
-    })
-    .optional(),
+    }),
   handleValidationErrors
 ];
 

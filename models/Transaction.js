@@ -100,15 +100,6 @@ class Transaction {
     // This avoids issues with prepared statements and LIMIT/OFFSET in some MySQL versions
     sql += ` LIMIT ${finalLimit} OFFSET ${offset}`;
     
-    // Debug: Log SQL and params to help diagnose issues
-    console.log('=== Transaction.findAll Debug ===');
-    console.log('SQL:', sql.replace(/\s+/g, ' ').trim());
-    console.log('Params:', JSON.stringify(params, null, 2));
-    console.log('Params count:', params.length);
-    console.log('Placeholders in SQL:', (sql.match(/\?/g) || []).length);
-    console.log('Params types:', params.map(p => typeof p));
-    console.log('Params values:', params);
-    
     // Ensure params array matches number of placeholders
     const placeholderCount = (sql.match(/\?/g) || []).length;
     if (params.length !== placeholderCount) {
