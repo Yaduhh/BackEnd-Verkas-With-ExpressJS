@@ -82,6 +82,31 @@ class FCMService {
     return token.length > 50 && !token.includes('[') && !token.includes(']');
   }
 
+  // Convert all data values to strings (FCM requirement)
+  // FCM data payload must only contain string values
+  convertDataToStrings(data) {
+    if (!data || typeof data !== 'object') {
+      return {};
+    }
+    
+    const stringData = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (value === null || value === undefined) {
+        stringData[key] = '';
+      } else if (typeof value === 'string') {
+        stringData[key] = value;
+      } else if (typeof value === 'object') {
+        // Convert objects/arrays to JSON string
+        stringData[key] = JSON.stringify(value);
+      } else {
+        // Convert numbers, booleans, etc. to string
+        stringData[key] = String(value);
+      }
+    }
+    
+    return stringData;
+  }
+
   // Send notification to single user
   async sendToUser(userId, { title, body, data = {}, sound = 'default', priority = 'high' }) {
     // Check if FCM is initialized
@@ -123,16 +148,19 @@ class FCMService {
       console.log('═══════════════════════════════════════════════════════════');
 
       // Prepare FCM message
+      // Convert all data values to strings (FCM requirement)
+      const stringData = this.convertDataToStrings({
+        ...data,
+        userId: userId.toString(),
+        timestamp: new Date().toISOString(),
+      });
+      
       const message = {
         notification: {
           title,
           body,
         },
-        data: {
-          ...data,
-          userId: userId.toString(),
-          timestamp: new Date().toISOString(),
-        },
+        data: stringData,
         android: {
           priority: priority === 'high' ? 'high' : 'normal',
           notification: {
@@ -227,16 +255,19 @@ class FCMService {
         return { success: false, message: 'Invalid token format' };
       }
 
+      // Convert all data values to strings (FCM requirement)
+      const stringData = this.convertDataToStrings({
+        ...data,
+        timestamp: new Date().toISOString(),
+      });
+      
       const message = {
         token,
         notification: {
           title,
           body,
         },
-        data: {
-          ...data,
-          timestamp: new Date().toISOString(),
-        },
+        data: stringData,
         android: {
           priority: priority === 'high' ? 'high' : 'normal',
           notification: {
