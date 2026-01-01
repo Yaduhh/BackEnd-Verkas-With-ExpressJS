@@ -10,6 +10,19 @@ const ActivityLog = require('../models/ActivityLog');
 const LogService = require('../services/logService');
 const { query } = require('../config/database');
 
+// Helper function untuk memastikan nilai integer yang valid (untuk LIMIT/OFFSET)
+// MySQL production lebih ketat dan tidak menerima NaN atau string
+const toSafeInt = (value, defaultValue = 0) => {
+  if (value === null || value === undefined || value === '') {
+    return defaultValue;
+  }
+  const parsed = parseInt(value, 10);
+  if (isNaN(parsed) || parsed < 0) {
+    return defaultValue;
+  }
+  return parsed;
+};
+
 // Get overview statistics
 const getOverview = async (req, res, next) => {
   try {
@@ -151,11 +164,14 @@ const getAllUsers = async (req, res, next) => {
     // Get total count
     const countSql = sql.replace('SELECT id, email, name, role, created_by, created_at, updated_at, status_deleted, deleted_at', 'SELECT COUNT(*) as count');
     const countResult = await query(countSql, params);
-    const total = parseInt(countResult[0].count);
+    const total = toSafeInt(countResult[0]?.count, 0);
     
-    // Add pagination
+    // Add pagination - ensure integer values for MySQL
+    const pageNum = toSafeInt(page, 1);
+    const limitNum = toSafeInt(limit, 50);
+    const offsetNum = (pageNum - 1) * limitNum;
     sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+    params.push(limitNum, offsetNum);
     
     const users = await query(sql, params);
     
@@ -178,15 +194,15 @@ const getAllUsers = async (req, res, next) => {
       creator: user.created_by ? creators[user.created_by] : null
     }));
     
-    res.json({
-      success: true,
-      data: {
-        users: usersWithCreator,
-        total,
-        page: parseInt(page),
-        limit: parseInt(limit)
-      }
-    });
+      res.json({
+        success: true,
+        data: {
+          users: usersWithCreator,
+          total,
+          page: pageNum,
+          limit: limitNum
+        }
+      });
   } catch (error) {
     next(error);
   }
@@ -378,9 +394,14 @@ const getAllTeams = async (req, res, next) => {
                       LEFT JOIN users u ON t.primary_owner_id = u.id
                       ${whereClause}`;
     const countResult = await query(countSql, params);
-    const total = parseInt(countResult[0].count);
+    const total = toSafeInt(countResult[0]?.count, 0);
     
     // Main query (simplified - just basic info)
+    // Ensure integer values for MySQL
+    const pageNum = toSafeInt(page, 1);
+    const limitNum = toSafeInt(limit, 50);
+    const offsetNum = (pageNum - 1) * limitNum;
+    
     let sql = `SELECT t.*, u.name as primary_owner_name, u.email as primary_owner_email,
                (SELECT COUNT(*) FROM owner_team_members WHERE team_id = t.id AND status = 'active') as member_count,
                (SELECT COUNT(*) FROM branches WHERE team_id = t.id AND status_deleted = false) as branch_count
@@ -389,7 +410,7 @@ const getAllTeams = async (req, res, next) => {
                ${whereClause}
                ORDER BY t.created_at DESC LIMIT ? OFFSET ?`;
     
-    const queryParams = [...params, parseInt(limit), (parseInt(page) - 1) * parseInt(limit)];
+    const queryParams = [...params, limitNum, offsetNum];
     const teams = await query(sql, queryParams);
     
     res.json({
@@ -397,8 +418,8 @@ const getAllTeams = async (req, res, next) => {
       data: {
         teams,
         total,
-        page: parseInt(page),
-        limit: parseInt(limit)
+        page: pageNum,
+        limit: limitNum
       }
     });
   } catch (error) {
@@ -412,7 +433,7 @@ const getTeamDetail = async (req, res, next) => {
     const { id } = req.params;
     
     // Get team basic info
-    const team = await OwnerTeam.findById(parseInt(id));
+    const team = await OwnerTeam.findById(toSafeInt(id));
     if (!team) {
       return res.status(404).json({
         success: false,
@@ -548,12 +569,12 @@ const getAllBranches = async (req, res, next) => {
     
     if (owner_id) {
       countSql += ' AND b.owner_id = ?';
-      countParams.push(parseInt(owner_id));
+      countParams.push(toSafeInt(owner_id));
     }
     
     if (team_id) {
       countSql += ' AND b.team_id = ?';
-      countParams.push(parseInt(team_id));
+      countParams.push(toSafeInt(team_id));
     }
     
     // Only apply search filter if search is provided and not empty/undefined
@@ -563,10 +584,14 @@ const getAllBranches = async (req, res, next) => {
     }
     
     const countResult = await query(countSql, countParams);
-    const total = parseInt(countResult[0]?.count || 0);
+    const total = toSafeInt(countResult[0]?.count, 0);
     
+    // Ensure integer values for MySQL
+    const pageNum = toSafeInt(page, 1);
+    const limitNum = toSafeInt(limit, 50);
+    const offsetNum = (pageNum - 1) * limitNum;
     sql += ' ORDER BY b.created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+    params.push(limitNum, offsetNum);
     
     const branches = await query(sql, params);
     
@@ -575,8 +600,8 @@ const getAllBranches = async (req, res, next) => {
       data: {
         branches,
         total,
-        page: parseInt(page),
-        limit: parseInt(limit)
+        page: pageNum,
+        limit: limitNum
       }
     });
   } catch (error) {
@@ -664,12 +689,12 @@ const getAllTransactions = async (req, res, next) => {
     
     if (branch_id) {
       countSql += ' AND t.branch_id = ?';
-      countParams.push(parseInt(branch_id));
+      countParams.push(toSafeInt(branch_id));
     }
     
     if (user_id) {
       countSql += ' AND t.user_id = ?';
-      countParams.push(parseInt(user_id));
+      countParams.push(toSafeInt(user_id));
     }
     
     if (!includeDeleted || includeDeleted !== 'true') {
@@ -702,11 +727,14 @@ const getAllTransactions = async (req, res, next) => {
     }
     
     const countResult = await query(countSql, countParams);
-    const total = parseInt(countResult[0]?.count || 0);
+    const total = toSafeInt(countResult[0]?.count, 0);
     
-    // Add pagination
+    // Add pagination - ensure integer values for MySQL
+    const pageNum = toSafeInt(page, 1);
+    const limitNum = toSafeInt(limit, 50);
+    const offsetNum = (pageNum - 1) * limitNum;
     sql += ' ORDER BY t.transaction_date DESC, t.created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+    params.push(limitNum, offsetNum);
     
     const transactions = await query(sql, params);
     
@@ -715,8 +743,8 @@ const getAllTransactions = async (req, res, next) => {
       data: {
         transactions,
         total,
-        page: parseInt(page),
-        limit: parseInt(limit)
+        page: pageNum,
+        limit: limitNum
       }
     });
   } catch (error) {
@@ -779,10 +807,14 @@ const getAllCategories = async (req, res, next) => {
     }
     
     const countResult = await query(countSql, countParams);
-    const total = parseInt(countResult[0]?.count || 0);
+    const total = toSafeInt(countResult[0]?.count, 0);
     
+    // Ensure integer values for MySQL
+    const pageNum = toSafeInt(page, 1);
+    const limitNum = toSafeInt(limit, 50);
+    const offsetNum = (pageNum - 1) * limitNum;
     sql += ' ORDER BY c.type ASC, c.name ASC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+    params.push(limitNum, offsetNum);
     
     const categories = await query(sql, params);
     
@@ -791,8 +823,8 @@ const getAllCategories = async (req, res, next) => {
       data: {
         categories,
         total,
-        page: parseInt(page),
-        limit: parseInt(limit)
+        page: pageNum,
+        limit: limitNum
       }
     });
   } catch (error) {
@@ -814,20 +846,24 @@ const getAllActivityLogs = async (req, res, next) => {
       limit = 50,
     } = req.query;
     
+    // Ensure integer values for MySQL
+    const pageNum = toSafeInt(page, 1);
+    const limitNum = toSafeInt(limit, 50);
+    
     const logs = await LogService.getActivityLogs({
-      userId: user_id ? parseInt(user_id) : null,
-      branchId: branch_id ? parseInt(branch_id) : null,
+      userId: user_id ? toSafeInt(user_id) : null,
+      branchId: branch_id ? toSafeInt(branch_id) : null,
       action,
       entityType: entity_type,
       startDate: start_date,
       endDate: end_date,
-      page: parseInt(page),
-      limit: parseInt(limit),
+      page: pageNum,
+      limit: limitNum,
     });
     
     const total = await ActivityLog.count({
-      userId: user_id ? parseInt(user_id) : null,
-      branchId: branch_id ? parseInt(branch_id) : null,
+      userId: user_id ? toSafeInt(user_id) : null,
+      branchId: branch_id ? toSafeInt(branch_id) : null,
       action,
       entityType: entity_type,
       startDate: start_date,
@@ -839,8 +875,8 @@ const getAllActivityLogs = async (req, res, next) => {
       data: {
         logs,
         total,
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNum,
+        limit: limitNum,
       },
     });
   } catch (error) {
@@ -860,13 +896,17 @@ const getAllSystemLogs = async (req, res, next) => {
       limit = 50,
     } = req.query;
     
+    // Ensure integer values for MySQL
+    const pageNum = toSafeInt(page, 1);
+    const limitNum = toSafeInt(limit, 50);
+    
     const logs = await LogService.getSystemLogs({
       level,
       category,
       startDate: start_date,
       endDate: end_date,
-      page: parseInt(page),
-      limit: parseInt(limit),
+      page: pageNum,
+      limit: limitNum,
     });
     
     // Count system logs
@@ -891,15 +931,15 @@ const getAllSystemLogs = async (req, res, next) => {
     }
     
     const countResult = await query(countSql, countParams);
-    const total = parseInt(countResult[0].count);
+    const total = toSafeInt(countResult[0]?.count, 0);
     
     res.json({
       success: true,
       data: {
         logs,
         total,
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNum,
+        limit: limitNum,
       },
     });
   } catch (error) {
@@ -933,17 +973,17 @@ const getAllPayments = async (req, res, next) => {
     // Filter by month and year (based on paid_at date)
     if (month && month !== 'undefined' && month !== '') {
       sql += ' AND MONTH(p.paid_at) = ?';
-      params.push(parseInt(month));
+      params.push(toSafeInt(month));
     }
     
     if (year && year !== 'undefined' && year !== '') {
       sql += ' AND YEAR(p.paid_at) = ?';
-      params.push(parseInt(year));
+      params.push(toSafeInt(year));
     }
     
     if (user_id) {
       sql += ' AND s.user_id = ?';
-      params.push(parseInt(user_id));
+      params.push(toSafeInt(user_id));
     }
     
     // Build count query separately
@@ -965,21 +1005,21 @@ const getAllPayments = async (req, res, next) => {
     // Filter by month and year
     if (month && month !== 'undefined' && month !== '') {
       countSql += ' AND MONTH(p.paid_at) = ?';
-      countParams.push(parseInt(month));
+      countParams.push(toSafeInt(month));
     }
     
     if (year && year !== 'undefined' && year !== '') {
       countSql += ' AND YEAR(p.paid_at) = ?';
-      countParams.push(parseInt(year));
+      countParams.push(toSafeInt(year));
     }
     
     if (user_id) {
       countSql += ' AND s.user_id = ?';
-      countParams.push(parseInt(user_id));
+      countParams.push(toSafeInt(user_id));
     }
     
     const countResult = await query(countSql, countParams);
-    const total = parseInt(countResult[0]?.count || 0);
+    const total = toSafeInt(countResult[0]?.count, 0);
     
     // Calculate total amount for all paid payments matching filters
     let totalAmountSql = `SELECT COALESCE(SUM(p.amount), 0) as total_amount
@@ -1000,24 +1040,28 @@ const getAllPayments = async (req, res, next) => {
     // Filter by month and year
     if (month && month !== 'undefined' && month !== '') {
       totalAmountSql += ' AND MONTH(p.paid_at) = ?';
-      totalAmountParams.push(parseInt(month));
+      totalAmountParams.push(toSafeInt(month));
     }
     
     if (year && year !== 'undefined' && year !== '') {
       totalAmountSql += ' AND YEAR(p.paid_at) = ?';
-      totalAmountParams.push(parseInt(year));
+      totalAmountParams.push(toSafeInt(year));
     }
     
     if (user_id) {
       totalAmountSql += ' AND s.user_id = ?';
-      totalAmountParams.push(parseInt(user_id));
+      totalAmountParams.push(toSafeInt(user_id));
     }
     
     const totalAmountResult = await query(totalAmountSql, totalAmountParams);
     const totalAmount = parseFloat(totalAmountResult[0]?.total_amount || 0);
     
+    // Ensure integer values for MySQL
+    const pageNum = toSafeInt(page, 1);
+    const limitNum = toSafeInt(limit, 50);
+    const offsetNum = (pageNum - 1) * limitNum;
     sql += ' ORDER BY p.paid_at DESC, p.created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+    params.push(limitNum, offsetNum);
     
     const payments = await query(sql, params);
     
@@ -1027,8 +1071,8 @@ const getAllPayments = async (req, res, next) => {
         payments,
         total,
         totalAmount,
-        page: parseInt(page),
-        limit: parseInt(limit)
+        page: pageNum,
+        limit: limitNum
       }
     });
   } catch (error) {
@@ -1069,7 +1113,7 @@ const getAllSubscriptions = async (req, res, next) => {
     
     if (user_id) {
       sql += ' AND s.user_id = ?';
-      params.push(parseInt(user_id));
+      params.push(toSafeInt(user_id));
     }
     
     // Build count query separately
@@ -1097,10 +1141,14 @@ const getAllSubscriptions = async (req, res, next) => {
     }
     
     const countResult = await query(countSql, countParams);
-    const total = parseInt(countResult[0]?.count || 0);
+    const total = toSafeInt(countResult[0]?.count, 0);
     
+    // Ensure integer values for MySQL
+    const pageNum = toSafeInt(page, 1);
+    const limitNum = toSafeInt(limit, 50);
+    const offsetNum = (pageNum - 1) * limitNum;
     sql += ' ORDER BY s.created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+    params.push(limitNum, offsetNum);
     
     const subscriptions = await query(sql, params);
     
@@ -1109,8 +1157,8 @@ const getAllSubscriptions = async (req, res, next) => {
       data: {
         subscriptions,
         total,
-        page: parseInt(page),
-        limit: parseInt(limit)
+        page: pageNum,
+        limit: limitNum
       }
     });
   } catch (error) {
@@ -1134,10 +1182,14 @@ const getAllPlans = async (req, res, next) => {
     // Get total count
     const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total');
     const countResult = await query(countSql, params);
-    const total = parseInt(countResult[0].total);
+    const total = toSafeInt(countResult[0]?.total, 0);
     
+    // Ensure integer values for MySQL
+    const pageNum = toSafeInt(page, 1);
+    const limitNum = toSafeInt(limit, 50);
+    const offsetNum = (pageNum - 1) * limitNum;
     sql += ' ORDER BY price_monthly ASC, name ASC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+    params.push(limitNum, offsetNum);
     
     const plans = await query(sql, params);
     
@@ -1158,8 +1210,8 @@ const getAllPlans = async (req, res, next) => {
       data: {
         plans: parsedPlans,
         total,
-        page: parseInt(page),
-        limit: parseInt(limit)
+        page: pageNum,
+        limit: limitNum
       }
     });
   } catch (error) {
@@ -1216,7 +1268,7 @@ const updatePlan = async (req, res, next) => {
     const { id } = req.params;
     const { name, description, max_branches, price_monthly, price_yearly, features, is_active } = req.body;
     
-    const plan = await SubscriptionPlan.findById(parseInt(id), true); // Include inactive
+    const plan = await SubscriptionPlan.findById(toSafeInt(id), true); // Include inactive
     if (!plan) {
       return res.status(404).json({
         success: false,
@@ -1233,7 +1285,7 @@ const updatePlan = async (req, res, next) => {
     if (features !== undefined) updateData.features = features || [];
     if (is_active !== undefined) updateData.isActive = is_active;
     
-    const updatedPlan = await SubscriptionPlan.update(parseInt(id), updateData);
+    const updatedPlan = await SubscriptionPlan.update(toSafeInt(id), updateData);
     
     // Parse features if it's a string
     if (updatedPlan && typeof updatedPlan.features === 'string') {
@@ -1257,7 +1309,7 @@ const deletePlan = async (req, res, next) => {
   try {
     const { id } = req.params;
     
-    const plan = await SubscriptionPlan.findById(parseInt(id), true); // Include inactive
+    const plan = await SubscriptionPlan.findById(toSafeInt(id), true); // Include inactive
     if (!plan) {
       return res.status(404).json({
         success: false,
@@ -1266,7 +1318,7 @@ const deletePlan = async (req, res, next) => {
     }
     
     // Soft delete by setting is_active to false
-    await SubscriptionPlan.update(parseInt(id), { isActive: false });
+    await SubscriptionPlan.update(toSafeInt(id), { isActive: false });
     
     res.json({
       success: true,

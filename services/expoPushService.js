@@ -89,8 +89,14 @@ class ExpoPushService {
       console.log('═══════════════════════════════════════════════════════════');
       
       // Check if Expo access token is set (important for production)
-      if (!process.env.EXPO_ACCESS_TOKEN && process.env.NODE_ENV === 'production') {
-        console.warn('⚠️ [BACKEND] EXPO_ACCESS_TOKEN not set in production! This may cause notification delivery issues.');
+      if (!process.env.EXPO_ACCESS_TOKEN) {
+        if (process.env.NODE_ENV === 'production') {
+          console.warn('⚠️ [BACKEND] EXPO_ACCESS_TOKEN not set in production! This may cause notification delivery issues.');
+        } else {
+          console.log('ℹ️ [BACKEND] EXPO_ACCESS_TOKEN not set (optional for development)');
+        }
+      } else {
+        console.log('✅ [BACKEND] EXPO_ACCESS_TOKEN is set');
       }
 
       // Prepare messages
@@ -107,8 +113,12 @@ class ExpoPushService {
         },
       }));
 
+      console.log(`📦 [BACKEND] Prepared ${messages.length} notification message(s)`);
+
       // Send notifications in chunks with retry mechanism
+      // Expo SDK automatically chunks to max 100 messages per chunk
       const chunks = this.expo.chunkPushNotifications(messages);
+      console.log(`📦 [BACKEND] Split into ${chunks.length} chunk(s) (max 100 per chunk)`);
       const tickets = [];
       let sentCount = 0;
 
@@ -132,20 +142,25 @@ class ExpoPushService {
               }
             }
             
+            console.log(`📤 [BACKEND] Sending chunk ${chunks.indexOf(chunk) + 1}/${chunks.length} with ${chunk.length} notification(s)...`);
             const ticketChunk = await this.expo.sendPushNotificationsAsync(chunk);
+            console.log(`📥 [BACKEND] Received ${ticketChunk.length} ticket(s) from Expo API`);
             tickets.push(...ticketChunk);
             
             // Count successful sends and handle errors
             ticketChunk.forEach((ticket, index) => {
               if (ticket.status === 'ok') {
                 sentCount++;
+                console.log(`✅ [BACKEND] Ticket ${index + 1}: OK (ID: ${ticket.id || 'N/A'})`);
               } else {
                 // Log error details for debugging
                 const errorDetails = ticket.status === 'error' ? ticket.message : ticket.details;
-                console.error(`❌ Error sending notification to token ${index}:`, {
+                console.error(`❌ [BACKEND] Ticket ${index + 1} ERROR:`, {
                   status: ticket.status,
                   message: ticket.message || errorDetails,
                   details: ticket.details,
+                  error: ticket.details?.error,
+                  errorCode: ticket.details?.errorCode,
                   token: chunk[index]?.to ? chunk[index].to.substring(0, 30) + '...' : 'unknown'
                 });
                 
