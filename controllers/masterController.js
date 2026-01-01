@@ -12,14 +12,31 @@ const { query } = require('../config/database');
 
 // Helper function untuk memastikan nilai integer yang valid (untuk LIMIT/OFFSET)
 // MySQL production lebih ketat dan tidak menerima NaN atau string
+// Pastikan return value adalah integer murni (bukan string yang bisa di-parse)
 const toSafeInt = (value, defaultValue = 0) => {
   if (value === null || value === undefined || value === '') {
-    return defaultValue;
+    return Math.floor(Number(defaultValue));
   }
-  const parsed = parseInt(value, 10);
-  if (isNaN(parsed) || parsed < 0) {
-    return defaultValue;
+  
+  // Convert to number first
+  let numValue;
+  if (typeof value === 'string') {
+    // Remove any non-numeric characters except minus sign
+    const cleaned = value.trim().replace(/[^\d-]/g, '');
+    numValue = Number(cleaned);
+  } else {
+    numValue = Number(value);
   }
+  
+  // Convert to integer
+  const parsed = Math.floor(numValue);
+  
+  // Validate: must be finite number, not NaN, and >= 0
+  if (!Number.isFinite(parsed) || isNaN(parsed) || parsed < 0) {
+    return Math.floor(Number(defaultValue));
+  }
+  
+  // Return as integer (not float)
   return parsed;
 };
 
@@ -167,11 +184,11 @@ const getAllUsers = async (req, res, next) => {
     const total = toSafeInt(countResult[0]?.count, 0);
     
     // Add pagination - ensure integer values for MySQL
+    // CRITICAL: Use string interpolation for LIMIT/OFFSET (MySQL production doesn't accept placeholders)
     const pageNum = toSafeInt(page, 1);
     const limitNum = toSafeInt(limit, 50);
     const offsetNum = (pageNum - 1) * limitNum;
-    sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-    params.push(limitNum, offsetNum);
+    sql += ` ORDER BY created_at DESC LIMIT ${limitNum} OFFSET ${offsetNum}`;
     
     const users = await query(sql, params);
     
@@ -397,7 +414,7 @@ const getAllTeams = async (req, res, next) => {
     const total = toSafeInt(countResult[0]?.count, 0);
     
     // Main query (simplified - just basic info)
-    // Ensure integer values for MySQL
+    // CRITICAL: Use string interpolation for LIMIT/OFFSET (MySQL production doesn't accept placeholders)
     const pageNum = toSafeInt(page, 1);
     const limitNum = toSafeInt(limit, 50);
     const offsetNum = (pageNum - 1) * limitNum;
@@ -408,10 +425,9 @@ const getAllTeams = async (req, res, next) => {
                FROM owner_teams t
                LEFT JOIN users u ON t.primary_owner_id = u.id
                ${whereClause}
-               ORDER BY t.created_at DESC LIMIT ? OFFSET ?`;
+               ORDER BY t.created_at DESC LIMIT ${limitNum} OFFSET ${offsetNum}`;
     
-    const queryParams = [...params, limitNum, offsetNum];
-    const teams = await query(sql, queryParams);
+    const teams = await query(sql, params);
     
     res.json({
       success: true,
@@ -586,12 +602,11 @@ const getAllBranches = async (req, res, next) => {
     const countResult = await query(countSql, countParams);
     const total = toSafeInt(countResult[0]?.count, 0);
     
-    // Ensure integer values for MySQL
+    // CRITICAL: Use string interpolation for LIMIT/OFFSET (MySQL production doesn't accept placeholders)
     const pageNum = toSafeInt(page, 1);
     const limitNum = toSafeInt(limit, 50);
     const offsetNum = (pageNum - 1) * limitNum;
-    sql += ' ORDER BY b.created_at DESC LIMIT ? OFFSET ?';
-    params.push(limitNum, offsetNum);
+    sql += ` ORDER BY b.created_at DESC LIMIT ${limitNum} OFFSET ${offsetNum}`;
     
     const branches = await query(sql, params);
     
@@ -729,12 +744,11 @@ const getAllTransactions = async (req, res, next) => {
     const countResult = await query(countSql, countParams);
     const total = toSafeInt(countResult[0]?.count, 0);
     
-    // Add pagination - ensure integer values for MySQL
+    // CRITICAL: Use string interpolation for LIMIT/OFFSET (MySQL production doesn't accept placeholders)
     const pageNum = toSafeInt(page, 1);
     const limitNum = toSafeInt(limit, 50);
     const offsetNum = (pageNum - 1) * limitNum;
-    sql += ' ORDER BY t.transaction_date DESC, t.created_at DESC LIMIT ? OFFSET ?';
-    params.push(limitNum, offsetNum);
+    sql += ` ORDER BY t.transaction_date DESC, t.created_at DESC LIMIT ${limitNum} OFFSET ${offsetNum}`;
     
     const transactions = await query(sql, params);
     
@@ -809,12 +823,11 @@ const getAllCategories = async (req, res, next) => {
     const countResult = await query(countSql, countParams);
     const total = toSafeInt(countResult[0]?.count, 0);
     
-    // Ensure integer values for MySQL
+    // CRITICAL: Use string interpolation for LIMIT/OFFSET (MySQL production doesn't accept placeholders)
     const pageNum = toSafeInt(page, 1);
     const limitNum = toSafeInt(limit, 50);
     const offsetNum = (pageNum - 1) * limitNum;
-    sql += ' ORDER BY c.type ASC, c.name ASC LIMIT ? OFFSET ?';
-    params.push(limitNum, offsetNum);
+    sql += ` ORDER BY c.type ASC, c.name ASC LIMIT ${limitNum} OFFSET ${offsetNum}`;
     
     const categories = await query(sql, params);
     
@@ -1056,12 +1069,11 @@ const getAllPayments = async (req, res, next) => {
     const totalAmountResult = await query(totalAmountSql, totalAmountParams);
     const totalAmount = parseFloat(totalAmountResult[0]?.total_amount || 0);
     
-    // Ensure integer values for MySQL
+    // CRITICAL: Use string interpolation for LIMIT/OFFSET (MySQL production doesn't accept placeholders)
     const pageNum = toSafeInt(page, 1);
     const limitNum = toSafeInt(limit, 50);
     const offsetNum = (pageNum - 1) * limitNum;
-    sql += ' ORDER BY p.paid_at DESC, p.created_at DESC LIMIT ? OFFSET ?';
-    params.push(limitNum, offsetNum);
+    sql += ` ORDER BY p.paid_at DESC, p.created_at DESC LIMIT ${limitNum} OFFSET ${offsetNum}`;
     
     const payments = await query(sql, params);
     
@@ -1137,18 +1149,17 @@ const getAllSubscriptions = async (req, res, next) => {
     
     if (user_id) {
       countSql += ' AND s.user_id = ?';
-      countParams.push(parseInt(user_id));
+      countParams.push(toSafeInt(user_id));
     }
     
     const countResult = await query(countSql, countParams);
     const total = toSafeInt(countResult[0]?.count, 0);
     
-    // Ensure integer values for MySQL
+    // CRITICAL: Use string interpolation for LIMIT/OFFSET (MySQL production doesn't accept placeholders)
     const pageNum = toSafeInt(page, 1);
     const limitNum = toSafeInt(limit, 50);
     const offsetNum = (pageNum - 1) * limitNum;
-    sql += ' ORDER BY s.created_at DESC LIMIT ? OFFSET ?';
-    params.push(limitNum, offsetNum);
+    sql += ` ORDER BY s.created_at DESC LIMIT ${limitNum} OFFSET ${offsetNum}`;
     
     const subscriptions = await query(sql, params);
     
@@ -1184,12 +1195,11 @@ const getAllPlans = async (req, res, next) => {
     const countResult = await query(countSql, params);
     const total = toSafeInt(countResult[0]?.total, 0);
     
-    // Ensure integer values for MySQL
+    // CRITICAL: Use string interpolation for LIMIT/OFFSET (MySQL production doesn't accept placeholders)
     const pageNum = toSafeInt(page, 1);
     const limitNum = toSafeInt(limit, 50);
     const offsetNum = (pageNum - 1) * limitNum;
-    sql += ' ORDER BY price_monthly ASC, name ASC LIMIT ? OFFSET ?';
-    params.push(limitNum, offsetNum);
+    sql += ` ORDER BY price_monthly ASC, name ASC LIMIT ${limitNum} OFFSET ${offsetNum}`;
     
     const plans = await query(sql, params);
     
