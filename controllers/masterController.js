@@ -1339,6 +1339,70 @@ const deletePlan = async (req, res, next) => {
   }
 };
 
+// Approve payment (activate subscription)
+const approvePayment = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    
+    const payment = await Payment.findById(toSafeInt(id));
+    if (!payment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Payment not found'
+      });
+    }
+    
+    if (payment.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: `Payment is already ${payment.status}. Only pending payments can be approved.`
+      });
+    }
+    
+    // Update payment status to paid
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    await Payment.updateStatus(payment.id, 'paid', payment.transaction_id || null, now);
+    
+    // Activate subscription
+    await Subscription.updateStatus(payment.subscription_id, 'active');
+    
+    // Set start and end dates if not set
+    const subscription = await Subscription.findById(payment.subscription_id);
+    if (subscription && subscription.status === 'active') {
+      const startDate = new Date();
+      const endDate = new Date(startDate);
+      
+      if (subscription.billing_period === 'monthly') {
+        endDate.setMonth(endDate.getMonth() + 1);
+      } else {
+        endDate.setFullYear(endDate.getFullYear() + 1);
+      }
+      
+      await Subscription.updateEndDate(payment.subscription_id, endDate.toISOString().split('T')[0]);
+    }
+    
+    // Get updated payment with user info
+    const updatedPayment = await query(
+      `SELECT p.*, u.name as user_name, u.email as user_email, 
+              s.plan_id, s.billing_period, sp.name as plan_name
+       FROM payments p
+       LEFT JOIN subscriptions s ON p.subscription_id = s.id
+       LEFT JOIN users u ON s.user_id = u.id
+       LEFT JOIN subscription_plans sp ON s.plan_id = sp.id
+       WHERE p.id = ?`,
+      [payment.id]
+    );
+    
+    res.json({
+      success: true,
+      message: 'Payment approved and subscription activated successfully',
+      data: { payment: updatedPayment[0] }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getOverview,
   getAllUsers,
@@ -1358,5 +1422,6 @@ module.exports = {
   getAllPlans,
   createPlan,
   updatePlan,
-  deletePlan
+  deletePlan,
+  approvePayment
 };

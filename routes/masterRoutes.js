@@ -19,7 +19,8 @@ const {
   getAllPlans,
   createPlan,
   updatePlan,
-  deletePlan
+  deletePlan,
+  approvePayment
 } = require('../controllers/masterController');
 const { authenticate, authorize } = require('../middleware/auth');
 
@@ -56,6 +57,7 @@ router.get('/system-logs', getAllSystemLogs);
 
 // Payments & Subscriptions
 router.get('/payments', getAllPayments);
+router.post('/payments/:id/approve', approvePayment);
 router.get('/subscriptions', getAllSubscriptions);
 
 // Plans/Packages management
