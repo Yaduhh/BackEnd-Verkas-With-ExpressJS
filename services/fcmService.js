@@ -1,23 +1,9 @@
 const admin = require('firebase-admin');
 const DeviceToken = require('../models/DeviceToken');
-const dns = require('dns');
 
 class FCMService {
   constructor() {
     this.initialized = false;
-
-    // Setup custom DNS servers untuk mengatasi DNS resolution issues
-    // Gunakan Google DNS (8.8.8.8) dan Cloudflare DNS (1.1.1.1) sebagai fallback
-    // Ini penting untuk server yang tidak bisa resolve DNS (seperti aapanel)
-    try {
-      // Hanya set DNS servers di Linux/Unix (tidak support di Windows)
-      if (process.platform !== 'win32') {
-        dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1']);
-        console.log('✅ Custom DNS servers configured for FCM: 8.8.8.8, 8.8.4.4, 1.1.1.1, 1.0.0.1');
-      }
-    } catch (err) {
-      console.warn('⚠️ Could not set custom DNS servers for FCM:', err.message);
-    }
 
     // Initialize Firebase Admin SDK
     if (!admin.apps.length) {
@@ -243,23 +229,12 @@ class FCMService {
           break; // Success, exit retry loop
         } catch (error) {
           lastError = error;
-          const errorMessage = error.message || '';
-          const errorCode = error.code || error.errorInfo?.code || '';
-
-          // Check if it's a network/DNS error that might be temporary
-          const isNetworkError = errorMessage.includes('getaddrinfo') ||
-            errorMessage.includes('EAI_AGAIN') ||
-            errorMessage.includes('ENOTFOUND') ||
-            errorCode === 'app/network-error';
-
-          if (isNetworkError && attempt < maxRetries) {
-            // Exponential backoff: 2s, 5s, 10s
+          if (attempt < maxRetries) {
             const waitTime = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
-            console.warn(`⚠️ DNS/Network error (${errorCode || 'unknown'}). Retrying FCM notification in ${waitTime / 1000}s... (${attempt}/${maxRetries})`);
+            console.warn(`⚠️ Network error during FCM send. Retrying in ${waitTime / 1000}s... (${attempt}/${maxRetries})`);
             await new Promise(resolve => setTimeout(resolve, waitTime));
             continue; // Retry
           } else {
-            // Not a network error or max retries reached, throw error
             throw error;
           }
         }
