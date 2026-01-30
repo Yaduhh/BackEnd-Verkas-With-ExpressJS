@@ -36,7 +36,7 @@ class ExpoPushService {
       // Find all active tokens for the user
       const tokens = await DeviceToken.findByUserId(userId);
       const validTokens = tokens
-        .filter(t => t.status === 'active' && Expo.isExpoPushToken(t.device_token))
+        .filter(t => t.is_active === 1 && Expo.isExpoPushToken(t.device_token))
         .map(t => t.device_token);
 
       console.log('═══════════════════════════════════════════════════════════');
