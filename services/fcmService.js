@@ -5,7 +5,7 @@ const dns = require('dns');
 class FCMService {
   constructor() {
     this.initialized = false;
-    
+
     // Setup custom DNS servers untuk mengatasi DNS resolution issues
     // Gunakan Google DNS (8.8.8.8) dan Cloudflare DNS (1.1.1.1) sebagai fallback
     // Ini penting untuk server yang tidak bisa resolve DNS (seperti aapanel)
@@ -18,65 +18,77 @@ class FCMService {
     } catch (err) {
       console.warn('⚠️ Could not set custom DNS servers for FCM:', err.message);
     }
-    
+
     // Initialize Firebase Admin SDK
     if (!admin.apps.length) {
-      // Check if we have service account credentials
-      const serviceAccountPath = process.env.FCM_SERVICE_ACCOUNT_PATH;
-      const serviceAccountKey = process.env.FCM_SERVICE_ACCOUNT_KEY;
-      
-      if (serviceAccountPath) {
-        // Use service account file
-        try {
-          // Use path.resolve untuk handle relative paths
+      try {
+        console.log('🚀 Starting Firebase Admin SDK initialization...');
+
+        // Try to load from environment variable first
+        if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+          console.log('🔑 Using credentials from GOOGLE_APPLICATION_CREDENTIALS');
+          admin.initializeApp({
+            credential: admin.credential.applicationDefault()
+          });
+          this.initialized = true;
+          console.log('✅ Firebase Admin SDK initialized from environment');
+        } else {
+          // Fallback to local file
+          console.log('📄 Using local service account file');
+
+          // Use the specific file mentioned by user (verkas-c342f-f4f33dad77c1.json)
+          // Look in root directory (..) since we are in services/
           const path = require('path');
-          const fs = require('fs');
-          const resolvedPath = path.resolve(process.cwd(), serviceAccountPath);
-          
-          // Check if file exists
-          if (!fs.existsSync(resolvedPath)) {
-            console.warn('⚠️ WARNING: FCM service account file not found:', resolvedPath);
-            console.warn('⚠️ FCM notifications will be disabled. Set FCM_SERVICE_ACCOUNT_PATH in .env');
-            return;
+          const serviceAccountFileName = 'verkas-c342f-f4f33dad77c1.json';
+          const serviceAccountPath = path.resolve(__dirname, '..', serviceAccountFileName);
+
+          console.log(`📂 Attempting to load service account from: ${serviceAccountPath}`);
+
+          if (require('fs').existsSync(serviceAccountPath)) {
+            const serviceAccount = require(serviceAccountPath);
+            console.log('📋 Service account loaded, project_id:', serviceAccount.project_id);
+
+            admin.initializeApp({
+              credential: admin.credential.cert(serviceAccount),
+              projectId: serviceAccount.project_id
+            });
+            this.initialized = true;
+            console.log('✅ Firebase Admin SDK initialized from local file');
+          } else {
+            // Check fallback to firebase-service-account.json
+            const fallbackPath = path.resolve(__dirname, '..', 'firebase-service-account.json');
+            if (require('fs').existsSync(fallbackPath)) {
+              const serviceAccount = require(fallbackPath);
+              admin.initializeApp({
+                credential: admin.credential.cert(serviceAccount),
+                projectId: serviceAccount.project_id
+              });
+              this.initialized = true;
+              console.log('✅ Firebase Admin SDK initialized from fallback local file');
+            } else {
+              throw new Error(`Service account file not found at ${serviceAccountPath} or ${fallbackPath}`);
+            }
           }
-          
-          const serviceAccount = require(resolvedPath);
-          admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount),
-          });
-          this.initialized = true;
-          console.log('✅ Firebase Admin SDK initialized from service account file');
-        } catch (error) {
-          console.warn('⚠️ WARNING: Error initializing Firebase Admin SDK from file:', error.message);
-          console.warn('⚠️ FCM notifications will be disabled. Check FCM_SERVICE_ACCOUNT_PATH in .env');
-          // Don't throw error, just disable FCM
-          return;
         }
-      } else if (serviceAccountKey) {
-        // Use service account JSON string from env
-        try {
-          const serviceAccount = JSON.parse(serviceAccountKey);
-          admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount),
-          });
-          this.initialized = true;
-          console.log('✅ Firebase Admin SDK initialized from environment variable');
-        } catch (error) {
-          console.warn('⚠️ WARNING: Error parsing FCM_SERVICE_ACCOUNT_KEY:', error.message);
-          console.warn('⚠️ FCM notifications will be disabled. Check FCM_SERVICE_ACCOUNT_KEY in .env');
-          // Don't throw error, just disable FCM
-          return;
+
+        if (this.initialized) {
+          const app = admin.app();
+          console.log('🔥 Firebase app name:', app.name);
+          console.log('🔥 Firebase project ID:', app.options.projectId);
         }
-      } else {
-        console.warn('⚠️ WARNING: FCM credentials not found!');
-        console.warn('⚠️ Set FCM_SERVICE_ACCOUNT_PATH or FCM_SERVICE_ACCOUNT_KEY in .env to enable FCM');
-        console.warn('⚠️ Backend will fallback to Expo Push Notification Service');
+      } catch (error) {
+        console.error('❌ Failed to initialize Firebase Admin SDK:', error.message);
+        console.error('Make sure GOOGLE_APPLICATION_CREDENTIALS is set or service account JSON exists in root');
+        this.initialized = false;
       }
     } else {
-      // Firebase already initialized (maybe by another service)
       this.initialized = true;
-      console.log('✅ Firebase Admin SDK already initialized');
     }
+
+    // Rate limiting for notifications (prevent spam)
+    this.notificationRateLimit = new Map();
+    this.RATE_LIMIT_WINDOW = 5000; // 5 seconds
+    this.MAX_NOTIFICATIONS_PER_WINDOW = 1;
   }
 
   // Validate if token is valid FCM token
@@ -84,14 +96,14 @@ class FCMService {
     if (!token || typeof token !== 'string') {
       return false;
     }
-    
+
     // FCM tokens are typically long strings (152+ characters)
     // They don't have a specific prefix like Expo tokens
     // But they should NOT start with "ExponentPushToken" or "ExpoPushToken"
     if (token.startsWith('ExponentPushToken[') || token.startsWith('ExpoPushToken[')) {
       return false; // This is an Expo token, not FCM
     }
-    
+
     // FCM tokens are usually longer and don't have brackets
     return token.length > 50 && !token.includes('[') && !token.includes(']');
   }
@@ -102,7 +114,7 @@ class FCMService {
     if (!data || typeof data !== 'object') {
       return {};
     }
-    
+
     const stringData = {};
     for (const [key, value] of Object.entries(data)) {
       if (value === null || value === undefined) {
@@ -117,21 +129,47 @@ class FCMService {
         stringData[key] = String(value);
       }
     }
-    
+
     return stringData;
   }
 
-  // Send notification to single user
   async sendToUser(userId, { title, body, data = {}, sound = 'default', priority = 'high' }) {
     // Check if FCM is initialized
     if (!this.initialized) {
-      throw new Error('FCM service not initialized. Set FCM_SERVICE_ACCOUNT_PATH or FCM_SERVICE_ACCOUNT_KEY in .env');
+      throw new Error('FCM service not initialized. Please ensure Firebase Admin SDK is initialized correctly.');
     }
-    
+
+    // Rate limiting check
+    const now = Date.now();
+    const userLimit = this.notificationRateLimit.get(userId) || { count: 0, lastTime: 0 };
+
+    if (now - userLimit.lastTime < this.RATE_LIMIT_WINDOW) {
+      if (userLimit.count >= this.MAX_NOTIFICATIONS_PER_WINDOW) {
+        console.warn(`🛑 [FCM] Rate limit exceeded for user ${userId}. Skipping notification: "${title}"`);
+        return { success: false, message: 'Rate limit exceeded', sent: 0 };
+      }
+      userLimit.count++;
+    } else {
+      userLimit.count = 1;
+      userLimit.lastTime = now;
+    }
+
+    // Update rate limit map
+    this.notificationRateLimit.set(userId, userLimit);
+
+    // Periodically cleanup the rate limit map (if it gets too large)
+    if (this.notificationRateLimit.size > 1000) {
+      for (const [key, value] of this.notificationRateLimit.entries()) {
+        if (now - value.lastTime > this.RATE_LIMIT_WINDOW) {
+          this.notificationRateLimit.delete(key);
+        }
+      }
+    }
+
     try {
       // Get all active device tokens for user
       const tokens = await DeviceToken.findActiveByUserId(userId);
-      
+
       if (tokens.length === 0) {
         console.log(`📱 No device tokens found for user ${userId}`);
         return { success: false, message: 'No device tokens', sent: 0 };
@@ -152,7 +190,7 @@ class FCMService {
         console.warn(`📱 No valid FCM tokens found for user ${userId} (${tokens.length} total tokens, all invalid)`);
         return { success: false, message: 'No valid tokens', sent: 0 };
       }
-      
+
       console.log('═══════════════════════════════════════════════════════════');
       console.log(`📤 [BACKEND] 📤 FCM SERVICE: Sending notification to user ${userId}`);
       console.log(`📊 [BACKEND] Title: "${title}"`);
@@ -168,7 +206,7 @@ class FCMService {
         userId: userId.toString(),
         timestamp: new Date().toISOString(),
       });
-      
+
       const message = {
         notification: {
           title,
@@ -195,7 +233,7 @@ class FCMService {
       let results;
       let lastError;
       const maxRetries = 3;
-      
+
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
           results = await admin.messaging().sendEachForMulticast({
@@ -207,17 +245,17 @@ class FCMService {
           lastError = error;
           const errorMessage = error.message || '';
           const errorCode = error.code || error.errorInfo?.code || '';
-          
+
           // Check if it's a network/DNS error that might be temporary
-          const isNetworkError = errorMessage.includes('getaddrinfo') || 
-                                errorMessage.includes('EAI_AGAIN') ||
-                                errorMessage.includes('ENOTFOUND') ||
-                                errorCode === 'app/network-error';
-          
+          const isNetworkError = errorMessage.includes('getaddrinfo') ||
+            errorMessage.includes('EAI_AGAIN') ||
+            errorMessage.includes('ENOTFOUND') ||
+            errorCode === 'app/network-error';
+
           if (isNetworkError && attempt < maxRetries) {
             // Exponential backoff: 2s, 5s, 10s
             const waitTime = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
-            console.warn(`⚠️ DNS/Network error (${errorCode || 'unknown'}). Retrying FCM notification in ${waitTime/1000}s... (${attempt}/${maxRetries})`);
+            console.warn(`⚠️ DNS/Network error (${errorCode || 'unknown'}). Retrying FCM notification in ${waitTime / 1000}s... (${attempt}/${maxRetries})`);
             await new Promise(resolve => setTimeout(resolve, waitTime));
             continue; // Retry
           } else {
@@ -226,7 +264,7 @@ class FCMService {
           }
         }
       }
-      
+
       if (!results) {
         throw lastError || new Error('Failed to send FCM notification after retries');
       }
@@ -241,10 +279,10 @@ class FCMService {
         } else {
           const token = validTokens[index];
           console.error(`❌ Failed to send to token ${index}:`, response.error);
-          
+
           // Handle invalid tokens
           if (response.error?.code === 'messaging/invalid-registration-token' ||
-              response.error?.code === 'messaging/registration-token-not-registered') {
+            response.error?.code === 'messaging/registration-token-not-registered') {
             failedTokens.push(token);
             // Deactivate invalid token
             DeviceToken.unregisterByToken(token).catch(err => {
@@ -297,7 +335,7 @@ class FCMService {
     if (!this.initialized) {
       throw new Error('FCM service not initialized. Set FCM_SERVICE_ACCOUNT_PATH or FCM_SERVICE_ACCOUNT_KEY in .env');
     }
-    
+
     try {
       if (!this.isValidToken(token)) {
         return { success: false, message: 'Invalid token format' };
@@ -308,7 +346,7 @@ class FCMService {
         ...data,
         timestamp: new Date().toISOString(),
       });
-      
+
       const message = {
         token,
         notification: {
@@ -342,10 +380,10 @@ class FCMService {
       };
     } catch (error) {
       console.error('❌ Error sending FCM notification to token:', error);
-      
+
       // Handle invalid token
       if (error.code === 'messaging/invalid-registration-token' ||
-          error.code === 'messaging/registration-token-not-registered') {
+        error.code === 'messaging/registration-token-not-registered') {
         DeviceToken.unregisterByToken(token).catch(err => {
           console.error('Error deactivating invalid token:', err);
         });
