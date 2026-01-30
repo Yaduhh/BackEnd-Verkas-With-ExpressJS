@@ -115,28 +115,17 @@ class ExpoPushService {
                 }
               }
             }
+            console.log(`📡 Sending chunk ${chunkIndex + 1}/${chunks.length} with ${chunk.length} notification(s)...`);
 
-            console.log(`📤 [BACKEND] Sending chunk ${chunks.indexOf(chunk) + 1}/${chunks.length} with ${chunk.length} notification(s)...`);
-            const ticketChunk = await this.expo.sendPushNotificationsAsync(chunk);
-            console.log(`📥 [BACKEND] Received ${ticketChunk.length} ticket(s) from Expo API`);
-            tickets.push(...ticketChunk);
+            // Use the expo SDK to send the chunk
+            const chunkTickets = await this.expo.sendPushNotificationsAsync(chunk);
+            tickets.push(...chunkTickets);
+            sentCount += chunkTickets.filter(t => t.status === 'ok').length;
 
-            // Count successful sends and handle errors
-            ticketChunk.forEach((ticket, index) => {
-              if (ticket.status === 'ok') {
-                sentCount++;
-                console.log(`✅ [BACKEND] Ticket ${index + 1}: OK (ID: ${ticket.id || 'N/A'})`);
-              } else {
-                // Log error details for debugging
-                const errorDetails = ticket.status === 'error' ? ticket.message : ticket.details;
-                console.error(`❌ [BACKEND] Ticket ${index + 1} ERROR:`, {
-                  status: ticket.status,
-                  message: ticket.message || errorDetails,
-                  details: ticket.details,
-                  error: ticket.details?.error,
-                  errorCode: ticket.details?.errorCode,
-                  token: chunk[index]?.to ? chunk[index].to.substring(0, 30) + '...' : 'unknown'
-                });
+            // Log detailed success/failure for each ticket
+            chunkTickets.forEach((ticket, index) => {
+              if (ticket.status !== 'ok') {
+                console.warn(`⚠️ Notification failed for token index ${index}:`, ticket.message);
 
                 // If token is invalid, deactivate it
                 if (ticket.details?.error === 'DeviceNotRegistered' ||
@@ -161,12 +150,16 @@ class ExpoPushService {
             lastError = error;
             retries--;
 
+            // Special handling for DNS resolution errors (EAI_AGAIN)
+            const isDnsError = error.code === 'EAI_AGAIN' || error.message?.includes('getaddrinfo');
+
             if (retries > 0) {
-              const waitTime = Math.min(2000 * Math.pow(2, 3 - retries - 1), 10000);
-              console.warn(`⚠️ Network error. Retrying push notification in ${waitTime / 1000}s...`);
+              // Exponential backoff or constant wait for DNS
+              const waitTime = isDnsError ? 3000 : Math.min(2000 * Math.pow(2, 5 - retries - 1), 10000);
+              console.warn(`⚠️ ${isDnsError ? 'DNS/Network' : 'Network'} error (${error.code || 'UNKNOWN'}). Retrying push notification in ${waitTime / 1000}s... (Attempts left: ${retries})`);
               await new Promise(resolve => setTimeout(resolve, waitTime));
             } else {
-              console.error('❌ Error sending push notification chunk:', error.message);
+              console.error(`❌ Error sending push notification chunk (${error.code || 'UNKNOWN'}):`, error.message);
               break;
             }
           }
@@ -174,7 +167,7 @@ class ExpoPushService {
 
         // If all retries failed, log the error
         if (lastError) {
-          console.error('❌ Failed to send push notification chunk after 3 retries:', {
+          console.error(`❌ Failed to send push notification chunk after multiple retries:`, {
             error: lastError.message,
             code: lastError.code,
             errno: lastError.errno
