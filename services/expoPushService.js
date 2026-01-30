@@ -1,9 +1,20 @@
 const { Expo } = require('expo-server-sdk');
 const DeviceToken = require('../models/DeviceToken');
+const dns = require('dns');
+
+// Force Node.js to prefer IPv4. Node 17+ defaults to IPv6 first, which causes EAI_AGAIN on many VPS setups.
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
 
 class ExpoPushService {
   constructor() {
     this.expo = new Expo({ accessToken: process.env.EXPO_ACCESS_TOKEN });
+  }
+
+  // Check if a string is a valid Expo push token
+  isValidToken(token) {
+    return Expo.isExpoPushToken(token);
   }
 
   // Debug DNS connectivity
