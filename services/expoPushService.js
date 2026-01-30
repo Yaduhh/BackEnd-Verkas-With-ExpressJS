@@ -79,7 +79,7 @@ class ExpoPushService {
         title,
         body,
         priority,
-        channelId: 'default', // CRITICAL for Android
+        channelId: 'verkas-notif-v1', // CRITICAL for Android foreground display
         data: {
           ...data,
           userId,
