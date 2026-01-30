@@ -1,85 +1,55 @@
 const { Expo } = require('expo-server-sdk');
 const DeviceToken = require('../models/DeviceToken');
-const { promisify } = require('util');
 
 class ExpoPushService {
   constructor() {
-    // Create Expo client
-    // Access token is optional, but recommended for production
-    const accessToken = process.env.EXPO_ACCESS_TOKEN;
-
-    if (!accessToken && process.env.NODE_ENV === 'production') {
-      console.warn('⚠️ WARNING: EXPO_ACCESS_TOKEN not set in production environment!');
-      console.warn('⚠️ Push notifications may fail or be rate-limited without access token.');
-      console.warn('⚠️ Get your access token from: https://expo.dev/accounts/[your-account]/settings/access-tokens');
-    }
-
-    this.expo = new Expo({
-      accessToken: accessToken, // Optional, tapi recommended untuk production
-    });
+    this.expo = new Expo({ accessToken: process.env.EXPO_ACCESS_TOKEN });
   }
 
-
-
-  // Validate if token is valid Expo push token
-  isValidToken(token) {
-    return Expo.isExpoPushToken(token);
-  }
-
-  // Send notification to single user
-  async sendToUser(userId, { title, body, data = {}, sound = 'default', priority = 'default' }) {
+  // Debug DNS connectivity
+  async testDNSResolution(host) {
     try {
-      // Get all active device tokens for user
-      const tokens = await DeviceToken.findActiveByUserId(userId);
+      const dns = require('dns').promises;
+      const addresses = await dns.resolve4(host);
+      console.log(`📡 [BACKEND] DNS Resolution for ${host} OK: ${addresses.join(', ')}`);
+      return true;
+    } catch (err) {
+      console.error(`❌ [BACKEND] DNS Resolution for ${host} FAILED:`, err.message);
+      return false;
+    }
+  }
 
-      if (tokens.length === 0) {
-        console.log(`📱 No device tokens found for user ${userId}`);
-        return { success: false, message: 'No device tokens', sent: 0 };
-      }
-
-      // Filter valid Expo tokens
+  // Send notification to a single user
+  async sendToUser(userId, { title, body, data = {}, sound = 'default', priority = 'high' }) {
+    try {
+      // Find all active tokens for the user
+      const tokens = await DeviceToken.findByUserId(userId);
       const validTokens = tokens
-        .map(t => t.device_token)
-        .filter(token => {
-          const isValid = this.isValidToken(token);
-          if (!isValid) {
-            console.warn(`⚠️ Invalid Expo token format for user ${userId}: ${token?.substring(0, 30)}...`);
-          }
-          return isValid;
-        });
+        .filter(t => t.status === 'active' && Expo.isExpoPushToken(t.device_token))
+        .map(t => t.device_token);
+
+      console.log('═══════════════════════════════════════════════════════════');
+      console.log(`� [BACKEND] � SENDING NOTIFICATION TO USER: ${userId}`);
+      console.log('═══════════════════════════════════════════════════════════');
+      console.log(`📊 [BACKEND] Found ${tokens.length} device token(s) for user ${userId}`);
+      console.log(`📊 [BACKEND] Valid Expo tokens: ${validTokens.length}`);
 
       if (validTokens.length === 0) {
-        console.warn(`📱 No valid Expo push tokens found for user ${userId} (${tokens.length} total tokens, all invalid)`);
-        return { success: false, message: 'No valid tokens', sent: 0 };
+        console.warn(`⚠️ [BACKEND] No valid Expo push tokens found for user ${userId}`);
+        return { success: false, message: 'No valid tokens found', sent: 0 };
       }
 
-      console.log('═══════════════════════════════════════════════════════════');
-      console.log(`📤 [BACKEND] 📤 EXPO SERVICE: Sending notification to user ${userId}`);
-      console.log(`📊 [BACKEND] Title: "${title}"`);
-      console.log(`📊 [BACKEND] Valid tokens: ${validTokens.length}/${tokens.length}`);
-      console.log(`📊 [BACKEND] Service: Expo Push Notification Service (exp.host)`);
-      console.log(`📊 [BACKEND] Token format: ExponentPushToken[...]`);
-      console.log('═══════════════════════════════════════════════════════════');
+      // Test DNS before starting
+      await this.testDNSResolution('exp.host');
 
-      // Check if Expo access token is set (important for production)
-      if (!process.env.EXPO_ACCESS_TOKEN) {
-        if (process.env.NODE_ENV === 'production') {
-          console.warn('⚠️ [BACKEND] EXPO_ACCESS_TOKEN not set in production! This may cause notification delivery issues.');
-        } else {
-          console.log('ℹ️ [BACKEND] EXPO_ACCESS_TOKEN not set (optional for development)');
-        }
-      } else {
-        console.log('✅ [BACKEND] EXPO_ACCESS_TOKEN is set');
-      }
-
-      // Prepare messages
+      // Create message objects
       const messages = validTokens.map(token => ({
         to: token,
         sound,
         title,
         body,
-        priority,
-        channelId: 'verkas-notif-v1', // CRITICAL for Android foreground display
+        priority: priority === 'high' ? 'high' : 'default',
+        channelId: 'verkas-notif-v1', // REQUIRED for Android foreground
         data: {
           ...data,
           userId,
@@ -87,203 +57,87 @@ class ExpoPushService {
         },
       }));
 
-      console.log(`📦 [BACKEND] Prepared ${messages.length} notification message(s)`);
-
-      // Send notifications in chunks with retry mechanism
-      // Expo SDK automatically chunks to max 100 messages per chunk
+      // Send in chunks
       const chunks = this.expo.chunkPushNotifications(messages);
-      console.log(`📦 [BACKEND] Split into ${chunks.length} chunk(s) (max 100 per chunk)`);
       const tickets = [];
       let sentCount = 0;
 
-      for (const chunk of chunks) {
-        let retries = 3; // Increased to 3 retries for DNS issues
+      for (const [chunkIndex, chunk] of chunks.entries()) {
+        let retries = 5;
         let lastError = null;
-        let attemptNumber = 0;
 
         while (retries > 0) {
-          attemptNumber++;
           try {
-            if (attemptNumber > 1) {
-              console.log(`🔄 Attempt ${attemptNumber} to send push notification chunk...`);
-
-              // Test DNS resolution before retry
-              if (attemptNumber === 2) {
-                const dnsOk = await this.testDNSResolution('exp.host');
-                if (!dnsOk) {
-                  console.warn('⚠️ DNS resolution still failing, will retry with longer wait...');
-                }
-              }
-            }
             console.log(`📡 Sending chunk ${chunkIndex + 1}/${chunks.length} with ${chunk.length} notification(s)...`);
 
-            // Use the expo SDK to send the chunk
             const chunkTickets = await this.expo.sendPushNotificationsAsync(chunk);
             tickets.push(...chunkTickets);
             sentCount += chunkTickets.filter(t => t.status === 'ok').length;
 
-            // Log detailed success/failure for each ticket
+            // Handle ticket errors
             chunkTickets.forEach((ticket, index) => {
               if (ticket.status !== 'ok') {
-                console.warn(`⚠️ Notification failed for token index ${index}:`, ticket.message);
-
-                // If token is invalid, deactivate it
-                if (ticket.details?.error === 'DeviceNotRegistered' ||
-                  ticket.details?.error === 'InvalidCredentials' ||
-                  ticket.message?.includes('DeviceNotRegistered') ||
-                  ticket.message?.includes('InvalidCredentials')) {
-                  // Find and deactivate invalid token
+                console.warn(`⚠️ Ticket Error (Token ${index}):`, ticket.message);
+                if (ticket.details?.error === 'DeviceNotRegistered') {
                   const invalidToken = chunk[index]?.to;
                   if (invalidToken) {
-                    DeviceToken.unregisterByToken(invalidToken).catch(err => {
-                      console.error('Error deactivating invalid token:', err);
-                    });
+                    DeviceToken.unregisterByToken(invalidToken).catch(e => console.error('Unregister error:', e));
                   }
                 }
               }
             });
 
-            // Success, break retry loop
             lastError = null;
             break;
           } catch (error) {
             lastError = error;
             retries--;
-
-            // Special handling for DNS resolution errors (EAI_AGAIN)
             const isDnsError = error.code === 'EAI_AGAIN' || error.message?.includes('getaddrinfo');
 
             if (retries > 0) {
-              // Exponential backoff or constant wait for DNS
               const waitTime = isDnsError ? 3000 : Math.min(2000 * Math.pow(2, 5 - retries - 1), 10000);
-              console.warn(`⚠️ ${isDnsError ? 'DNS/Network' : 'Network'} error (${error.code || 'UNKNOWN'}). Retrying push notification in ${waitTime / 1000}s... (Attempts left: ${retries})`);
-              await new Promise(resolve => setTimeout(resolve, waitTime));
+              console.warn(`⚠️ ${isDnsError ? 'DNS' : 'Network'} error (${error.code || 'ERR'}). Retrying in ${waitTime / 1000}s... (Left: ${retries})`);
+              await new Promise(r => setTimeout(r, waitTime));
+
+              // If DNS failed, test it again before retrying
+              if (isDnsError) await this.testDNSResolution('exp.host');
             } else {
-              console.error(`❌ Error sending push notification chunk (${error.code || 'UNKNOWN'}):`, error.message);
+              console.error(`❌ Final Error (${error.code || 'ERR'}):`, error.message);
               break;
             }
           }
         }
-
-        // If all retries failed, log the error
-        if (lastError) {
-          console.error(`❌ Failed to send push notification chunk after multiple retries:`, {
-            error: lastError.message,
-            code: lastError.code,
-            errno: lastError.errno
-          });
-        }
       }
 
-      // Update last_used_at for tokens that were used
-      const usedTokenIds = tokens
-        .filter(t => validTokens.includes(t.device_token))
-        .map(t => t.id);
-
+      // Update token last used
+      const usedTokenIds = tokens.filter(t => validTokens.includes(t.device_token)).map(t => t.id);
       if (usedTokenIds.length > 0) {
         await DeviceToken.updateLastUsed(usedTokenIds);
       }
 
-      if (sentCount > 0) {
-        console.log(`✅ Notification sent to user ${userId}: ${sentCount}/${validTokens.length} device(s) successful`);
-      } else {
-        console.warn(`⚠️ Notification failed for user ${userId}: 0/${validTokens.length} device(s) successful`);
-        // Log ticket details for debugging - CRITICAL for production debugging
-        if (tickets.length > 0) {
-          const errors = tickets.filter(t => t.status !== 'ok');
-          if (errors.length > 0) {
-            console.error('❌ CRITICAL: Ticket errors (production debugging):', errors.map((e, idx) => ({
-              index: idx,
-              status: e.status,
-              message: e.message,
-              details: e.details,
-              error: e.details?.error,
-              errorCode: e.details?.errorCode,
-              tokenPreview: validTokens[idx]?.substring(0, 30) + '...'
-            })));
+      console.log(`✅ Notification cycle complete. Sent: ${sentCount}/${validTokens.length}`);
+      return { success: sentCount > 0, sent: sentCount, total: validTokens.length, tickets };
 
-            // Check for common production issues
-            const deviceNotRegistered = errors.filter(e =>
-              e.details?.error === 'DeviceNotRegistered' ||
-              e.message?.includes('DeviceNotRegistered')
-            );
-            const invalidCredentials = errors.filter(e =>
-              e.details?.error === 'InvalidCredentials' ||
-              e.message?.includes('InvalidCredentials')
-            );
-            const messageTooBig = errors.filter(e =>
-              e.details?.error === 'MessageTooBig' ||
-              e.message?.includes('MessageTooBig')
-            );
-
-            if (deviceNotRegistered.length > 0) {
-              console.error('🔴 PRODUCTION ISSUE: DeviceNotRegistered - Token mungkin expired atau app di-uninstall');
-            }
-            if (invalidCredentials.length > 0) {
-              console.error('🔴 PRODUCTION ISSUE: InvalidCredentials - Cek EXPO_ACCESS_TOKEN atau Firebase credentials');
-            }
-            if (messageTooBig.length > 0) {
-              console.error('🔴 PRODUCTION ISSUE: MessageTooBig - Notifikasi terlalu besar (>4KB)');
-            }
-          } else {
-            console.error('❌ CRITICAL: All tickets returned but none successful. Check ticket status:', tickets);
-          }
-        } else {
-          console.error('❌ CRITICAL: No tickets returned from Expo API');
-        }
-      }
-
-      return {
-        success: sentCount > 0,
-        sent: sentCount,
-        total: validTokens.length,
-        tickets
-      };
     } catch (error) {
-      console.error('Error in sendToUser:', error);
+      console.error('❌ FATAL ERROR in sendToUser:', error);
       return { success: false, error: error.message, sent: 0 };
     }
   }
 
-  // Send notification to multiple users
-  async sendToUsers(userIds, { title, body, data = {}, sound = 'default', priority = 'default' }) {
-    const results = await Promise.all(
-      userIds.map(userId =>
-        this.sendToUser(userId, { title, body, data, sound, priority })
-      )
-    );
-
-    const totalSent = results.reduce((sum, r) => sum + (r.sent || 0), 0);
-
-    return {
-      success: true,
-      sent: totalSent,
-      results
-    };
+  async sendToUsers(userIds, options) {
+    const results = await Promise.all(userIds.map(id => this.sendToUser(id, options)));
+    return { success: true, sent: results.reduce((sum, r) => sum + (r.sent || 0), 0), results };
   }
 
-  // Send notification to branch owner
-  async sendToBranchOwner(branchId, { title, body, data = {}, sound = 'default', priority = 'default' }) {
-    try {
-      const Branch = require('../models/Branch');
-      const branch = await Branch.findById(branchId);
-
-      if (!branch) {
-        return { success: false, message: 'Branch not found', sent: 0 };
-      }
-
-      return await this.sendToUser(branch.owner_id, { title, body, data, sound, priority });
-    } catch (error) {
-      console.error('Error in sendToBranchOwner:', error);
-      return { success: false, error: error.message, sent: 0 };
-    }
+  async sendToBranchOwner(branchId, options) {
+    const Branch = require('../models/Branch');
+    const branch = await Branch.findById(branchId);
+    return branch ? await this.sendToUser(branch.owner_id, options) : { success: false, message: 'Branch not found' };
   }
 
-  // Send test notification
-  async sendTest(userId, { title = 'Test Notification', body = 'This is a test notification', data = {} }) {
-    return await this.sendToUser(userId, { title, body, data, sound: 'default' });
+  async sendTest(userId, options = {}) {
+    return await this.sendToUser(userId, { title: 'Test', body: 'This is a test', ...options });
   }
 }
 
 module.exports = new ExpoPushService();
-
