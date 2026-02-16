@@ -6,10 +6,10 @@ const config = require('../config/config');
 // Helper: Convert lampiran paths to full URLs using BASE_URL from config
 const formatLampiran = (lampiran, req) => {
   if (!lampiran) return null;
-  
+
   // Get base URL from config (prioritize config over req)
   const baseUrl = config.baseUrl || `${req.protocol}://${req.get('host')}`;
-  
+
   try {
     // Try to parse as JSON (array)
     const parsed = JSON.parse(lampiran);
@@ -78,20 +78,23 @@ const getAll = async (req, res, next) => {
       sort = 'terbaru',
       include_deleted = false,
       only_deleted = false,
+      exclude_folders = false,
+      only_folders = false,
+      is_umum,
       page = 1,
       limit = 20
     } = req.query;
-    
+
     // Get branch_id from header or middleware
     const branchId = req.branchId || req.headers['x-branch-id'];
-    
+
     if (!branchId) {
       return res.status(400).json({
         success: false,
         message: 'Branch ID is required. Please provide X-Branch-Id header.'
       });
     }
-    
+
     // JANGAN filter berdasarkan userId karena admin bisa input transaksi
     // Hanya filter berdasarkan branchId untuk mengambil semua transaksi di branch tersebut
     // Ensure page and limit are valid integers
@@ -99,7 +102,7 @@ const getAll = async (req, res, next) => {
     const validLimit = parseInt(limit);
     const finalPage = (!isNaN(validPage) && validPage > 0) ? validPage : 1;
     const finalLimit = (!isNaN(validLimit) && validLimit > 0) ? validLimit : 20;
-    
+
     // Ensure branchId is valid integer
     const validBranchId = parseInt(branchId);
     if (isNaN(validBranchId)) {
@@ -108,7 +111,7 @@ const getAll = async (req, res, next) => {
         message: 'Invalid Branch ID. Please provide a valid X-Branch-Id header.'
       });
     }
-    
+
     const transactions = await Transaction.findAll({
       branchId: validBranchId,
       type: type || undefined,
@@ -118,10 +121,13 @@ const getAll = async (req, res, next) => {
       sort: sort || 'terbaru',
       includeDeleted: include_deleted === 'true',
       onlyDeleted: only_deleted === 'true',
+      excludeFolders: exclude_folders === 'true',
+      onlyFolders: only_folders === 'true',
+      isUmum: is_umum,
       page: finalPage,
       limit: finalLimit
     });
-    
+
     const total = await Transaction.count({
       branchId: parseInt(branchId),
       type,
@@ -129,15 +135,18 @@ const getAll = async (req, res, next) => {
       startDate: start_date,
       endDate: end_date,
       includeDeleted: include_deleted === 'true',
-      onlyDeleted: only_deleted === 'true'
+      onlyDeleted: only_deleted === 'true',
+      excludeFolders: exclude_folders === 'true',
+      onlyFolders: only_folders === 'true',
+      isUmum: is_umum
     });
-    
+
     // Format lampiran paths to full URLs for all transactions
     const formattedTransactions = transactions.map(t => ({
       ...t,
       lampiran: formatLampiran(t.lampiran, req)
     }));
-    
+
     res.json({
       success: true,
       data: {
@@ -160,14 +169,14 @@ const getById = async (req, res, next) => {
   try {
     const { id } = req.params;
     const transaction = await Transaction.findById(id);
-    
+
     if (!transaction) {
       return res.status(404).json({
         success: false,
         message: 'Transaction not found'
       });
     }
-    
+
     // Verify branch access
     const Branch = require('../models/Branch');
     const hasAccess = await Branch.userHasAccess(req.userId, transaction.branch_id, req.user.role);
@@ -177,13 +186,13 @@ const getById = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     // Format lampiran paths to full URLs
     const formattedTransaction = {
       ...transaction,
       lampiran: formatLampiran(transaction.lampiran, req)
     };
-    
+
     res.json({
       success: true,
       data: { transaction: formattedTransaction }
@@ -197,17 +206,17 @@ const getById = async (req, res, next) => {
 const create = async (req, res, next) => {
   try {
     const { type, category, amount, note, date, lampiran } = req.body;
-    
+
     // Get branch_id from header or middleware
     const branchId = req.branchId || req.headers['x-branch-id'];
-    
+
     if (!branchId) {
       return res.status(400).json({
         success: false,
         message: 'Branch ID is required. Please provide X-Branch-Id header.'
       });
     }
-    
+
     // Verify branch access
     const Branch = require('../models/Branch');
     const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
@@ -217,7 +226,7 @@ const create = async (req, res, next) => {
         message: 'No access to this branch'
       });
     }
-    
+
     // Find category by name
     const categoryRecord = await Category.findAll({
       type,
@@ -225,14 +234,14 @@ const create = async (req, res, next) => {
       branchId: parseInt(branchId)
     });
     const foundCategory = categoryRecord.find(c => c.name === category);
-    
+
     if (!foundCategory) {
       return res.status(404).json({
         success: false,
         message: 'Category not found'
       });
     }
-    
+
     // Handle lampiran - convert array to JSON string if needed
     let lampiranValue = null;
     if (lampiran) {
@@ -245,6 +254,17 @@ const create = async (req, res, next) => {
       }
     }
 
+    // Determine if this is a general transaction (Dashboard) or Sub-Category transaction (Savings)
+    // is_umum = 0 ONLY if choosing a Sub-Category specifically inside a Folder.
+    // Choosing the Parent (Induk) itself should always be is_umum = 1 (Show in Dashboard).
+    let isUmum = true;
+    if (foundCategory.parent_id) {
+      const parent = await Category.findById(foundCategory.parent_id);
+      if (parent && (parent.is_folder === true || parent.is_folder === 1)) {
+        isUmum = false;
+      }
+    }
+
     // Create transaction
     const transaction = await Transaction.create({
       userId: req.userId,
@@ -254,9 +274,10 @@ const create = async (req, res, next) => {
       amount: parseFloat(amount),
       note: note || null,
       transactionDate: date,
-      lampiran: lampiranValue
+      lampiran: lampiranValue,
+      isUmum
     });
-    
+
     // Log activity (non-blocking, fire and forget)
     LogService.logActivity({
       userId: req.userId,
@@ -276,13 +297,13 @@ const create = async (req, res, next) => {
       requestMethod: req.method,
       requestPath: req.path,
     });
-    
+
     // Format lampiran paths to full URLs
     const formattedTransaction = {
       ...transaction,
       lampiran: formatLampiran(transaction.lampiran, req)
     };
-    
+
     res.status(201).json({
       success: true,
       message: 'Transaction created successfully',
@@ -297,8 +318,8 @@ const create = async (req, res, next) => {
 const update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { type, category, amount, note, date } = req.body;
-    
+    const { type, category, amount, note, date, transaction_date, lampiran } = req.body;
+
     // Check if transaction exists and belongs to user
     const existing = await Transaction.findById(id);
     if (!existing) {
@@ -307,7 +328,7 @@ const update = async (req, res, next) => {
         message: 'Transaction not found'
       });
     }
-    
+
     // Verify branch access
     const Branch = require('../models/Branch');
     const hasAccess = await Branch.userHasAccess(req.userId, existing.branch_id, req.user.role);
@@ -317,7 +338,7 @@ const update = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     // If admin, check if edit is accepted (edit_accepted = 2)
     if (req.user.role === 'admin') {
       if (existing.edit_accepted !== 2) {
@@ -327,15 +348,31 @@ const update = async (req, res, next) => {
         });
       }
     }
-    
+
     // Prepare update data
     const updateData = {};
     if (type !== undefined) updateData.type = type;
-    if (amount !== undefined) updateData.amount = parseFloat(amount);
+    if (amount !== undefined) {
+      const parsedAmount = parseFloat(amount);
+      if (!isNaN(parsedAmount)) {
+        updateData.amount = parsedAmount;
+      }
+    }
     if (note !== undefined) updateData.note = note;
-    if (date !== undefined) updateData.transactionDate = date;
-    if (req.body.lampiran !== undefined) updateData.lampiran = req.body.lampiran;
-    
+
+    // Handle date property (handle both 'date' and 'transaction_date')
+    const finalDate = transaction_date || date;
+    if (finalDate !== undefined) updateData.transactionDate = finalDate;
+
+    // Handle lampiran update (ensure it's stringified if it's an array)
+    if (lampiran !== undefined) {
+      if (Array.isArray(lampiran)) {
+        updateData.lampiran = JSON.stringify(lampiran);
+      } else {
+        updateData.lampiran = lampiran;
+      }
+    }
+
     // Handle category update
     if (category !== undefined) {
       const categoryRecord = await Category.findAll({
@@ -344,19 +381,19 @@ const update = async (req, res, next) => {
         branchId: existing.branch_id
       });
       const foundCategory = categoryRecord.find(c => c.name === category);
-      
+
       if (!foundCategory) {
         return res.status(404).json({
           success: false,
           message: 'Category not found'
         });
       }
-      
+
       updateData.categoryId = foundCategory.id;
     }
-    
+
     const transaction = await Transaction.update(id, updateData);
-    
+
     // Calculate changes for logging
     const changes = {};
     if (amount !== undefined && existing.amount !== parseFloat(amount)) {
@@ -371,13 +408,13 @@ const update = async (req, res, next) => {
     if (date !== undefined && existing.transaction_date !== date) {
       changes.date = { old: existing.transaction_date, new: date };
     }
-    
+
     // If admin successfully updated, clear edit request (edit_accepted = 2)
     if (req.user.role === 'admin' && existing.edit_accepted === 2) {
       await Transaction.clearEditRequest(id);
       // Reload transaction to get updated data
       const updatedTransaction = await Transaction.findById(id);
-      
+
       // Log activity
       LogService.logActivity({
         userId: req.userId,
@@ -403,20 +440,20 @@ const update = async (req, res, next) => {
         requestMethod: req.method,
         requestPath: req.path,
       });
-      
+
       // Format lampiran paths to full URLs
       const formattedUpdatedTransaction = {
         ...updatedTransaction,
         lampiran: formatLampiran(updatedTransaction.lampiran, req)
       };
-      
+
       return res.json({
         success: true,
         message: 'Transaction updated successfully',
         data: { transaction: formattedUpdatedTransaction }
       });
     }
-    
+
     // Log activity
     LogService.logActivity({
       userId: req.userId,
@@ -442,13 +479,13 @@ const update = async (req, res, next) => {
       requestMethod: req.method,
       requestPath: req.path,
     });
-    
+
     // Format lampiran paths to full URLs
     const formattedTransaction = {
       ...transaction,
       lampiran: formatLampiran(transaction.lampiran, req)
     };
-    
+
     res.json({
       success: true,
       message: 'Transaction updated successfully',
@@ -463,7 +500,7 @@ const update = async (req, res, next) => {
 const softDelete = async (req, res, next) => {
   try {
     const { id } = req.params;
-    
+
     const existing = await Transaction.findById(id);
     if (!existing) {
       return res.status(404).json({
@@ -471,7 +508,7 @@ const softDelete = async (req, res, next) => {
         message: 'Transaction not found'
       });
     }
-    
+
     // Verify branch access
     const Branch = require('../models/Branch');
     const hasAccess = await Branch.userHasAccess(req.userId, existing.branch_id, req.user.role);
@@ -481,9 +518,9 @@ const softDelete = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     const result = await Transaction.softDelete(id);
-    
+
     // Log activity
     LogService.logActivity({
       userId: req.userId,
@@ -503,7 +540,7 @@ const softDelete = async (req, res, next) => {
       requestMethod: req.method,
       requestPath: req.path,
     });
-    
+
     res.json({
       success: true,
       message: 'Transaction deleted successfully',
@@ -518,7 +555,7 @@ const softDelete = async (req, res, next) => {
 const restore = async (req, res, next) => {
   try {
     const { id } = req.params;
-    
+
     const existing = await Transaction.findById(id);
     if (!existing) {
       return res.status(404).json({
@@ -526,7 +563,7 @@ const restore = async (req, res, next) => {
         message: 'Transaction not found'
       });
     }
-    
+
     // Verify branch access
     const Branch = require('../models/Branch');
     const hasAccess = await Branch.userHasAccess(req.userId, existing.branch_id, req.user.role);
@@ -536,12 +573,12 @@ const restore = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     const result = await Transaction.restore(id);
-    
+
     // Reload transaction to get updated data
     const restoredTransaction = await Transaction.findById(id);
-    
+
     // Log activity
     LogService.logActivity({
       userId: req.userId,
@@ -561,13 +598,13 @@ const restore = async (req, res, next) => {
       requestMethod: req.method,
       requestPath: req.path,
     });
-    
+
     // Format lampiran paths to full URLs
     const formattedRestoredTransaction = {
       ...restoredTransaction,
       lampiran: formatLampiran(restoredTransaction.lampiran, req)
     };
-    
+
     res.json({
       success: true,
       message: 'Transaction restored successfully',
@@ -582,7 +619,7 @@ const restore = async (req, res, next) => {
 const hardDelete = async (req, res, next) => {
   try {
     const { id } = req.params;
-    
+
     const existing = await Transaction.findById(id);
     if (!existing) {
       return res.status(404).json({
@@ -590,7 +627,7 @@ const hardDelete = async (req, res, next) => {
         message: 'Transaction not found'
       });
     }
-    
+
     // Verify branch access
     const Branch = require('../models/Branch');
     const hasAccess = await Branch.userHasAccess(req.userId, existing.branch_id, req.user.role);
@@ -600,9 +637,9 @@ const hardDelete = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     const result = await Transaction.hardDelete(id);
-    
+
     res.json({
       success: true,
       message: 'Transaction permanently deleted',
@@ -618,7 +655,7 @@ const requestEdit = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { reason } = req.body;
-    
+
     // Only admin can request edit
     if (req.user.role !== 'admin') {
       return res.status(403).json({
@@ -626,14 +663,14 @@ const requestEdit = async (req, res, next) => {
         message: 'Hanya admin yang dapat mengajukan permintaan edit'
       });
     }
-    
+
     if (!reason || reason.trim().length === 0) {
       return res.status(400).json({
         success: false,
         message: 'Alasan edit wajib diisi'
       });
     }
-    
+
     // Check if transaction exists
     const existing = await Transaction.findById(id);
     if (!existing) {
@@ -642,7 +679,7 @@ const requestEdit = async (req, res, next) => {
         message: 'Transaction not found'
       });
     }
-    
+
     // Verify branch access
     const Branch = require('../models/Branch');
     const hasAccess = await Branch.userHasAccess(req.userId, existing.branch_id, req.user.role);
@@ -652,7 +689,7 @@ const requestEdit = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     // Check if already has pending request (edit_accepted = 1)
     if (existing.edit_requested_by && existing.edit_requested_by === req.userId && existing.edit_accepted === 1) {
       return res.status(400).json({
@@ -660,9 +697,9 @@ const requestEdit = async (req, res, next) => {
         message: 'Anda sudah memiliki permintaan edit yang sedang menunggu persetujuan'
       });
     }
-    
+
     const transaction = await Transaction.requestEdit(id, req.userId, reason.trim());
-    
+
     // Send notification to branch owner + team owners (if branch belongs to a team) - NON-BLOCKING
     setImmediate(async () => {
       try {
@@ -685,14 +722,14 @@ const requestEdit = async (req, res, next) => {
         } else if (branch?.owner_id) {
           targetUserIds.add(branch.owner_id);
         }
-        
+
         if (targetUserIds.size > 0) {
           const amount = new Intl.NumberFormat('id-ID', {
             style: 'currency',
             currency: 'IDR',
             minimumFractionDigits: 0
           }).format(existing.amount);
-          
+
           // Queue notification (non-blocking)
           notificationQueue.enqueue({
             userId: [...targetUserIds],
@@ -711,13 +748,13 @@ const requestEdit = async (req, res, next) => {
         console.error('❌ Error queuing notification:', notifError);
       }
     });
-    
+
     // Format lampiran paths to full URLs
     const formattedTransaction = {
       ...transaction,
       lampiran: formatLampiran(transaction.lampiran, req)
     };
-    
+
     res.json({
       success: true,
       message: 'Permintaan edit berhasil diajukan. Menunggu persetujuan owner.',
@@ -732,7 +769,7 @@ const requestEdit = async (req, res, next) => {
 const approveEdit = async (req, res, next) => {
   try {
     const { id } = req.params;
-    
+
     // Only owner and co-owner can approve
     if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
@@ -740,7 +777,7 @@ const approveEdit = async (req, res, next) => {
         message: 'Hanya owner dan co-owner yang dapat menyetujui permintaan edit'
       });
     }
-    
+
     // Check if transaction exists
     const existing = await Transaction.findById(id);
     if (!existing) {
@@ -749,7 +786,7 @@ const approveEdit = async (req, res, next) => {
         message: 'Transaction not found'
       });
     }
-    
+
     // Verify branch access
     const Branch = require('../models/Branch');
     const hasAccess = await Branch.userHasAccess(req.userId, existing.branch_id, req.user.role);
@@ -759,7 +796,7 @@ const approveEdit = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     // Check if there's a pending request (edit_accepted = 1)
     if (!existing.edit_requested_by || existing.edit_accepted !== 1) {
       return res.status(400).json({
@@ -767,9 +804,9 @@ const approveEdit = async (req, res, next) => {
         message: 'Tidak ada permintaan edit yang menunggu persetujuan'
       });
     }
-    
+
     const transaction = await Transaction.approveEdit(id);
-    
+
     // Log activity
     LogService.logActivity({
       userId: req.userId,
@@ -786,7 +823,7 @@ const approveEdit = async (req, res, next) => {
       requestMethod: req.method,
       requestPath: req.path,
     });
-    
+
     // Send notification to admin who requested edit - NON-BLOCKING
     if (existing.edit_requested_by) {
       setImmediate(async () => {
@@ -797,7 +834,7 @@ const approveEdit = async (req, res, next) => {
             currency: 'IDR',
             minimumFractionDigits: 0
           }).format(existing.amount);
-          
+
           // Queue notification (non-blocking)
           notificationQueue.enqueue({
             userId: existing.edit_requested_by,
@@ -815,13 +852,13 @@ const approveEdit = async (req, res, next) => {
         }
       });
     }
-    
+
     // Format lampiran paths to full URLs
     const formattedTransaction = {
       ...transaction,
       lampiran: formatLampiran(transaction.lampiran, req)
     };
-    
+
     res.json({
       success: true,
       message: 'Permintaan edit berhasil disetujui',
@@ -836,7 +873,7 @@ const approveEdit = async (req, res, next) => {
 const rejectEdit = async (req, res, next) => {
   try {
     const { id } = req.params;
-    
+
     // Only owner and co-owner can reject
     if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
@@ -844,7 +881,7 @@ const rejectEdit = async (req, res, next) => {
         message: 'Hanya owner dan co-owner yang dapat menolak permintaan edit'
       });
     }
-    
+
     // Check if transaction exists
     const existing = await Transaction.findById(id);
     if (!existing) {
@@ -853,7 +890,7 @@ const rejectEdit = async (req, res, next) => {
         message: 'Transaction not found'
       });
     }
-    
+
     // Verify branch access
     const Branch = require('../models/Branch');
     const hasAccess = await Branch.userHasAccess(req.userId, existing.branch_id, req.user.role);
@@ -863,7 +900,7 @@ const rejectEdit = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     // Check if there's a pending request (edit_accepted = 1)
     if (!existing.edit_requested_by || existing.edit_accepted !== 1) {
       return res.status(400).json({
@@ -871,9 +908,9 @@ const rejectEdit = async (req, res, next) => {
         message: 'Tidak ada permintaan edit yang menunggu persetujuan'
       });
     }
-    
+
     const transaction = await Transaction.rejectEdit(id);
-    
+
     // Log activity
     LogService.logActivity({
       userId: req.userId,
@@ -890,7 +927,7 @@ const rejectEdit = async (req, res, next) => {
       requestMethod: req.method,
       requestPath: req.path,
     });
-    
+
     // Send notification to admin who requested edit - NON-BLOCKING
     if (existing.edit_requested_by) {
       setImmediate(async () => {
@@ -901,7 +938,7 @@ const rejectEdit = async (req, res, next) => {
             currency: 'IDR',
             minimumFractionDigits: 0
           }).format(existing.amount);
-          
+
           // Queue notification (non-blocking)
           notificationQueue.enqueue({
             userId: existing.edit_requested_by,
@@ -919,13 +956,13 @@ const rejectEdit = async (req, res, next) => {
         }
       });
     }
-    
+
     // Format lampiran paths to full URLs
     const formattedTransaction = {
       ...transaction,
       lampiran: formatLampiran(transaction.lampiran, req)
     };
-    
+
     res.json({
       success: true,
       message: 'Permintaan edit ditolak',
@@ -940,10 +977,10 @@ const rejectEdit = async (req, res, next) => {
 const getEditRequests = async (req, res, next) => {
   try {
     const { status } = req.query; // Don't default to 'pending', allow 'all' or undefined
-    
+
     // Get branch_id from header or middleware (optional for owner - can get from all branches)
     let branchId = req.branchId || req.headers['x-branch-id'];
-    
+
     // For owner and co-owner: if no branchId provided, get from all branches they have access to
     // For admin: if no branchId, get from their assigned branch(es)
     if (!branchId) {
@@ -972,23 +1009,23 @@ const getEditRequests = async (req, res, next) => {
     } else {
       branchId = parseInt(branchId);
     }
-    
+
     // If status is 'all' or undefined, pass undefined to get all statuses
     const statusFilter = status === 'all' || !status ? undefined : status;
-    
+
     const transactions = await Transaction.getEditRequests({
       userId: req.userId,
       branchId: branchId,
       userRole: req.user.role,
       status: statusFilter
     });
-    
+
     // Format lampiran paths to full URLs for all transactions
     const formattedTransactions = transactions.map(t => ({
       ...t,
       lampiran: formatLampiran(t.lampiran, req)
     }));
-    
+
     res.json({
       success: true,
       data: { transactions: formattedTransactions }

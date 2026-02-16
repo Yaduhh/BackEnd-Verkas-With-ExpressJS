@@ -8,12 +8,13 @@ const getAll = async (req, res, next) => {
       type,
       include_deleted = false,
       only_deleted = false,
-      is_folder
+      is_folder,
+      parent_id
     } = req.query;
-    
+
     // Get branchId from header or middleware (optional for categories)
     const branchId = req.branchId || req.headers['x-branch-id'] || null;
-    
+
     // Untuk kategori, filter berdasarkan branch_id, bukan user_id
     // Admin dan Owner harus melihat kategori sesuai branch yang dipilih
     const categories = await Category.findAll({
@@ -22,9 +23,10 @@ const getAll = async (req, res, next) => {
       branchId: branchId ? parseInt(branchId) : null,
       includeDeleted: include_deleted === 'true',
       onlyDeleted: only_deleted === 'true',
-      isFolder: is_folder !== undefined ? (is_folder === '1' || is_folder === 'true') : undefined
+      isFolder: is_folder !== undefined ? (is_folder === '1' || is_folder === 'true') : undefined,
+      parentId: parent_id !== undefined ? parseInt(parent_id) : undefined
     });
-    
+
     res.json({
       success: true,
       data: { categories }
@@ -39,14 +41,14 @@ const getById = async (req, res, next) => {
   try {
     const { id } = req.params;
     const category = await Category.findById(id);
-    
+
     if (!category) {
       return res.status(404).json({
         success: false,
         message: 'Category not found'
       });
     }
-    
+
     res.json({
       success: true,
       data: { category }
@@ -59,35 +61,35 @@ const getById = async (req, res, next) => {
 // Create category
 const create = async (req, res, next) => {
   try {
-    const { name, type, is_folder } = req.body;
-    
+    const { name, is_folder, parent_id } = req.body;
+
     // Get branchId from header or middleware (optional for categories)
     const branchId = req.branchId || req.headers['x-branch-id'] || null;
-    
-    // Check if category already exists (active)
+
+    // Check if category already exists (active) - check by name only, not type
     const existing = await Category.findAll({
-      type,
+      type: undefined, // Don't filter by type
       userId: req.userId,
       branchId: branchId ? parseInt(branchId) : null
     });
     const duplicate = existing.find(c => c.name === name && !c.status_deleted);
-    
+
     if (duplicate) {
       return res.status(409).json({
         success: false,
         message: 'Category already exists'
       });
     }
-    
+
     const category = await Category.create({
       name,
-      type,
       userId: req.userId,
       branchId: branchId ? parseInt(branchId) : null,
       isDefault: false,
-      isFolder: is_folder === 1 || is_folder === true
+      isFolder: is_folder === 1 || is_folder === true,
+      parentId: parent_id ? parseInt(parent_id) : null
     });
-    
+
     // Log activity (only if branchId exists, because activity logs require branchId)
     // Note: logActivity is fire-and-forget, no need to await or catch
     if (branchId) {
@@ -99,8 +101,8 @@ const create = async (req, res, next) => {
         branchId: parseInt(branchId),
         newValues: {
           name: category.name,
-          type: category.type,
           is_folder: category.is_folder,
+          parent_id: category.parent_id,
         },
         ipAddress: req.ip,
         userAgent: req.get('user-agent'),
@@ -108,7 +110,7 @@ const create = async (req, res, next) => {
         requestPath: req.path,
       });
     }
-    
+
     res.status(201).json({
       success: true,
       message: 'Category created successfully',
@@ -129,8 +131,8 @@ const create = async (req, res, next) => {
 const update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, type, is_folder } = req.body;
-    
+    const { name, type, is_folder, parent_id } = req.body;
+
     const existing = await Category.findById(id);
     if (!existing) {
       return res.status(404).json({
@@ -138,7 +140,7 @@ const update = async (req, res, next) => {
         message: 'Category not found'
       });
     }
-    
+
     // Check ownership (user can only update their own categories)
     if (!existing.is_default && existing.user_id !== req.userId) {
       return res.status(403).json({
@@ -146,13 +148,14 @@ const update = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
-    const category = await Category.update(id, { 
-      name, 
-      type, 
-      is_folder: is_folder !== undefined ? (is_folder === 1 || is_folder === true) : undefined
+
+    const category = await Category.update(id, {
+      name,
+      type,
+      is_folder: is_folder !== undefined ? (is_folder === 1 || is_folder === true) : undefined,
+      parent_id: parent_id !== undefined ? (parent_id ? parseInt(parent_id) : null) : undefined
     });
-    
+
     // Calculate changes
     const changes = {};
     if (name !== undefined && existing.name !== name) {
@@ -161,7 +164,10 @@ const update = async (req, res, next) => {
     if (type !== undefined && existing.type !== type) {
       changes.type = { old: existing.type, new: type };
     }
-    
+    if (parent_id !== undefined && existing.parent_id !== parent_id) {
+      changes.parent_id = { old: existing.parent_id, new: parent_id };
+    }
+
     // Log activity (only if branchId exists)
     // Note: logActivity is fire-and-forget, no need to await or catch
     if (existing.branch_id) {
@@ -173,13 +179,12 @@ const update = async (req, res, next) => {
         branchId: existing.branch_id,
         oldValues: {
           name: existing.name,
-          type: existing.type,
           is_folder: existing.is_folder,
         },
         newValues: {
           name: category.name,
-          type: category.type,
           is_folder: category.is_folder,
+          parent_id: category.parent_id,
         },
         changes: Object.keys(changes).length > 0 ? changes : null,
         ipAddress: req.ip,
@@ -188,7 +193,7 @@ const update = async (req, res, next) => {
         requestPath: req.path,
       });
     }
-    
+
     res.json({
       success: true,
       message: 'Category updated successfully',
@@ -203,7 +208,7 @@ const update = async (req, res, next) => {
 const softDelete = async (req, res, next) => {
   try {
     const { id } = req.params;
-    
+
     const existing = await Category.findById(id);
     if (!existing) {
       return res.status(404).json({
@@ -211,7 +216,7 @@ const softDelete = async (req, res, next) => {
         message: 'Category not found'
       });
     }
-    
+
     // Check ownership
     if (!existing.is_default && existing.user_id !== req.userId) {
       return res.status(403).json({
@@ -219,10 +224,10 @@ const softDelete = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     try {
       const result = await Category.softDelete(id);
-      
+
       // Log activity (only if branchId exists)
       // Note: logActivity is fire-and-forget, no need to await or catch
       if (existing.branch_id) {
@@ -234,7 +239,6 @@ const softDelete = async (req, res, next) => {
           branchId: existing.branch_id,
           oldValues: {
             name: existing.name,
-            type: existing.type,
             is_folder: existing.is_folder,
           },
           ipAddress: req.ip,
@@ -243,7 +247,7 @@ const softDelete = async (req, res, next) => {
           requestPath: req.path,
         });
       }
-      
+
       res.json({
         success: true,
         message: 'Category deleted successfully',
@@ -267,7 +271,7 @@ const softDelete = async (req, res, next) => {
 const restore = async (req, res, next) => {
   try {
     const { id } = req.params;
-    
+
     const existing = await Category.findById(id);
     if (!existing) {
       return res.status(404).json({
@@ -275,9 +279,9 @@ const restore = async (req, res, next) => {
         message: 'Category not found'
       });
     }
-    
+
     const category = await Category.restore(id);
-    
+
     res.json({
       success: true,
       message: 'Category restored successfully',
@@ -292,7 +296,7 @@ const restore = async (req, res, next) => {
 const hardDelete = async (req, res, next) => {
   try {
     const { id } = req.params;
-    
+
     const existing = await Category.findById(id);
     if (!existing) {
       return res.status(404).json({
@@ -300,7 +304,7 @@ const hardDelete = async (req, res, next) => {
         message: 'Category not found'
       });
     }
-    
+
     try {
       const result = await Category.hardDelete(id);
       res.json({

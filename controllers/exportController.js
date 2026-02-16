@@ -15,7 +15,7 @@ const exportReport = async (req, res, next) => {
   try {
     // Support both GET (query params) and POST (body)
     const source = req.method === 'GET' ? req.query : req.body;
-    
+
     const {
       title = 'Laporan Keuangan',
       from_date,
@@ -24,19 +24,19 @@ const exportReport = async (req, res, next) => {
       format = 'XLS',
       include_deleted = false
     } = source;
-    
+
     const userId = req.userId;
-    
+
     // Get branch_id from header or middleware
     const branchId = req.branchId || req.headers['x-branch-id'];
-    
+
     if (!branchId) {
       return res.status(400).json({
         success: false,
         message: 'Branch ID is required. Please provide X-Branch-Id header.'
       });
     }
-    
+
     // Verify branch access
     const Branch = require('../models/Branch');
     const hasAccess = await Branch.userHasAccess(userId, parseInt(branchId), req.user.role);
@@ -46,7 +46,7 @@ const exportReport = async (req, res, next) => {
         message: 'No access to this branch'
       });
     }
-    
+
     // Build query params - JANGAN filter berdasarkan userId karena admin bisa input transaksi
     // Hanya filter berdasarkan branchId untuk mengambil semua transaksi di branch tersebut
     const queryParams = {
@@ -55,11 +55,11 @@ const exportReport = async (req, res, next) => {
       endDate: to_date,
       includeDeleted: include_deleted === true || include_deleted === 'true'
     };
-    
+
     if (category && category !== 'Semua Kategori') {
       queryParams.category = category;
     }
-    
+
     // Get transactions - semua transaksi di branch, bukan hanya yang dibuat oleh user tertentu
     const transactions = await Transaction.findAll({
       ...queryParams,
@@ -67,17 +67,17 @@ const exportReport = async (req, res, next) => {
       page: 1,
       limit: 10000 // Large limit for export
     });
-    
+
     if (transactions.length === 0) {
       return res.status(400).json({
         success: false,
         message: 'No transactions found for the selected period'
       });
     }
-    
+
     // Generate filename
     const filename = generateFilename(format, title);
-    
+
     // Export based on format
     let filepath;
     switch (format.toUpperCase()) {
@@ -90,19 +90,19 @@ const exportReport = async (req, res, next) => {
       case 'PDF':
         // For PDF, use BukuKas format (calculate report first)
         const allCategories = await Category.findAll({ branchId: parseInt(branchId) });
-        const daysInMonth = from_date && to_date 
+        const daysInMonth = from_date && to_date
           ? Math.ceil((new Date(to_date) - new Date(from_date)) / (1000 * 60 * 60 * 24)) + 1
           : 30;
         const reportData = calculateReport(transactions, allCategories, daysInMonth);
-        
+
         // Get branch info
         const Branch = require('../models/Branch');
         const branch = await Branch.findById(parseInt(branchId));
         const branchName = branch ? branch.name : 'Branch';
-        
+
         // Create date object for selected period
         const selectedDate = from_date ? new Date(from_date) : new Date();
-        
+
         filepath = await exportBukuKasToPDF(reportData, filename, branchName, selectedDate, {
           fromDate: from_date,
           toDate: to_date,
@@ -115,14 +115,14 @@ const exportReport = async (req, res, next) => {
           message: 'Invalid format. Must be XLS, CSV, or PDF'
         });
     }
-    
+
     // Send file
     res.setHeader('Content-Type', getMimeType(format));
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    
+
     const fileStream = fs.createReadStream(filepath);
     fileStream.pipe(res);
-    
+
     // Clean up file after sending
     fileStream.on('end', () => {
       setTimeout(() => {
@@ -141,7 +141,7 @@ function calculateReport(transactions, categories, workingDays) {
   // Calculate Omzet (Income)
   const incomeTransactions = transactions.filter(t => t.type === 'income');
   const totalOmzet = incomeTransactions.reduce((sum, t) => sum + parseFloat(t.amount.toString()), 0);
-  
+
   // Group income transactions by category
   const salesChannelByCategory = {};
   incomeTransactions.forEach(t => {
@@ -213,25 +213,25 @@ const exportBukuKas = async (req, res, next) => {
   try {
     // Support both GET (query params) and POST (body)
     const source = req.method === 'GET' ? req.query : req.body;
-    
+
     const {
       title = 'Kesimpulan Kas',
       month, // Format: YYYY-MM (e.g., "2024-01")
       year, // Format: YYYY
     } = source;
-    
+
     const userId = req.userId;
-    
+
     // Get branch_id from header or middleware
     const branchId = req.branchId || req.headers['x-branch-id'];
-    
+
     if (!branchId) {
       return res.status(400).json({
         success: false,
         message: 'Branch ID is required. Please provide X-Branch-Id header.'
       });
     }
-    
+
     // Verify branch access
     const Branch = require('../models/Branch');
     const hasAccess = await Branch.userHasAccess(userId, parseInt(branchId), req.user.role);
@@ -241,7 +241,7 @@ const exportBukuKas = async (req, res, next) => {
         message: 'No access to this branch'
       });
     }
-    
+
     // Get branch info
     const branch = await Branch.findById(parseInt(branchId));
     if (!branch) {
@@ -250,7 +250,7 @@ const exportBukuKas = async (req, res, next) => {
         message: 'Branch not found'
       });
     }
-    
+
     // Calculate date range for selected month
     let selectedYear, selectedMonth;
     if (month && year) {
@@ -268,11 +268,11 @@ const exportBukuKas = async (req, res, next) => {
       selectedYear = now.getFullYear();
       selectedMonth = now.getMonth();
     }
-    
+
     const startDate = `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-01`;
     const daysInMonth = new Date(selectedYear, selectedMonth + 1, 0).getDate();
     const endDate = `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
-    
+
     // Get transactions - semua transaksi di branch, bukan hanya yang dibuat oleh user tertentu
     const transactions = await Transaction.findAll({
       branchId: parseInt(branchId),
@@ -282,29 +282,29 @@ const exportBukuKas = async (req, res, next) => {
       page: 1,
       limit: 10000 // Large limit for export
     });
-    
+
     // Get categories (for future use if needed)
     const allCategories = await Category.findAll({ branchId: parseInt(branchId) });
-    
+
     // Calculate report
     const reportData = calculateReport(transactions, allCategories, daysInMonth);
-    
+
     // Generate filename
     const filename = generateFilename('PDF', title);
-    
+
     // Create Date object for selected month
     const selectedMonthDate = new Date(selectedYear, selectedMonth, 1);
-    
+
     // Export to PDF
     const filepath = await exportBukuKasToPDF(reportData, filename, branch.name, selectedMonthDate);
-    
+
     // Send file
     res.setHeader('Content-Type', getMimeType('PDF'));
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    
+
     const fileStream = fs.createReadStream(filepath);
     fileStream.pipe(res);
-    
+
     // Clean up file after sending
     fileStream.on('end', () => {
       setTimeout(() => {

@@ -13,7 +13,7 @@ if (!fs.existsSync(EXPORTS_DIR)) {
 // Export to Excel (XLS)
 async function exportToExcel(data, filename, title) {
   const workbook = XLSX.utils.book_new();
-  
+
   // Prepare data
   const worksheetData = [
     ['Tanggal', 'Kategori', 'Tipe', 'Jumlah', 'Keterangan'],
@@ -25,20 +25,20 @@ async function exportToExcel(data, filename, title) {
       item.note || ''
     ])
   ];
-  
+
   const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
   XLSX.utils.book_append_sheet(workbook, worksheet, 'Transaksi');
-  
+
   const filepath = path.join(EXPORTS_DIR, filename);
   XLSX.writeFile(workbook, filepath);
-  
+
   return filepath;
 }
 
 // Export to CSV
 async function exportToCSV(data, filename) {
   const filepath = path.join(EXPORTS_DIR, filename);
-  
+
   const csvWriter = createCsvWriter({
     path: filepath,
     header: [
@@ -49,7 +49,7 @@ async function exportToCSV(data, filename) {
       { id: 'note', title: 'Keterangan' }
     ]
   });
-  
+
   const records = data.map(item => ({
     transaction_date: item.transaction_date,
     category_name: item.category_name,
@@ -57,7 +57,7 @@ async function exportToCSV(data, filename) {
     amount: item.amount,
     note: item.note || ''
   }));
-  
+
   await csvWriter.writeRecords(records);
   return filepath;
 }
@@ -65,8 +65,8 @@ async function exportToCSV(data, filename) {
 // Export to PDF (Professional Format)
 async function exportToPDF(data, filename, title) {
   const filepath = path.join(EXPORTS_DIR, filename);
-  const doc = new PDFDocument({ 
-    margin: 50, 
+  const doc = new PDFDocument({
+    margin: 50,
     size: 'A4',
     info: {
       Title: title || 'Laporan Keuangan',
@@ -75,14 +75,14 @@ async function exportToPDF(data, filename, title) {
       Creator: 'VERKAS Financial App'
     }
   });
-  
+
   doc.pipe(fs.createWriteStream(filepath));
-  
+
   const pageWidth = doc.page.width;
   const margin = 50;
   const contentWidth = pageWidth - 2 * margin;
   let y = margin;
-  
+
   // Helper to check if new page needed
   const checkNewPage = (requiredHeight) => {
     if (y + requiredHeight > doc.page.height - 50) {
@@ -92,12 +92,12 @@ async function exportToPDF(data, filename, title) {
     }
     return false;
   };
-  
+
   // Header Section - Professional Design
   doc.fillColor('#1e3a8a').fontSize(24).font('Helvetica-Bold');
   doc.text(title || 'Laporan Keuangan', margin, y, { align: 'left', width: contentWidth });
   y += 35;
-  
+
   // Date range info (if available from data)
   const firstDate = data.length > 0 ? data[data.length - 1].transaction_date : '';
   const lastDate = data.length > 0 ? data[0].transaction_date : '';
@@ -106,43 +106,43 @@ async function exportToPDF(data, filename, title) {
     doc.text(`Periode: ${firstDate} - ${lastDate}`, margin, y, { align: 'left', width: contentWidth });
     y += 20;
   }
-  
+
   // Summary Section
   const totalIncome = data.filter(t => t.type === 'income').reduce((sum, t) => sum + parseFloat(t.amount), 0);
   const totalExpense = data.filter(t => t.type === 'expense').reduce((sum, t) => sum + parseFloat(t.amount), 0);
   const netAmount = totalIncome - totalExpense;
-  
+
   checkNewPage(60);
-  
+
   // Summary Box
   doc.roundedRect(margin, y, contentWidth, 50, 5)
-     .fillColor('#f8f9fa')
-     .fill()
-     .fillColor('#000000');
-  
+    .fillColor('#f8f9fa')
+    .fill()
+    .fillColor('#000000');
+
   y += 10;
   doc.fontSize(9).font('Helvetica-Bold').fillColor('#666666');
   doc.text('RINGKASAN', margin + 10, y);
   y += 15;
-  
+
   doc.fontSize(10).font('Helvetica');
   doc.fillColor('#10b981');
   doc.text(`Total Pemasukan: ${formatCurrency(totalIncome)}`, margin + 10, y, { width: contentWidth / 2 - 10 });
   doc.fillColor('#ef4444');
   doc.text(`Total Pengeluaran: ${formatCurrency(totalExpense)}`, margin + contentWidth / 2, y, { width: contentWidth / 2 - 10 });
   y += 15;
-  
+
   doc.fillColor(netAmount >= 0 ? '#10b981' : '#ef4444').font('Helvetica-Bold');
   doc.text(`Saldo Bersih: ${formatCurrency(netAmount)}`, margin + 10, y);
   y += 30;
-  
+
   // Table Header - Professional Styling
   checkNewPage(30);
-  
+
   const tableTop = y;
   const itemHeight = 25;
   const headerHeight = 30;
-  
+
   const colWidths = {
     date: contentWidth * 0.15,
     category: contentWidth * 0.25,
@@ -150,12 +150,12 @@ async function exportToPDF(data, filename, title) {
     amount: contentWidth * 0.23,
     note: contentWidth * 0.25
   };
-  
+
   // Header Background
   doc.roundedRect(margin, tableTop, contentWidth, headerHeight, 3)
-     .fillColor('#1e3a8a')
-     .fill();
-  
+    .fillColor('#1e3a8a')
+    .fill();
+
   // Header Text
   doc.fillColor('#ffffff').fontSize(10).font('Helvetica-Bold');
   doc.text('Tanggal', margin + 5, tableTop + 8, { width: colWidths.date - 10 });
@@ -163,68 +163,68 @@ async function exportToPDF(data, filename, title) {
   doc.text('Tipe', margin + colWidths.date + colWidths.category + 5, tableTop + 8, { width: colWidths.type - 10 });
   doc.text('Jumlah', margin + colWidths.date + colWidths.category + colWidths.type + 5, tableTop + 8, { width: colWidths.amount - 10 });
   doc.text('Keterangan', margin + colWidths.date + colWidths.category + colWidths.type + colWidths.amount + 5, tableTop + 8, { width: colWidths.note - 10 });
-  
+
   y = tableTop + headerHeight;
-  
+
   // Data Rows - Alternating Colors
   doc.font('Helvetica').fontSize(9).fillColor('#000000');
-  
+
   data.forEach((item, index) => {
     checkNewPage(itemHeight + 5);
-    
+
     // Alternating row background
     if (index % 2 === 0) {
       doc.rect(margin, y, contentWidth, itemHeight)
-         .fillColor('#f8f9fa')
-         .fill();
+        .fillColor('#f8f9fa')
+        .fill();
     }
-    
+
     // Row border
     doc.strokeColor('#e5e7eb')
-       .lineWidth(0.5)
-       .moveTo(margin, y)
-       .lineTo(margin + contentWidth, y)
-       .stroke();
-    
+      .lineWidth(0.5)
+      .moveTo(margin, y)
+      .lineTo(margin + contentWidth, y)
+      .stroke();
+
     // Data cells
     const rowY = y + 7;
     doc.fillColor('#000000');
     doc.text(item.transaction_date || '', margin + 5, rowY, { width: colWidths.date - 10 });
     doc.text(item.category_name || '', margin + colWidths.date + 5, rowY, { width: colWidths.category - 10 });
-    
+
     // Type with color
     const typeText = item.type === 'income' ? 'Pemasukan' : 'Pengeluaran';
     doc.fillColor(item.type === 'income' ? '#10b981' : '#ef4444');
     doc.text(typeText, margin + colWidths.date + colWidths.category + 5, rowY, { width: colWidths.type - 10 });
-    
+
     // Amount with color and formatting
     doc.fillColor(item.type === 'income' ? '#10b981' : '#ef4444');
     doc.text(formatCurrency(parseFloat(item.amount)), margin + colWidths.date + colWidths.category + colWidths.type + 5, rowY, { width: colWidths.amount - 10 });
-    
+
     doc.fillColor('#000000');
     doc.text(item.note || '-', margin + colWidths.date + colWidths.category + colWidths.type + colWidths.amount + 5, rowY, { width: colWidths.note - 10 });
-    
+
     y += itemHeight;
   });
-  
+
   // Footer
   const footerY = doc.page.height - 40;
   doc.fillColor('#999999').fontSize(8).font('Helvetica');
   doc.text(
-    `Dibuat pada: ${new Date().toLocaleString('id-ID', { 
-      day: '2-digit', 
-      month: 'long', 
-      year: 'numeric', 
-      hour: '2-digit', 
-      minute: '2-digit' 
+    `Dibuat pada: ${new Date().toLocaleString('id-ID', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
     })} | Total Transaksi: ${data.length}`,
     margin,
     footerY,
     { align: 'center', width: contentWidth }
   );
-  
+
   doc.end();
-  
+
   return new Promise((resolve, reject) => {
     doc.on('end', () => resolve(filepath));
     doc.on('error', reject);
@@ -293,8 +293,8 @@ function getMonthName(monthIndex) {
 // Export BukuKas to PDF using PDFKit (Minimalist, Simple, Elegant, Professional)
 async function exportBukuKasToPDF(reportData, filename, branchName, selectedMonth, options = {}) {
   const filepath = path.join(EXPORTS_DIR, filename);
-  const doc = new PDFDocument({ 
-    margin: 40, 
+  const doc = new PDFDocument({
+    margin: 40,
     size: 'A4',
     info: {
       Title: options.title || 'Kesimpulan Kas',
@@ -303,14 +303,14 @@ async function exportBukuKasToPDF(reportData, filename, branchName, selectedMont
       Creator: 'VERKAS Financial App'
     }
   });
-  
+
   doc.pipe(fs.createWriteStream(filepath));
-  
+
   const pageWidth = doc.page.width;
   const margin = 40;
   const contentWidth = pageWidth - 2 * margin;
   let y = margin;
-  
+
   // Helper function to check if need new page
   const checkNewPage = (requiredHeight) => {
     if (y + requiredHeight > doc.page.height - 40) {
@@ -320,7 +320,7 @@ async function exportBukuKasToPDF(reportData, filename, branchName, selectedMont
     }
     return false;
   };
-  
+
   // Format date helper
   const formatDateRange = () => {
     if (options.fromDate && options.toDate) {
@@ -335,7 +335,7 @@ async function exportBukuKasToPDF(reportData, filename, branchName, selectedMont
     const daysInMonth = new Date(year, month + 1, 0).getDate();
     return `01 - ${String(daysInMonth).padStart(2, '0')} ${getMonthName(month)} ${year}`;
   };
-  
+
   const getDaysInMonth = () => {
     if (options.fromDate && options.toDate) {
       return Math.ceil((new Date(options.toDate) - new Date(options.fromDate)) / (1000 * 60 * 60 * 24)) + 1;
@@ -344,18 +344,18 @@ async function exportBukuKasToPDF(reportData, filename, branchName, selectedMont
     const year = selectedMonth.getFullYear();
     return new Date(year, month + 1, 0).getDate();
   };
-  
+
   // Calculate percentages
   const profitPercentage = reportData.omzet.total > 0 ? (reportData.profit / reportData.omzet.total) * 100 : 0;
   const pengeluaranPercentage = reportData.omzet.total > 0 ? (reportData.pengeluaran.total / reportData.omzet.total) * 100 : 0;
-  
+
   // Try to register Poppins font if available, otherwise use Helvetica
   let usePoppins = false;
   const fontsDir = path.join(__dirname, '../fonts');
   const poppinsDir = path.join(__dirname, '../../VERKAS/assets/fonts');
-  
+
   // Try fonts directory first, then VERKAS assets
-  const poppinsRegular = fs.existsSync(path.join(fontsDir, 'Poppins-Regular.ttf')) 
+  const poppinsRegular = fs.existsSync(path.join(fontsDir, 'Poppins-Regular.ttf'))
     ? path.join(fontsDir, 'Poppins-Regular.ttf')
     : path.join(poppinsDir, 'Poppins-Regular.ttf');
   const poppinsBold = fs.existsSync(path.join(fontsDir, 'Poppins-Bold.ttf'))
@@ -367,7 +367,7 @@ async function exportBukuKasToPDF(reportData, filename, branchName, selectedMont
   const poppinsSemiBold = fs.existsSync(path.join(fontsDir, 'Poppins-SemiBold.ttf'))
     ? path.join(fontsDir, 'Poppins-SemiBold.ttf')
     : path.join(poppinsDir, 'Poppins-SemiBold.ttf');
-  
+
   try {
     if (fs.existsSync(poppinsRegular)) {
       doc.registerFont('Poppins', poppinsRegular);
@@ -391,250 +391,478 @@ async function exportBukuKasToPDF(reportData, filename, branchName, selectedMont
   } catch (error) {
     // Silently fallback to Helvetica
   }
-  
+
   const fontRegular = usePoppins ? 'Poppins' : 'Helvetica';
   const fontBold = usePoppins ? 'Poppins-Bold' : 'Helvetica-Bold';
   const fontMedium = usePoppins ? 'Poppins-Medium' : 'Helvetica-Bold';
-  
+
   // ===== HEADER SECTION =====
   // Title
   doc.fillColor('#000000').fontSize(20).font(fontBold);
   doc.text('LAPORAN KEUANGAN', margin, y, { align: 'center', width: contentWidth });
   y += 24;
-  
+
   // Branch Name
   doc.fontSize(13).font(fontRegular).fillColor('#000000');
   doc.text(branchName.toUpperCase(), margin, y, { align: 'center', width: contentWidth });
   y += 18;
-  
+
   // Period
   doc.fontSize(9).font(fontRegular).fillColor('#666666');
   doc.text(formatDateRange(), margin, y, { align: 'center', width: contentWidth });
   y += 12;
   doc.text(`${getDaysInMonth()} Hari Kerja`, margin, y, { align: 'center', width: contentWidth });
   y += 28;
-  
+
   // ===== OMZET SECTION =====
   checkNewPage(150);
-  
+
   // Section Title
   doc.fillColor('#000000').fontSize(12).font(fontBold);
   doc.text('OMZET', margin, y);
   y += 18;
-  
+
   // Total Omzet Box
   const omzetBoxY = y;
   doc.rect(margin, omzetBoxY, contentWidth, 36)
-     .fillColor('#f8f9fa')
-     .fill();
+    .fillColor('#f8f9fa')
+    .fill();
   doc.strokeColor('#e5e7eb').lineWidth(1);
   doc.rect(margin, omzetBoxY, contentWidth, 36).stroke();
-  
+
   doc.fontSize(11).font(fontMedium).fillColor('#666666');
   doc.text('Total Omzet', margin + 12, omzetBoxY + 10);
-  
+
   doc.font(fontBold).fontSize(16).fillColor('#000000');
   doc.text(formatCurrency(reportData.omzet.total), margin + 12, omzetBoxY + 10, { align: 'right', width: contentWidth - 24 });
-  
+
   y = omzetBoxY + 44;
-  
+
   // Sales Channel Breakdown
   if (reportData.omzet.salesChannel.length > 0) {
     doc.fontSize(10).font(fontMedium).fillColor('#000000');
     doc.text('Sales Channel', margin, y);
     y += 16;
-    
+
     const rowHeight = 20;
     const col1Width = contentWidth * 0.60; // Name column
     const col2Width = contentWidth * 0.25; // Amount column
     const col3Width = contentWidth * 0.15; // Percentage column
-    
+
     reportData.omzet.salesChannel.forEach((channel, index) => {
       checkNewPage(rowHeight + 2);
-      
+
       const rowY = y;
-      
+
       // Divider line (except first item)
       if (index > 0) {
         doc.strokeColor('#f0f0f0').lineWidth(0.5);
         doc.moveTo(margin + 8, rowY - 2).lineTo(pageWidth - margin - 8, rowY - 2).stroke();
       }
-      
+
       // Channel name
       doc.fontSize(10).font(fontRegular).fillColor('#000000');
       doc.text(channel.name, margin + 8, rowY, { width: col1Width - 8 });
-      
+
       // Amount
       doc.font(fontMedium).fontSize(10).fillColor('#000000');
-      doc.text(formatCurrency(channel.amount), margin + col1Width, rowY, { 
+      doc.text(formatCurrency(channel.amount), margin + col1Width, rowY, {
         width: col2Width,
         align: 'right'
       });
-      
+
       // Percentage
       doc.fontSize(9).font(fontRegular).fillColor('#666666');
-      doc.text(formatPercentage(channel.percentage), margin + col1Width + col2Width, rowY, { 
+      doc.text(formatPercentage(channel.percentage), margin + col1Width + col2Width, rowY, {
         width: col3Width,
         align: 'right'
       });
-      
+
       y += rowHeight;
     });
-    
+
     y += 12;
   }
-  
+
   y += 24;
-  
+
   // ===== PENGELUARAN SECTION =====
   checkNewPage(150);
-  
+
   // Section Title
   doc.fillColor('#000000').fontSize(12).font(fontBold);
   doc.text('PENGELUARAN', margin, y);
   y += 18;
-  
+
   // Total Pengeluaran Box
   const pengeluaranBoxY = y;
   doc.rect(margin, pengeluaranBoxY, contentWidth, 36)
-     .fillColor('#fef2f2')
-     .fill();
+    .fillColor('#fef2f2')
+    .fill();
   doc.strokeColor('#fee2e2').lineWidth(1);
   doc.rect(margin, pengeluaranBoxY, contentWidth, 36).stroke();
-  
+
   doc.fontSize(11).font(fontMedium).fillColor('#666666');
   doc.text('Total Pengeluaran', margin + 12, pengeluaranBoxY + 10);
-  
+
   doc.font(fontBold).fontSize(16).fillColor('#000000');
   doc.text(formatCurrency(reportData.pengeluaran.total), margin + 12, pengeluaranBoxY + 10, { align: 'right', width: contentWidth - 24 });
-  
+
   y = pengeluaranBoxY + 44;
-  
+
   // Breakdown Pengeluaran
   if (reportData.pengeluaran.breakdown.length > 0) {
     const rowHeight = 20;
     const col1Width = contentWidth * 0.60; // Name column
     const col2Width = contentWidth * 0.25; // Amount column
     const col3Width = contentWidth * 0.15; // Percentage column
-    
+
     reportData.pengeluaran.breakdown.forEach((item, index) => {
       checkNewPage(rowHeight + 2);
-      
+
       const rowY = y;
-      
+
       // Divider line (except first item)
       if (index > 0) {
         doc.strokeColor('#f0f0f0').lineWidth(0.5);
         doc.moveTo(margin + 8, rowY - 2).lineTo(pageWidth - margin - 8, rowY - 2).stroke();
       }
-      
+
       // Item name
       doc.fontSize(10).font(fontRegular).fillColor('#000000');
       doc.text(item.name, margin + 8, rowY, { width: col1Width - 8 });
-      
+
       // Amount
       doc.font(fontMedium).fontSize(10).fillColor('#000000');
-      doc.text(formatCurrency(item.amount), margin + col1Width, rowY, { 
+      doc.text(formatCurrency(item.amount), margin + col1Width, rowY, {
         width: col2Width,
         align: 'right'
       });
-      
+
       // Percentage
       doc.fontSize(9).font(fontRegular).fillColor('#666666');
-      doc.text(formatPercentage(item.percentage), margin + col1Width + col2Width, rowY, { 
+      doc.text(formatPercentage(item.percentage), margin + col1Width + col2Width, rowY, {
         width: col3Width,
         align: 'right'
       });
-      
+
       y += rowHeight;
     });
-    
+
     y += 12;
   }
-  
+
   y += 24;
-  
+
   // ===== PROFIT SECTION =====
   checkNewPage(80);
-  
+
   // Profit Box
   const profitBoxY = y;
   const profitBgColor = reportData.profit < 0 ? '#fef2f2' : '#f0fdf4';
   const profitBorderColor = reportData.profit < 0 ? '#fee2e2' : '#dcfce7';
   const profitTextColor = reportData.profit < 0 ? '#dc2626' : '#16a34a';
-  
+
   doc.rect(margin, profitBoxY, contentWidth, 36)
-     .fillColor(profitBgColor)
-     .fill();
+    .fillColor(profitBgColor)
+    .fill();
   doc.strokeColor(profitBorderColor).lineWidth(1.5);
   doc.rect(margin, profitBoxY, contentWidth, 36).stroke();
-  
+
   doc.fontSize(11).font(fontMedium).fillColor('#666666');
   doc.text('PROFIT', margin + 12, profitBoxY + 10);
-  
+
   doc.font(fontBold).fontSize(16).fillColor(profitTextColor);
   doc.text(formatCurrency(reportData.profit), margin + 12, profitBoxY + 10, { align: 'right', width: contentWidth - 24 });
-  
+
   y = profitBoxY + 44;
-  
+
   // ===== BAGI HASIL SECTION =====
   checkNewPage(100);
-  
+
   // Section Title
   doc.fillColor('#000000').fontSize(12).font(fontBold);
   doc.text('PEMBAGIAN HASIL', margin, y);
   y += 22;
-  
+
   // Pusat Box
   const pusatBoxY = y;
   doc.rect(margin, pusatBoxY, contentWidth, 32)
-     .fillColor('#f8f9fa')
-     .fill();
+    .fillColor('#f8f9fa')
+    .fill();
   doc.strokeColor('#e5e7eb').lineWidth(1);
   doc.rect(margin, pusatBoxY, contentWidth, 32).stroke();
-  
+
   doc.fontSize(10).font(fontRegular).fillColor('#666666');
   doc.text('Pusat (30%)', margin + 12, pusatBoxY + 8);
-  
+
   doc.font(fontBold).fontSize(15).fillColor('#000000');
   doc.text(formatCurrency(reportData.bagiHasil.pusat), margin + 12, pusatBoxY + 8, { align: 'right', width: contentWidth - 24 });
-  
+
   y = pusatBoxY + 40;
-  
+
   // Mitra Box
   const mitraBoxY = y;
   doc.rect(margin, mitraBoxY, contentWidth, 32)
-     .fillColor('#f8f9fa')
-     .fill();
+    .fillColor('#f8f9fa')
+    .fill();
   doc.strokeColor('#e5e7eb').lineWidth(1);
   doc.rect(margin, mitraBoxY, contentWidth, 32).stroke();
-  
+
   doc.fontSize(10).font(fontRegular).fillColor('#666666');
   doc.text('Mitra (70%)', margin + 12, mitraBoxY + 8);
-  
+
   doc.font(fontBold).fontSize(15).fillColor('#000000');
   doc.text(formatCurrency(reportData.bagiHasil.mitra), margin + 12, mitraBoxY + 8, { align: 'right', width: contentWidth - 24 });
-  
+
   y = mitraBoxY + 40;
-  
+
   // ===== FOOTER - Simple & Minimalist =====
   const footerY = doc.page.height - 30;
   doc.fillColor('#999999').fontSize(8).font(fontRegular);
   doc.text(
-    `Dibuat pada: ${new Date().toLocaleString('id-ID', { 
-      day: '2-digit', 
-      month: 'long', 
-      year: 'numeric', 
-      hour: '2-digit', 
-      minute: '2-digit' 
+    `Dibuat pada: ${new Date().toLocaleString('id-ID', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
     })}`,
     margin,
     footerY,
     { align: 'center', width: contentWidth }
   );
-  
+
   doc.end();
-  
+
+  return new Promise((resolve, reject) => {
+    doc.on('end', () => resolve(filepath));
+    doc.on('error', reject);
+  });
+}
+
+// Export Category to PDF (Visual Report)
+async function exportCategoryToPDF(data, filename, branchName, options = {}) {
+  const filepath = path.join(EXPORTS_DIR, filename);
+  const doc = new PDFDocument({
+    margin: 40, // Slightly reduced margin for more space
+    size: 'A4',
+    info: {
+      Title: options.title || 'Laporan Kategori',
+      Author: 'VERKAS',
+      Subject: 'Laporan Transaksi Kategori',
+      Creator: 'VERKAS Financial App'
+    }
+  });
+
+  doc.pipe(fs.createWriteStream(filepath));
+
+  const pageWidth = doc.page.width;
+  const margin = 40;
+  const contentWidth = pageWidth - 2 * margin;
+  let y = margin;
+
+  // Helper to check if new page needed
+  const checkNewPage = (requiredHeight) => {
+    if (y + requiredHeight > doc.page.height - 40) {
+      doc.addPage();
+      y = margin;
+      return true;
+    }
+    return false;
+  };
+
+  // Font registration (same as before)
+  let usePoppins = false;
+  const fontsDir = path.join(__dirname, '../fonts');
+  const poppinsDir = path.join(__dirname, '../../VERKAS/assets/fonts');
+
+  const poppinsRegular = fs.existsSync(path.join(fontsDir, 'Poppins-Regular.ttf'))
+    ? path.join(fontsDir, 'Poppins-Regular.ttf')
+    : path.join(poppinsDir, 'Poppins-Regular.ttf');
+  const poppinsBold = fs.existsSync(path.join(fontsDir, 'Poppins-Bold.ttf'))
+    ? path.join(fontsDir, 'Poppins-Bold.ttf')
+    : path.join(poppinsDir, 'Poppins-Bold.ttf');
+  const poppinsMedium = fs.existsSync(path.join(fontsDir, 'Poppins-Medium.ttf'))
+    ? path.join(fontsDir, 'Poppins-Medium.ttf')
+    : path.join(poppinsDir, 'Poppins-Medium.ttf');
+
+  try {
+    if (fs.existsSync(poppinsRegular)) {
+      doc.registerFont('Poppins', poppinsRegular);
+      if (fs.existsSync(poppinsBold)) doc.registerFont('Poppins-Bold', poppinsBold);
+      if (fs.existsSync(poppinsMedium)) doc.registerFont('Poppins-Medium', poppinsMedium);
+      usePoppins = true;
+    }
+  } catch (error) {
+    // Fallback
+  }
+
+  const fontRegular = usePoppins ? 'Poppins' : 'Helvetica';
+  const fontBold = usePoppins ? 'Poppins-Bold' : 'Helvetica-Bold';
+  const fontMedium = usePoppins ? 'Poppins-Medium' : 'Helvetica-Bold';
+
+  // Determine Type (Income/Expense/Folder Type) for coloration
+  // Logic: 1. Options.type, 2. First data item type, 3. Fallback
+  let isIncome = true;
+  if (options.type) {
+    isIncome = options.type === 'income';
+  } else if (data.length > 0) {
+    isIncome = data[0].type === 'income';
+  }
+
+  const color = isIncome ? '#10b981' : '#ef4444'; // Green or Red
+  const bgColor = isIncome ? '#ecfdf5' : '#fef2f2';
+
+  // ===== HEADER SECTION =====
+  // 1. Report Title (Small, Uppercase)
+  doc.fillColor('#64748b').fontSize(10).font(fontMedium);
+  doc.text('LAPORAN KATEGORI', margin, y);
+  y += 15;
+
+  // 2. Category Name (Large, Colored, Prominent)
+  const categoryTitle = options.categoryName || 'Kategori';
+  doc.fillColor(color).fontSize(24).font(fontBold);
+  doc.text(categoryTitle, margin, y);
+  y += 30;
+
+  // 3. Branch Name & Period
+  doc.fillColor('#0f172a').fontSize(12).font(fontRegular);
+  doc.text(branchName || 'Branch', margin, y);
+
+  // Period on the right (same line as branch)
+  let dateRangeStr = '';
+  if (options.fromDate && options.toDate) {
+    const fromDate = new Date(options.fromDate);
+    const toDate = new Date(options.toDate);
+    dateRangeStr = `${fromDate.getDate()} ${getMonthName(fromDate.getMonth())} ${fromDate.getFullYear()} - ${toDate.getDate()} ${getMonthName(toDate.getMonth())} ${toDate.getFullYear()}`;
+  } else {
+    dateRangeStr = `${now.getDate()} ${getMonthName(now.getMonth())} ${now.getFullYear()}`;
+
+  }
+
+  doc.fillColor('#64748b').fontSize(10).font(fontRegular);
+  doc.text(dateRangeStr, margin, y + 2, { align: 'right', width: contentWidth });
+
+  y += 25;
+
+  // Separator Line
+  doc.strokeColor('#e2e8f0').lineWidth(1).moveTo(margin, y).lineTo(margin + contentWidth, y).stroke();
+  y += 20;
+
+  // ===== SUMMARY SECTION =====
+  const totalAmount = data.reduce((sum, t) => sum + parseFloat(t.amount || 0), 0);
+  const transactionCount = data.length;
+
+  doc.roundedRect(margin, y, contentWidth, 70, 12).fillColor(bgColor).fill();
+  doc.roundedRect(margin, y, contentWidth, 70, 12).strokeColor(color).lineWidth(1).stroke();
+
+  const summaryY = y + 15;
+
+  // Total Nominal
+  doc.fillColor('#475569').fontSize(10).font(fontMedium);
+  doc.text('Total Nominal', margin + 24, summaryY);
+  doc.fillColor(color).fontSize(20).font(fontBold);
+  doc.text(formatCurrency(totalAmount), margin + 24, summaryY + 16);
+
+  // Transaction Count (Right aligned relative to box center)
+  doc.fillColor('#475569').fontSize(10).font(fontMedium);
+  doc.text('Jumlah Transaksi', margin + contentWidth / 2 + 24, summaryY);
+  doc.fillColor('#0f172a').fontSize(20).font(fontBold);
+  doc.text(`${transactionCount}`, margin + contentWidth / 2 + 24, summaryY + 16);
+
+  y += 90;
+
+  // ===== TABLE SECTION =====
+  checkNewPage(40);
+
+  // Columns
+  // Expanded Note width, reduce others slightly
+  const col = {
+    date: { x: margin + 10, w: contentWidth * 0.18 },
+    amount: { x: margin + contentWidth * 0.18 + 10, w: contentWidth * 0.22 },
+    note: { x: margin + contentWidth * 0.40 + 10, w: contentWidth * 0.45 },
+    attach: { x: margin + contentWidth * 0.85 + 10, w: contentWidth * 0.15 }
+  };
+
+  // Header Background
+  const headerHeight = 32;
+  doc.roundedRect(margin, y, contentWidth, headerHeight, 6).fillColor('#1e293b').fill();
+
+  // Header Text
+  doc.fillColor('#ffffff').fontSize(10).font(fontBold);
+  const headerTextY = y + 10;
+
+  doc.text('Tanggal', col.date.x, headerTextY, { width: col.date.w });
+  doc.text('Nominal', col.amount.x, headerTextY, { width: col.amount.w });
+  doc.text('Keterangan', col.note.x, headerTextY, { width: col.note.w });
+  doc.text('Lampiran', col.attach.x, headerTextY, { width: col.attach.w });
+
+  y += headerHeight + 5;
+
+  // Rows
+  doc.font(fontRegular).fontSize(9);
+
+  data.forEach((item, index) => {
+    // 1. Calculate height needed for Note
+    const noteText = item.note || '-';
+    // Use doc.heightOfString to calculate wrapped height
+    const noteHeight = doc.heightOfString(noteText, { width: col.note.w });
+
+    // Minimum row height is 30, otherwise fit text + padding
+    const rowHeight = Math.max(30, noteHeight + 16);
+
+    checkNewPage(rowHeight);
+
+    // Zebra Striping
+    if (index % 2 === 0) {
+      doc.roundedRect(margin, y, contentWidth, rowHeight, 4).fillColor('#f8fafc').fill();
+    }
+
+    const rowTextY = y + 8;
+
+    // Date
+    doc.fillColor('#0f172a').font(fontRegular);
+    let dateStr = '-';
+    if (item.transaction_date) {
+      const d = new Date(item.transaction_date);
+      // Check if date is valid
+      if (!isNaN(d.getTime())) {
+        dateStr = `${d.getDate()} ${getMonthName(d.getMonth())} ${d.getFullYear()}`;
+      } else {
+        dateStr = String(item.transaction_date); // Fallback if parsing fails
+      }
+    }
+    doc.text(dateStr, col.date.x, rowTextY, { width: col.date.w });
+
+    // Amount
+    doc.fillColor(color).font(fontMedium);
+    doc.text(formatCurrency(parseFloat(item.amount || 0)), col.amount.x, rowTextY, { width: col.amount.w });
+
+    // Note (Allowed to wrap)
+    doc.fillColor('#334155').font(fontRegular);
+    doc.text(noteText, col.note.x, rowTextY, { width: col.note.w });
+
+    // Attachments
+    const attachCount = item.lampiran ? (Array.isArray(item.lampiran) ? item.lampiran.length : 1) : 0;
+    doc.fillColor('#64748b').font(fontRegular);
+    doc.text(attachCount > 0 ? `${attachCount} File` : '-', col.attach.x, rowTextY, { width: col.attach.w });
+
+    y += rowHeight + 2; // Add small gap between rows
+  });
+
+  // Footer
+  const footerY = doc.page.height - 30;
+  doc.fontSize(8).fillColor('#94a3b8');
+
+  // Format: 12 Februari 2026 23:45
+  const now = new Date();
+  const printDate = `${now.getDate()} ${getMonthName(now.getMonth())} ${now.getFullYear()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+  doc.text(`Dicetak: ${printDate} | ${filename}`, margin, footerY, { align: 'center', width: contentWidth });
+
+  doc.end();
+
   return new Promise((resolve, reject) => {
     doc.on('end', () => resolve(filepath));
     doc.on('error', reject);
@@ -646,6 +874,7 @@ module.exports = {
   exportToCSV,
   exportToPDF,
   exportBukuKasToPDF,
+  exportCategoryToPDF,
   generateFilename,
   getMimeType,
   EXPORTS_DIR

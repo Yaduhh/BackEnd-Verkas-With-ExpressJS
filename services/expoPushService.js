@@ -13,23 +13,19 @@ class ExpoPushService {
   // Send notification to a single user
   async sendToUser(userId, { title, body, data = {}, sound = 'default', priority = 'high' }) {
     try {
-      // Get active tokens for the user
-      // Match your table schema: is_active = 1
+      // Get all stored tokens
       const tokens = await DeviceToken.findByUserId(userId);
+
+      // Filter active expo tokens
       const expoTokens = tokens
         .filter(t => t.is_active === 1 && Expo.isExpoPushToken(t.device_token))
         .map(t => t.device_token);
 
-      console.log('═══════════════════════════════════════════════════════════');
-      console.log(`📬 [BACKEND] SENDING TO USER: ${userId}`);
-      console.log(`📊 [BACKEND] Tokens found: ${tokens.length}, Valid: ${expoTokens.length}`);
-      console.log('═══════════════════════════════════════════════════════════');
-
       if (expoTokens.length === 0) {
-        return { success: false, message: 'No valid tokens', sent: 0 };
+        return { success: false, message: 'No valid tokens found', sent: 0 };
       }
 
-      // Create messages (Match your other project structure)
+      // Create message objects
       const messages = expoTokens.map(token => ({
         to: token,
         sound: sound || 'default',
@@ -39,29 +35,26 @@ class ExpoPushService {
         data: { ...data, userId },
       }));
 
-      // Chunk and send (Match your other project loop)
+      // Send in chunks
       const chunks = expo.chunkPushNotifications(messages);
       const tickets = [];
       let sentCount = 0;
 
       for (let chunk of chunks) {
         try {
-          console.log(`� Sending chunk with ${chunk.length} messages...`);
           const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
-          console.log('📨 Received tickets:', ticketChunk);
           tickets.push(...ticketChunk);
           sentCount += ticketChunk.filter(t => t.status === 'ok').length;
         } catch (error) {
-          console.error('❌ Error sending chunk:', error);
-          // Keep the error for top level if all fail
+          console.error('❌ [BACKEND] Expo push error:', error.message);
           throw error;
         }
       }
 
-      // Update last used (optional but good)
+      // Update last used in background
       const usedTokenIds = tokens.filter(t => expoTokens.includes(t.device_token)).map(t => t.id);
       if (usedTokenIds.length > 0) {
-        DeviceToken.updateLastUsed(usedTokenIds).catch(e => console.error('Update last used error:', e));
+        DeviceToken.updateLastUsed(usedTokenIds).catch(() => { });
       }
 
       return {
@@ -72,7 +65,7 @@ class ExpoPushService {
       };
 
     } catch (error) {
-      console.error('❌ Fatal error in sendToUser:', error.message);
+      console.error('❌ [BACKEND] Fatal error in sendToUser:', error.message);
       return { success: false, error: error.message, sent: 0 };
     }
   }

@@ -12,9 +12,9 @@ class Category {
     );
     return results[0] || null;
   }
-  
+
   // Find all (with filters)
-  static async findAll({ type, userId, branchId, includeDeleted = false, onlyDeleted = false, isFolder } = {}) {
+  static async findAll({ type, userId, branchId, includeDeleted = false, onlyDeleted = false, isFolder, parentId } = {}) {
     let sql = `
       SELECT c.*, u.name as user_name 
       FROM categories c 
@@ -22,18 +22,17 @@ class Category {
       WHERE 1=1
     `;
     const params = [];
-    
+
     if (!includeDeleted && !onlyDeleted) {
       sql += ' AND c.status_deleted = false';
     } else if (onlyDeleted) {
       sql += ' AND c.status_deleted = true';
     }
-    
-    if (type) {
-      sql += ' AND c.type = ?';
-      params.push(type);
-    }
-    
+
+    // Type parameter ignored - type column no longer exists
+    // All categories are flexible and can be used for both income and expense
+
+
     // Branch ID filter (if provided, show branch-specific + global categories)
     // If isFolder filter is used, only show exact branch match (no NULL)
     if (branchId !== undefined && branchId !== null) {
@@ -47,54 +46,64 @@ class Category {
         params.push(branchId);
       }
     }
-    
+
     // Jangan filter berdasarkan userId untuk kategori - kategori berdasarkan branch
     // if (userId !== undefined) {
     //   sql += ' AND (c.user_id = ? OR c.is_default = true)';
     //   params.push(userId);
     // }
-    
-    // Filter by is_folder (if provided)
+
+    // Filter by folder status
     if (isFolder !== undefined) {
       sql += ' AND c.is_folder = ?';
       params.push(isFolder);
     }
-    
+
+    // Filter by parent_id
+    if (parentId !== undefined) {
+      if (parentId === null) {
+        sql += ' AND c.parent_id IS NULL';
+      } else {
+        sql += ' AND c.parent_id = ?';
+        params.push(parentId);
+      }
+    }
+
     sql += ' ORDER BY c.is_default DESC, c.name ASC';
-    
+
     return await query(sql, params);
   }
-  
+
   // Create category
-  static async create({ name, type, userId = null, branchId = null, isDefault = false, isFolder = false }) {
+  static async create({ name, userId = null, branchId = null, isDefault = false, isFolder = false, parentId = null }) {
     const result = await query(
-      `INSERT INTO categories (name, type, user_id, branch_id, is_default, is_folder, status_deleted)
+      `INSERT INTO categories (name, user_id, branch_id, is_default, is_folder, parent_id, status_deleted)
        VALUES (?, ?, ?, ?, ?, ?, false)`,
-      [name, type, userId, branchId, isDefault, isFolder]
+      [name, userId, branchId, isDefault, isFolder, parentId]
     );
     return await this.findById(result.insertId);
   }
-  
+
   // Update category
-  static async update(id, { name, type, is_folder }) {
+  static async update(id, { name, is_folder, parent_id }) {
     const updates = [];
     const params = [];
-    
+
     if (name !== undefined) {
       updates.push('name = ?');
       params.push(name);
-    }
-    if (type !== undefined) {
-      updates.push('type = ?');
-      params.push(type);
     }
     if (is_folder !== undefined) {
       updates.push('is_folder = ?');
       params.push(is_folder);
     }
-    
+    if (parent_id !== undefined) {
+      updates.push('parent_id = ?');
+      params.push(parent_id);
+    }
+
     if (updates.length === 0) return await this.findById(id);
-    
+
     params.push(id);
     await query(
       `UPDATE categories SET ${updates.join(', ')} WHERE id = ? AND status_deleted = false`,
@@ -102,7 +111,7 @@ class Category {
     );
     return await this.findById(id);
   }
-  
+
   // Soft delete (cannot delete default categories)
   static async softDelete(id) {
     // Check if default category
@@ -110,7 +119,7 @@ class Category {
     if (category && category.is_default) {
       throw new Error('Cannot delete default category');
     }
-    
+
     const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
     await query(
       'UPDATE categories SET status_deleted = true, deleted_at = ? WHERE id = ?',
@@ -118,7 +127,7 @@ class Category {
     );
     return { id, deleted_at: now };
   }
-  
+
   // Restore
   static async restore(id) {
     await query(
@@ -127,7 +136,7 @@ class Category {
     );
     return await this.findById(id);
   }
-  
+
   // Hard delete (permanent)
   static async hardDelete(id) {
     // Check if default category
@@ -135,7 +144,7 @@ class Category {
     if (category && category.is_default) {
       throw new Error('Cannot delete default category');
     }
-    
+
     await query('DELETE FROM categories WHERE id = ?', [id]);
     return { id, deleted: true };
   }

@@ -108,8 +108,13 @@ const validateCreateCategory = [
     .isLength({ min: 1, max: 255 })
     .withMessage('Name must be between 1 and 255 characters'),
   body('type')
-    .isIn(['income', 'expense'])
+    .optional({ nullable: true })
+    .isIn(['income', 'expense', null, ''])
     .withMessage('Type must be income or expense'),
+  body('parent_id')
+    .optional({ nullable: true })
+    .isInt()
+    .withMessage('Parent ID must be an integer'),
   handleValidationErrors
 ];
 
@@ -123,9 +128,13 @@ const validateUpdateCategory = [
     .isLength({ min: 1, max: 255 })
     .withMessage('Name must be between 1 and 255 characters'),
   body('type')
-    .optional()
-    .isIn(['income', 'expense'])
+    .optional({ nullable: true })
+    .isIn(['income', 'expense', null, ''])
     .withMessage('Type must be income or expense'),
+  body('parent_id')
+    .optional({ nullable: true })
+    .isInt()
+    .withMessage('Parent ID must be an integer'),
   handleValidationErrors
 ];
 
