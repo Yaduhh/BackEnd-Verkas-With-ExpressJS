@@ -1,4 +1,5 @@
 const Transaction = require('../models/Transaction');
+const TransactionEdit = require('../models/TransactionEdit');
 const Category = require('../models/Category');
 const LogService = require('../services/logService');
 const config = require('../config/config');
@@ -254,16 +255,11 @@ const create = async (req, res, next) => {
       }
     }
 
-    // Determine if this is a general transaction (Dashboard) or Sub-Category transaction (Savings)
-    // is_umum = 0 ONLY if choosing a Sub-Category specifically inside a Folder.
-    // Choosing the Parent (Induk) itself should always be is_umum = 1 (Show in Dashboard).
-    let isUmum = true;
-    if (foundCategory.parent_id) {
-      const parent = await Category.findById(foundCategory.parent_id);
-      if (parent && (parent.is_folder === true || parent.is_folder === 1)) {
-        isUmum = false;
-      }
-    }
+    // Every transaction made through the app should show up in the dashboard by default,
+    // unless explicitly specified otherwise (e.g., Savings/Kas Simpanan transactions)
+    const isUmum = req.body.is_umum !== undefined ? 
+                  (req.body.is_umum === true || req.body.is_umum === 'true' || req.body.is_umum === 1) : 
+                  true;
 
     // Create transaction
     const transaction = await Transaction.create({
@@ -277,6 +273,24 @@ const create = async (req, res, next) => {
       lampiran: lampiranValue,
       isUmum
     });
+
+    // Log to history table (Audit Trail) - Non-blocking
+    TransactionEdit.create({
+      transactionId: transaction.id,
+      requesterId: req.userId,
+      reason: 'Transaksi Dibuat',
+      oldData: {},
+      newData: {
+        type: transaction.type,
+        amount: transaction.amount,
+        category: category,
+        note: transaction.note,
+        date: transaction.transaction_date,
+        lampiran: transaction.lampiran,
+        is_umum: transaction.is_umum
+      },
+      status: 'approved'
+    }).catch(err => console.error('Error creating creation history:', err));
 
     // Log activity (non-blocking, fire and forget)
     LogService.logActivity({
@@ -318,7 +332,7 @@ const create = async (req, res, next) => {
 const update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { type, category, amount, note, date, transaction_date, lampiran } = req.body;
+    const { type, category, amount, note, date, transaction_date, lampiran, reason, is_umum } = req.body;
 
     // Check if transaction exists and belongs to user
     const existing = await Transaction.findById(id);
@@ -339,15 +353,6 @@ const update = async (req, res, next) => {
       });
     }
 
-    // If admin, check if edit is accepted (edit_accepted = 2)
-    if (req.user.role === 'admin') {
-      if (existing.edit_accepted !== 2) {
-        return res.status(403).json({
-          success: false,
-          message: 'Edit request belum disetujui oleh owner. Silakan ajukan permintaan edit terlebih dahulu.'
-        });
-      }
-    }
 
     // Prepare update data
     const updateData = {};
@@ -359,6 +364,7 @@ const update = async (req, res, next) => {
       }
     }
     if (note !== undefined) updateData.note = note;
+    if (is_umum !== undefined) updateData.isUmum = is_umum === true || is_umum === 'true' || is_umum === 1;
 
     // Handle date property (handle both 'date' and 'transaction_date')
     const finalDate = transaction_date || date;
@@ -394,64 +400,73 @@ const update = async (req, res, next) => {
 
     const transaction = await Transaction.update(id, updateData);
 
-    // Calculate changes for logging
+    // Calculate changes for logging and automatic reason
     const changes = {};
+    const changedFields = [];
+    if (type !== undefined && existing.type !== type) {
+      changes.type = { old: existing.type, new: type };
+      changedFields.push('Tipe');
+    }
     if (amount !== undefined && existing.amount !== parseFloat(amount)) {
-      changes.amount = { old: existing.amount, new: parseFloat(amount) };
+      const newAmount = parseFloat(amount);
+      changes.amount = { old: existing.amount, new: newAmount };
+      changedFields.push('Nominal');
     }
     if (category !== undefined && existing.category_name !== category) {
       changes.category = { old: existing.category_name, new: category };
+      changedFields.push('Kategori');
     }
     if (note !== undefined && existing.note !== note) {
       changes.note = { old: existing.note, new: note };
+      changedFields.push('Catatan');
     }
-    if (date !== undefined && existing.transaction_date !== date) {
-      changes.date = { old: existing.transaction_date, new: date };
+    const finalReqDate = transaction_date || date;
+    if (finalReqDate !== undefined && existing.transaction_date !== finalReqDate) {
+      changes.date = { old: existing.transaction_date, new: finalReqDate };
+      changedFields.push('Tanggal');
+    }
+    if (lampiran !== undefined) {
+      const oldL = existing.lampiran;
+      const newL = transaction.lampiran;
+      if (oldL !== newL) {
+        changes.lampiran = { old: oldL, new: newL };
+        changedFields.push('Lampiran');
+      }
     }
 
-    // If admin successfully updated, clear edit request (edit_accepted = 2)
-    if (req.user.role === 'admin' && existing.edit_accepted === 2) {
+    const autoGeneratedReason = changedFields.length > 0 
+      ? `Update ${changedFields.join(', ')} oleh ${req.user.role === 'admin' ? 'Admin' : 'Owner'}`
+      : `Update data oleh ${req.user.role === 'admin' ? 'Admin' : 'Owner'}`;
+
+    // Log to history table for all roles (Owner/Admin)
+    await TransactionEdit.create({
+      transactionId: id,
+      requesterId: req.userId,
+      reason: reason ? reason.trim() : autoGeneratedReason,
+      oldData: {
+        type: existing.type,
+        amount: existing.amount,
+        category: existing.category_name,
+        note: existing.note,
+        date: existing.transaction_date,
+        lampiran: existing.lampiran,
+        is_umum: existing.is_umum
+      },
+      newData: {
+        type: transaction.type,
+        amount: transaction.amount,
+        category: transaction.category_name,
+        note: transaction.note,
+        date: transaction.transaction_date,
+        lampiran: transaction.lampiran,
+        is_umum: transaction.is_umum
+      },
+      status: 'approved'
+    });
+
+    // If it was an approved request or any old request, clear it
+    if (existing.edit_accepted !== 0) {
       await Transaction.clearEditRequest(id);
-      // Reload transaction to get updated data
-      const updatedTransaction = await Transaction.findById(id);
-
-      // Log activity
-      LogService.logActivity({
-        userId: req.userId,
-        action: 'update_transaction',
-        entityType: 'transaction',
-        entityId: transaction.id,
-        branchId: existing.branch_id,
-        oldValues: {
-          amount: existing.amount,
-          category: existing.category_name,
-          note: existing.note,
-          date: existing.transaction_date,
-        },
-        newValues: {
-          amount: updatedTransaction.amount,
-          category: updatedTransaction.category_name,
-          note: updatedTransaction.note,
-          date: updatedTransaction.transaction_date,
-        },
-        changes: Object.keys(changes).length > 0 ? changes : null,
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent'),
-        requestMethod: req.method,
-        requestPath: req.path,
-      });
-
-      // Format lampiran paths to full URLs
-      const formattedUpdatedTransaction = {
-        ...updatedTransaction,
-        lampiran: formatLampiran(updatedTransaction.lampiran, req)
-      };
-
-      return res.json({
-        success: true,
-        message: 'Transaction updated successfully',
-        data: { transaction: formattedUpdatedTransaction }
-      });
     }
 
     // Log activity
@@ -462,16 +477,20 @@ const update = async (req, res, next) => {
       entityId: transaction.id,
       branchId: existing.branch_id,
       oldValues: {
+        type: existing.type,
         amount: existing.amount,
         category: existing.category_name,
         note: existing.note,
         date: existing.transaction_date,
+        is_umum: existing.is_umum
       },
       newValues: {
+        type: transaction.type,
         amount: transaction.amount,
         category: transaction.category_name,
         note: transaction.note,
         date: transaction.transaction_date,
+        is_umum: transaction.is_umum
       },
       changes: Object.keys(changes).length > 0 ? changes : null,
       ipAddress: req.ip,
@@ -700,6 +719,22 @@ const requestEdit = async (req, res, next) => {
 
     const transaction = await Transaction.requestEdit(id, req.userId, reason.trim());
 
+    // Log request to history
+    await TransactionEdit.create({
+      transactionId: id,
+      requesterId: req.userId,
+      reason: reason.trim(),
+      oldData: {
+        amount: existing.amount,
+        category: existing.category_name,
+        note: existing.note,
+        date: existing.transaction_date,
+        lampiran: existing.lampiran
+      },
+      newData: null, // Data baru belum diinput
+      status: 'approved'
+    });
+
     // Send notification to branch owner + team owners (if branch belongs to a team) - NON-BLOCKING
     setImmediate(async () => {
       try {
@@ -807,6 +842,9 @@ const approveEdit = async (req, res, next) => {
 
     const transaction = await Transaction.approveEdit(id);
 
+    // Update history status
+    await TransactionEdit.updateStatus(id, 'approved', req.userId);
+
     // Log activity
     LogService.logActivity({
       userId: req.userId,
@@ -910,6 +948,9 @@ const rejectEdit = async (req, res, next) => {
     }
 
     const transaction = await Transaction.rejectEdit(id);
+
+    // Update history status
+    await TransactionEdit.updateStatus(id, 'rejected', req.userId);
 
     // Log activity
     LogService.logActivity({
@@ -1035,6 +1076,45 @@ const getEditRequests = async (req, res, next) => {
   }
 };
 
+// Get transaction edit history
+const getHistory = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const history = await TransactionEdit.getHistory(id);
+
+    // Format lampiran paths in old_data and new_data
+    const formattedHistory = history.map(item => {
+      let old_data = item.old_data;
+      let new_data = item.new_data;
+
+      try {
+        if (typeof old_data === 'string') old_data = JSON.parse(old_data);
+        if (typeof new_data === 'string') new_data = JSON.parse(new_data);
+      } catch (e) {}
+
+      if (old_data && old_data.lampiran) {
+        old_data.lampiran = formatLampiran(old_data.lampiran, req);
+      }
+      if (new_data && new_data.lampiran) {
+        new_data.lampiran = formatLampiran(new_data.lampiran, req);
+      }
+
+      return {
+        ...item,
+        old_data,
+        new_data
+      };
+    });
+
+    res.json({
+      success: true,
+      data: { history: formattedHistory }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAll,
   getById,
@@ -1046,6 +1126,7 @@ module.exports = {
   requestEdit,
   approveEdit,
   rejectEdit,
-  getEditRequests
+  getEditRequests,
+  getHistory
 };
 

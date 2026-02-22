@@ -264,7 +264,7 @@ class Transaction {
   static async requestEdit(id, userId, reason) {
     await query(
       `UPDATE transactions 
-       SET edit_reason = ?, edit_requested_by = ?, edit_accepted = 1 
+       SET edit_reason = ?, edit_requested_by = ?, edit_accepted = 2 
        WHERE id = ? AND status_deleted = false`,
       [reason, userId, id]
     );

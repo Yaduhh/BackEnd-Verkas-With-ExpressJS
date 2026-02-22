@@ -11,7 +11,8 @@ const {
   requestEdit,
   approveEdit,
   rejectEdit,
-  getEditRequests
+  getEditRequests,
+  getHistory
 } = require('../controllers/transactionController');
 const { authenticate, authorize } = require('../middleware/auth');
 const { optionalBranchContext } = require('../middleware/branchContext');
@@ -34,6 +35,9 @@ router.get('/edit-requests', getEditRequests);
 
 // Get transaction by ID
 router.get('/:id', getById);
+
+// Get transaction history
+router.get('/:id/history', getHistory);
 
 // Create transaction
 router.post('/', validateCreateTransaction, create);

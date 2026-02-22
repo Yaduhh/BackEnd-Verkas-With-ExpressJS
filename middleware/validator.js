@@ -141,8 +141,17 @@ const validateUpdateCategory = [
 // Dashboard validators
 const validateDashboardHarian = [
   query('date')
+    .optional()
     .isISO8601()
     .withMessage('Date must be valid ISO 8601 format (YYYY-MM-DD)'),
+  query('startDate')
+    .optional()
+    .isISO8601()
+    .withMessage('startDate must be valid ISO 8601 format (YYYY-MM-DD)'),
+  query('endDate')
+    .optional()
+    .isISO8601()
+    .withMessage('endDate must be valid ISO 8601 format (YYYY-MM-DD)'),
   handleValidationErrors
 ];
 

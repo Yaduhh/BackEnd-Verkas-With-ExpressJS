@@ -97,33 +97,59 @@ const getHarian = async (req, res, next) => {
       });
     }
 
-    // Get transactions for the date (all users in branch, not just current user)
+    // Accept both 'date' (single day) or 'startDate'/'endDate' (range)
+    const finalStartDate = req.query.startDate || date;
+    const finalEndDate = req.query.endDate || date;
+
+    // Get transactions for the range
     const transactions = await Transaction.findAll({
-      // userId: undefined, // Don't filter by user - show all transactions in branch
-      branchId: branchId, // Already integer from middleware
-      startDate: date,
-      endDate: date,
+      branchId: branchId,
+      startDate: finalStartDate,
+      endDate: finalEndDate,
       limit: 10000,
       page: 1,
       isUmum: true
     });
 
-    // Get summary (all users in branch, not just current user)
+    // Get summary for the range
     const summary = await Transaction.getSummary({
-      // userId: undefined, // Don't filter by user - show all transactions in branch
-      branchId: branchId, // Already integer from middleware
-      startDate: date,
-      endDate: date,
+      branchId: branchId,
+      startDate: finalStartDate,
+      endDate: finalEndDate,
       isUmum: true
     });
 
-    // Format title
-    const d = parseDate(date);
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
-    const title = `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+    // Group by date
+    const transactionsByDate = {};
+    transactions.forEach(t => {
+      let dateStr = t.transaction_date;
+      if (dateStr instanceof Date) {
+        dateStr = formatDate(dateStr);
+      } else if (typeof dateStr === 'string' && dateStr.includes('T')) {
+        dateStr = dateStr.split('T')[0];
+      }
+      
+      if (!transactionsByDate[dateStr]) {
+        transactionsByDate[dateStr] = [];
+      }
+      transactionsByDate[dateStr].push(t);
+    });
 
-    // Group by date (should be same date for harian)
-    const sections = transactions.length > 0 ? [formatSection(date, transactions, transactions, req)] : [];
+    // Format title
+    let title = '';
+    const startObj = parseDate(finalStartDate);
+    const endObj = parseDate(finalEndDate);
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+    
+    if (finalStartDate === finalEndDate) {
+      title = `${startObj.getDate()} ${months[startObj.getMonth()]} ${startObj.getFullYear()}`;
+    } else {
+      title = `${startObj.getDate()} ${months[startObj.getMonth()]} - ${endObj.getDate()} ${months[endObj.getMonth()]} ${endObj.getFullYear()}`;
+    }
+
+    // Sort dates descending
+    const sortedDates = Object.keys(transactionsByDate).sort((a, b) => b.localeCompare(a));
+    const sections = sortedDates.map(d => formatSection(d, transactionsByDate[d], transactionsByDate[d], req));
 
     res.json({
       success: true,
@@ -179,7 +205,7 @@ const getMingguan = async (req, res, next) => {
 
         // Convert to string if it's a Date object
         if (tDate instanceof Date) {
-          tDate = tDate.toISOString().split('T')[0]; // Get YYYY-MM-DD
+          tDate = formatDate(tDate); // Get YYYY-MM-DD (local)
         } else if (typeof tDate === 'string') {
           if (tDate.includes('T')) {
             // Extract date part from datetime
@@ -308,7 +334,7 @@ const getBulananAll = async (req, res, next) => {
 
       // Convert to string if it's a Date object
       if (dateStr instanceof Date) {
-        dateStr = dateStr.toISOString().split('T')[0]; // Get YYYY-MM-DD
+        dateStr = formatDate(dateStr); // Get YYYY-MM-DD (local)
       } else if (typeof dateStr === 'string') {
         if (dateStr.includes('T')) {
           dateStr = dateStr.split('T')[0]; // Extract YYYY-MM-DD part
@@ -325,9 +351,9 @@ const getBulananAll = async (req, res, next) => {
         return;
       }
 
-      // Use UTC methods to avoid timezone issues
-      const year = date.getUTCFullYear();
-      const month = date.getUTCMonth() + 1; // 1-12
+      // Use local methods to avoid timezone issues
+      const year = date.getFullYear();
+      const month = date.getMonth() + 1; // 1-12
       const monthKey = `${year}-${String(month).padStart(2, '0')}`;
       if (!transactionsByMonth[monthKey]) {
         transactionsByMonth[monthKey] = [];
@@ -462,7 +488,7 @@ const getBulanan = async (req, res, next) => {
 
       // Convert to string if it's a Date object
       if (date instanceof Date) {
-        date = date.toISOString().split('T')[0]; // Get YYYY-MM-DD
+        date = formatDate(date); // Get YYYY-MM-DD (local)
       } else if (typeof date === 'string') {
         if (date.includes('T')) {
           // Extract date part from datetime
@@ -575,7 +601,7 @@ const getTahunan = async (req, res, next) => {
 
       // Convert to string if it's a Date object
       if (dateStr instanceof Date) {
-        dateStr = dateStr.toISOString().split('T')[0]; // Get YYYY-MM-DD
+        dateStr = formatDate(dateStr); // Get YYYY-MM-DD (local)
       } else if (typeof dateStr === 'string') {
         if (dateStr.includes('T')) {
           dateStr = dateStr.split('T')[0]; // Extract YYYY-MM-DD part
@@ -592,8 +618,8 @@ const getTahunan = async (req, res, next) => {
         return;
       }
 
-      // Use UTC methods to avoid timezone issues
-      const year = date.getUTCFullYear();
+      // Use local methods to avoid timezone issues
+      const year = date.getFullYear();
       const yearKey = String(year);
 
       if (!transactionsByYear[yearKey]) {
