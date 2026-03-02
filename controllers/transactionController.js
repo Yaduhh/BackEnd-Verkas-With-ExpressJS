@@ -1,4 +1,6 @@
+// TRACER: 2026-02-28 11:26
 const Transaction = require('../models/Transaction');
+const TransactionRepayment = require('../models/TransactionRepayment');
 const TransactionEdit = require('../models/TransactionEdit');
 const Category = require('../models/Category');
 const LogService = require('../services/logService');
@@ -83,7 +85,10 @@ const getAll = async (req, res, next) => {
       only_folders = false,
       is_umum,
       page = 1,
-      limit = 20
+      limit = 20,
+      mitra_piutang_id,
+      is_pb1_payment,
+      has_pb1
     } = req.query;
 
     // Get branch_id from header or middleware
@@ -126,7 +131,10 @@ const getAll = async (req, res, next) => {
       onlyFolders: only_folders === 'true',
       isUmum: is_umum,
       page: finalPage,
-      limit: finalLimit
+      limit: finalLimit,
+      mitraPiutangId: mitra_piutang_id || undefined,
+      isPb1Payment: is_pb1_payment !== undefined ? (is_pb1_payment === 'true') : undefined,
+      hasPb1: has_pb1 === 'true'
     });
 
     const total = await Transaction.count({
@@ -139,7 +147,8 @@ const getAll = async (req, res, next) => {
       onlyDeleted: only_deleted === 'true',
       excludeFolders: exclude_folders === 'true',
       onlyFolders: only_folders === 'true',
-      isUmum: is_umum
+      isUmum: is_umum,
+      mitraPiutangId: mitra_piutang_id || undefined
     });
 
     // Format lampiran paths to full URLs for all transactions
@@ -203,10 +212,9 @@ const getById = async (req, res, next) => {
   }
 };
 
-// Create transaction
 const create = async (req, res, next) => {
   try {
-    const { type, category, amount, note, date, lampiran } = req.body;
+    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, mitra_details, is_pb1_payment } = req.body;
 
     // Get branch_id from header or middleware
     const branchId = req.branchId || req.headers['x-branch-id'];
@@ -257,9 +265,41 @@ const create = async (req, res, next) => {
 
     // Every transaction made through the app should show up in the dashboard by default,
     // unless explicitly specified otherwise (e.g., Savings/Kas Simpanan transactions)
-    const isUmum = req.body.is_umum !== undefined ? 
-                  (req.body.is_umum === true || req.body.is_umum === 'true' || req.body.is_umum === 1) : 
-                  true;
+    const isUmum = req.body.is_umum !== undefined ?
+      (req.body.is_umum === true || req.body.is_umum === 'true' || req.body.is_umum === 1) :
+      true;
+
+    // Handle debt payment fields
+    const isDebtPayment = is_debt_payment === true || is_debt_payment === 'true' || is_debt_payment === 1;
+    let paidAmount = null;
+    let remainingDebt = null;
+    let mitraPiutangId = null;
+
+    if (isDebtPayment) {
+      if (paid_amount !== undefined && paid_amount !== null) {
+        paidAmount = parseFloat(paid_amount);
+        // Validate: paid_amount should not exceed amount
+        if (paidAmount > parseFloat(amount)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Jumlah yang dibayar tidak boleh lebih dari nominal'
+          });
+        }
+      }
+      if (remaining_debt !== undefined && remaining_debt !== null) {
+        remainingDebt = parseFloat(remaining_debt);
+      }
+      // Parse mitra_piutang_id (nullable, only for debt payments)
+      if (mitra_piutang_id !== undefined && mitra_piutang_id !== null && mitra_piutang_id !== '') {
+        mitraPiutangId = parseInt(mitra_piutang_id);
+        if (isNaN(mitraPiutangId)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid mitra_piutang_id'
+          });
+        }
+      }
+    }
 
     // Create transaction
     const transaction = await Transaction.create({
@@ -268,10 +308,17 @@ const create = async (req, res, next) => {
       type,
       categoryId: foundCategory.id,
       amount: parseFloat(amount),
+      pb1: pb1 ? parseFloat(pb1) : null,
       note: note || null,
       transactionDate: date,
       lampiran: lampiranValue,
-      isUmum
+      isUmum,
+      isDebtPayment,
+      paidAmount,
+      remainingDebt,
+      mitraPiutangId,
+      mitraDetails: mitra_details || [],
+      isPb1Payment: is_pb1_payment || false
     });
 
     // Log to history table (Audit Trail) - Non-blocking
@@ -283,11 +330,15 @@ const create = async (req, res, next) => {
       newData: {
         type: transaction.type,
         amount: transaction.amount,
+        pb1: transaction.pb1,
         category: category,
         note: transaction.note,
         date: transaction.transaction_date,
         lampiran: transaction.lampiran,
-        is_umum: transaction.is_umum
+        is_umum: transaction.is_umum,
+        is_debt_payment: transaction.is_debt_payment,
+        paid_amount: transaction.paid_amount,
+        remaining_debt: transaction.remaining_debt
       },
       status: 'approved'
     }).catch(err => console.error('Error creating creation history:', err));
@@ -332,7 +383,7 @@ const create = async (req, res, next) => {
 const update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { type, category, amount, note, date, transaction_date, lampiran, reason, is_umum } = req.body;
+    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, mitra_details, is_pb1_payment } = req.body;
 
     // Check if transaction exists and belongs to user
     const existing = await Transaction.findById(id);
@@ -364,6 +415,12 @@ const update = async (req, res, next) => {
       }
     }
     if (note !== undefined) updateData.note = note;
+    if (pb1 !== undefined) {
+      const parsedPb1 = pb1 === null ? null : parseFloat(pb1);
+      if (parsedPb1 === null || !isNaN(parsedPb1)) {
+        updateData.pb1 = parsedPb1;
+      }
+    }
     if (is_umum !== undefined) updateData.isUmum = is_umum === true || is_umum === 'true' || is_umum === 1;
 
     // Handle date property (handle both 'date' and 'transaction_date')
@@ -398,6 +455,14 @@ const update = async (req, res, next) => {
       updateData.categoryId = foundCategory.id;
     }
 
+    if (mitra_details !== undefined) {
+      updateData.mitraDetails = mitra_details;
+    }
+
+    if (is_pb1_payment !== undefined) {
+      updateData.isPb1Payment = is_pb1_payment === true || is_pb1_payment === 'true' || is_pb1_payment === 1;
+    }
+
     const transaction = await Transaction.update(id, updateData);
 
     // Calculate changes for logging and automatic reason
@@ -411,6 +476,11 @@ const update = async (req, res, next) => {
       const newAmount = parseFloat(amount);
       changes.amount = { old: existing.amount, new: newAmount };
       changedFields.push('Nominal');
+    }
+    if (pb1 !== undefined && existing.pb1 !== (pb1 === null ? null : parseFloat(pb1))) {
+      const newPb1 = pb1 === null ? null : parseFloat(pb1);
+      changes.pb1 = { old: existing.pb1, new: newPb1 };
+      changedFields.push('PB1');
     }
     if (category !== undefined && existing.category_name !== category) {
       changes.category = { old: existing.category_name, new: category };
@@ -434,7 +504,7 @@ const update = async (req, res, next) => {
       }
     }
 
-    const autoGeneratedReason = changedFields.length > 0 
+    const autoGeneratedReason = changedFields.length > 0
       ? `Update ${changedFields.join(', ')} oleh ${req.user.role === 'admin' ? 'Admin' : 'Owner'}`
       : `Update data oleh ${req.user.role === 'admin' ? 'Admin' : 'Owner'}`;
 
@@ -450,6 +520,7 @@ const update = async (req, res, next) => {
         note: existing.note,
         date: existing.transaction_date,
         lampiran: existing.lampiran,
+        pb1: existing.pb1,
         is_umum: existing.is_umum
       },
       newData: {
@@ -459,6 +530,7 @@ const update = async (req, res, next) => {
         note: transaction.note,
         date: transaction.transaction_date,
         lampiran: transaction.lampiran,
+        pb1: transaction.pb1,
         is_umum: transaction.is_umum
       },
       status: 'approved'
@@ -482,6 +554,7 @@ const update = async (req, res, next) => {
         category: existing.category_name,
         note: existing.note,
         date: existing.transaction_date,
+        pb1: existing.pb1,
         is_umum: existing.is_umum
       },
       newValues: {
@@ -490,6 +563,7 @@ const update = async (req, res, next) => {
         category: transaction.category_name,
         note: transaction.note,
         date: transaction.transaction_date,
+        pb1: transaction.pb1,
         is_umum: transaction.is_umum
       },
       changes: Object.keys(changes).length > 0 ? changes : null,
@@ -1090,7 +1164,7 @@ const getHistory = async (req, res, next) => {
       try {
         if (typeof old_data === 'string') old_data = JSON.parse(old_data);
         if (typeof new_data === 'string') new_data = JSON.parse(new_data);
-      } catch (e) {}
+      } catch (e) { }
 
       if (old_data && old_data.lampiran) {
         old_data.lampiran = formatLampiran(old_data.lampiran, req);
@@ -1115,8 +1189,336 @@ const getHistory = async (req, res, next) => {
   }
 };
 
+// Get transaction summary
+const getSummary = async (req, res, next) => {
+  try {
+    const {
+      start_date,
+      end_date,
+      category_id,
+      sub_category_id,
+      is_umum
+    } = req.query;
+
+    const branchId = req.branchId || req.headers['x-branch-id'];
+
+    if (!branchId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Branch ID is required. Please provide X-Branch-Id header.'
+      });
+    }
+
+    // Verify branch access
+    const Branch = require('../models/Branch');
+    const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    const summary = await Transaction.getSummary({
+      branchId: parseInt(branchId),
+      categoryId: category_id ? parseInt(category_id) : undefined,
+      subCategoryId: sub_category_id ? parseInt(sub_category_id) : undefined,
+      startDate: start_date || undefined,
+      endDate: end_date || undefined,
+      isUmum: is_umum !== undefined ? (is_umum === 'true' || is_umum === '1') : undefined
+    });
+
+    res.json({
+      success: true,
+      data: summary
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const createRepayment = async (req, res, next) => {
+  const { transaction: dbTransaction, query } = require('../config/database');
+  try {
+    const { id } = req.params; // ID Transaksi Piutang Induk
+    const { mitra_piutang_id, amount, date, note, lampiran } = req.body;
+
+    if (!mitra_piutang_id || !amount || !date) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mitra, nominal, dan tanggal wajib diisi'
+      });
+    }
+
+    const transaction = await Transaction.findById(id);
+    if (!transaction) {
+      return res.status(404).json({ success: false, message: 'Transaksi tidak ditemukan' });
+    }
+
+    if (!transaction.is_debt_payment) {
+      return res.status(400).json({ success: false, message: 'Transaksi ini bukan piutang' });
+    }
+
+    // Verify branch access
+    const Branch = require('../models/Branch');
+    const hasAccess = await Branch.userHasAccess(req.userId, transaction.branch_id, req.user.role);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'Akses ditolak' });
+    }
+
+    const repaymentAmount = parseFloat(amount);
+    const mitraId = parseInt(mitra_piutang_id);
+
+    // Get specific mitra detail
+    const mitraDetail = transaction.mitra_details.find(m => m.mitra_piutang_id === mitraId);
+    if (!mitraDetail) {
+      return res.status(404).json({ success: false, message: 'Data mitra tidak ditemukan di transaksi ini' });
+    }
+
+    if (repaymentAmount > mitraDetail.remaining_debt) {
+      return res.status(400).json({
+        success: false,
+        message: `Nominal pelunasan (${repaymentAmount}) melebihi sisa hutang mitra (${mitraDetail.remaining_debt})`
+      });
+    }
+
+    // Prepare total updates for audit trail
+    const newTotalPaid = parseFloat(transaction.paid_amount || 0) + repaymentAmount;
+    const newTotalRemaining = parseFloat(transaction.remaining_debt || 0) - repaymentAmount;
+
+    // Handle lampiran - convert array to JSON string if needed
+    let lampiranValue = null;
+    if (lampiran) {
+      lampiranValue = Array.isArray(lampiran) ? JSON.stringify(lampiran) : lampiran;
+    }
+
+    // PROCESS REPAYMENT IN DB TRANSACTION
+    await dbTransaction(async (conn) => {
+      // 1. Update transaction_mitra_details
+      const newMitraPaid = parseFloat(mitraDetail.paid_amount) + repaymentAmount;
+      const newMitraRemaining = parseFloat(mitraDetail.remaining_debt) - repaymentAmount;
+
+      await conn.execute(
+        `UPDATE transaction_mitra_details 
+         SET paid_amount = ?, remaining_debt = ? 
+         WHERE transaction_id = ? AND mitra_piutang_id = ?`,
+        [newMitraPaid, newMitraRemaining, id, mitraId]
+      );
+
+      // 2. Update main transactions record
+      await conn.execute(
+        `UPDATE transactions 
+         SET paid_amount = ?, remaining_debt = ? 
+         WHERE id = ?`,
+        [newTotalPaid, newTotalRemaining, id]
+      );
+
+      // 3. Create automatic notification record in transactions (NO CATEGORY, NO BALANCE IMPACT)
+      // This is JUST for notification in the dashboard list
+      let incomeTransactionId = null;
+      // Use the user's note for the notification if provided, otherwise generic
+      const repaymentNote = note || `Pelunasan Piutang: ${mitraDetail.mitra_nama} (Ref: #${id})`;
+
+      const [incomeResult] = await conn.execute(
+        `INSERT INTO transactions (user_id, branch_id, type, amount, note, transaction_date, lampiran, is_umum, is_debt_payment, paid_amount, remaining_debt, status_deleted, category_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, false, NULL)`,
+        [req.userId, transaction.branch_id, 'income', repaymentAmount, repaymentNote, date, lampiranValue, true]
+      );
+      incomeTransactionId = incomeResult.insertId;
+
+      // 4. Insert into transaction_repayments
+      await conn.execute(
+        `INSERT INTO transaction_repayments (transaction_id, mitra_piutang_id, user_id, amount, payment_date, note, lampiran, income_transaction_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, mitraId, req.userId, repaymentAmount, date, note || null, lampiranValue, incomeTransactionId]
+      );
+    });
+
+    // 5. Create log
+    await LogService.logActivity({
+      userId: req.userId,
+      branchId: transaction.branch_id,
+      action: 'Pelunasan Baru',
+      entityType: 'Transaction',
+      entityId: id,
+      metadata: { description: `Mencatat pelunasan Rp ${repaymentAmount.toLocaleString('id-ID')} untuk mitra ${mitraDetail.mitra_nama}` }
+    });
+
+    // 6. Add to transaction history (Audit Trail)
+    await TransactionEdit.create({
+      transactionId: id,
+      requesterId: req.userId,
+      reason: 'Pelunasan Baru',
+      oldData: { paid_amount: transaction.paid_amount, remaining_debt: transaction.remaining_debt },
+      newData: {
+        paid_amount: newTotalPaid,
+        remaining_debt: newTotalRemaining,
+        repayment_amount: repaymentAmount,
+        mitra: mitraDetail.mitra_nama
+      },
+      status: 'approved'
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Pelunasan berhasil dicatat'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const updateRepayment = async (req, res, next) => {
+  const { transaction: dbTransaction } = require('../config/database');
+  try {
+    const { id, repaymentId } = req.params;
+    const { amount, date, note, lampiran } = req.body;
+
+    const repayment = await TransactionRepayment.findById(repaymentId);
+    if (!repayment) {
+      return res.status(404).json({ success: false, message: 'Data pelunasan tidak ditemukan' });
+    }
+
+    const transaction = await Transaction.findById(id);
+    const mitraDetail = transaction.mitra_details.find(m => m.mitra_piutang_id === repayment.mitra_piutang_id);
+
+    const oldAmount = parseFloat(repayment.amount);
+    const newAmount = parseFloat(amount);
+    const diff = newAmount - oldAmount;
+
+    // Check if new amount exceeds remaining debt + old amount
+    if (diff > mitraDetail.remaining_debt) {
+      return res.status(400).json({
+        success: false,
+        message: `Nominal baru melebihi sisa hutang (Maks: ${mitraDetail.remaining_debt + oldAmount})`
+      });
+    }
+
+    let lampiranValue = lampiran;
+    if (Array.isArray(lampiran)) lampiranValue = JSON.stringify(lampiran);
+
+    await dbTransaction(async (conn) => {
+      // 1. Update mitra detail
+      await conn.execute(
+        `UPDATE transaction_mitra_details 
+         SET paid_amount = paid_amount + ?, remaining_debt = remaining_debt - ? 
+         WHERE transaction_id = ? AND mitra_piutang_id = ?`,
+        [diff, diff, id, repayment.mitra_piutang_id]
+      );
+
+      // 2. Update main transaction
+      await conn.execute(
+        `UPDATE transactions SET paid_amount = paid_amount + ?, remaining_debt = remaining_debt - ? WHERE id = ?`,
+        [diff, diff, id]
+      );
+
+      // 3. Update associated income transaction if exists
+      if (repayment.income_transaction_id) {
+        await conn.execute(
+          `UPDATE transactions SET amount = ?, note = ?, transaction_date = ?, lampiran = ? WHERE id = ?`,
+          [newAmount, `Pelunasan Piutang (Update): ${mitraDetail.mitra_nama} (Ref: #${id})`, date, lampiranValue, repayment.income_transaction_id]
+        );
+      }
+
+      // 4. Update repayment record
+      await TransactionRepayment.update(repaymentId, {
+        amount: newAmount,
+        paymentDate: date,
+        note,
+        lampiran: lampiranValue
+      });
+    });
+
+    await LogService.logActivity({
+      userId: req.userId,
+      branchId: transaction.branch_id,
+      action: 'Update Pelunasan',
+      entityType: 'Transaction',
+      entityId: id,
+      metadata: { description: `Memperbarui pelunasan mitra ${mitraDetail.mitra_nama} dari Rp ${oldAmount.toLocaleString('id-ID')} menjadi Rp ${newAmount.toLocaleString('id-ID')}` }
+    });
+
+    // 6. Add to transaction history (Audit Trail)
+    await TransactionEdit.create({
+      transactionId: id,
+      requesterId: req.userId,
+      reason: 'Update Pelunasan',
+      oldData: { repayment_amount: oldAmount },
+      newData: { repayment_amount: newAmount, mitra: mitraDetail.mitra_nama },
+      status: 'approved'
+    });
+
+    res.json({ success: true, message: 'Pelunasan berhasil diperbarui' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const deleteRepayment = async (req, res, next) => {
+  const { transaction: dbTransaction } = require('../config/database');
+  try {
+    const { id, repaymentId } = req.params;
+
+    const repayment = await TransactionRepayment.findById(repaymentId);
+    if (!repayment) {
+      return res.status(404).json({ success: false, message: 'Data pelunasan tidak ditemukan' });
+    }
+
+    const transaction = await Transaction.findById(id);
+    const amount = parseFloat(repayment.amount);
+    const mitraDetail = transaction.mitra_details.find(m => m.mitra_piutang_id === repayment.mitra_piutang_id);
+
+    await dbTransaction(async (conn) => {
+      // 1. Revert balances
+      await conn.execute(
+        `UPDATE transaction_mitra_details 
+         SET paid_amount = paid_amount - ?, remaining_debt = remaining_debt + ? 
+         WHERE transaction_id = ? AND mitra_piutang_id = ?`,
+        [amount, amount, id, repayment.mitra_piutang_id]
+      );
+
+      await conn.execute(
+        `UPDATE transactions SET paid_amount = paid_amount - ?, remaining_debt = remaining_debt + ? WHERE id = ?`,
+        [amount, amount, id]
+      );
+
+      // 2. Delete income transaction
+      if (repayment.income_transaction_id) {
+        await conn.execute(`UPDATE transactions SET status_deleted = 1 WHERE id = ?`, [repayment.income_transaction_id]);
+      }
+
+      // 3. Delete repayment record
+      await TransactionRepayment.delete(repaymentId);
+    });
+
+    await LogService.logActivity({
+      userId: req.userId,
+      branchId: transaction.branch_id,
+      action: 'Hapus Pelunasan',
+      entityType: 'Transaction',
+      entityId: id,
+      metadata: { description: `Menghapus pelunasan Rp ${amount.toLocaleString('id-ID')} milik mitra ${mitraDetail ? mitraDetail.mitra_nama : 'Tidak diketahui'}` }
+    });
+
+    // 4. Add to transaction history (Audit Trail)
+    await TransactionEdit.create({
+      transactionId: id,
+      requesterId: req.userId,
+      reason: 'Hapus Pelunasan',
+      oldData: { repayment_amount: amount, mitra: mitraDetail ? mitraDetail.mitra_nama : 'Tidak diketahui' },
+      newData: { status: 'deleted' },
+      status: 'approved'
+    });
+
+    res.json({ success: true, message: 'Pelunasan berhasil dihapus' });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAll,
+  getSummary,
   getById,
   create,
   update,
@@ -1127,6 +1529,9 @@ module.exports = {
   approveEdit,
   rejectEdit,
   getEditRequests,
-  getHistory
+  getHistory,
+  createRepayment,
+  updateRepayment,
+  deleteRepayment
 };
 

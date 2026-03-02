@@ -10,12 +10,12 @@ const compressImage = async (filePath, originalSize) => {
     const ext = path.extname(filePath).toLowerCase();
     const nameWithoutExt = path.basename(filePath, ext);
     const dir = path.dirname(filePath);
-    
+
     // Determine output format
     // Force webp for most cases; keep png if alpha channel
     let outputFormat = 'webp';
     let outputExt = '.webp';
-    
+
     const metadata = await sharp(filePath).metadata();
     if (metadata.format === 'png' && metadata.hasAlpha) {
       outputFormat = 'png';
@@ -25,7 +25,7 @@ const compressImage = async (filePath, originalSize) => {
     // Always use a temporary file name to avoid "same file for input and output" error
     const tempPath = path.join(dir, `${nameWithoutExt}_compressed_${Date.now()}${outputExt}`);
     const isFormatChanged = outputExt !== ext;
-    
+
     let sharpInstance = sharp(filePath);
 
     // Resize if image is too large (max width 1280px, maintain aspect ratio)
@@ -37,7 +37,7 @@ const compressImage = async (filePath, originalSize) => {
     // Apply compression based on format
     if (outputFormat === 'jpeg') {
       await sharpInstance
-        .jpeg({ 
+        .jpeg({
           quality: 70,
           progressive: true,
           mozjpeg: true
@@ -45,14 +45,14 @@ const compressImage = async (filePath, originalSize) => {
         .toFile(tempPath);
     } else if (outputFormat === 'webp') {
       await sharpInstance
-        .webp({ 
+        .webp({
           quality: 70,
           effort: 4
         })
         .toFile(tempPath);
     } else if (outputFormat === 'png') {
       await sharpInstance
-        .png({ 
+        .png({
           quality: 70,
           compressionLevel: 9
         })
@@ -66,15 +66,15 @@ const compressImage = async (filePath, originalSize) => {
     if (finalSize < originalSize || isFormatChanged) {
       // Delete original file
       fs.unlinkSync(filePath);
-      
+
       // Determine final path
-      const finalPath = isFormatChanged 
+      const finalPath = isFormatChanged
         ? path.join(dir, `${nameWithoutExt}${outputExt}`)
         : filePath;
-      
+
       // Move temp file to final location
       fs.renameSync(tempPath, finalPath);
-      
+
       return {
         path: finalPath,
         filename: path.basename(finalPath),
@@ -138,7 +138,22 @@ const uploadFile = async (req, res, next) => {
       compressed = result.compressed;
     }
 
-    // Return file info
+    // Build organized path: uploads/{branchId}/{type}/{filename}
+    const categoryId = req.query?.categoryId;
+    const subCategoryId = req.query?.subCategoryId;
+
+    let pathParts = ['uploads', branchId.toString(), typeFolder];
+    if (categoryId) {
+      pathParts.push(categoryId.toString());
+      if (subCategoryId) {
+        pathParts.push(subCategoryId.toString());
+      }
+    }
+    pathParts.push(finalFilename);
+
+    const relativePath = `/${pathParts.join('/')}`;
+    const baseUrl = config.baseUrl || `${req.protocol}://${req.get('host')}`;
+
     res.json({
       success: true,
       message: 'File uploaded successfully',
@@ -149,11 +164,11 @@ const uploadFile = async (req, res, next) => {
         size: finalSize,
         originalSize: isImage ? originalSizeForResponse : undefined,
         compressed: isImage ? compressed : undefined,
-        compressionRatio: isImage && compressed && originalSizeForResponse > 0 
-          ? Math.round((1 - finalSize / originalSizeForResponse) * 100) 
+        compressionRatio: isImage && compressed && originalSizeForResponse > 0
+          ? Math.round((1 - finalSize / originalSizeForResponse) * 100)
           : undefined,
-        path: `/uploads/${finalFilename}`,
-        url: `${config.baseUrl || `${req.protocol}://${req.get('host')}`}/uploads/${finalFilename}`
+        path: relativePath,
+        url: `${baseUrl}${relativePath}`
       }
     });
   } catch (error) {
@@ -173,7 +188,26 @@ const uploadFiles = async (req, res, next) => {
 
     const uploadedFiles = [];
 
-    // Process each file
+    // Build organized path: uploads/{branchId}/{type}/{filename}
+    const branchId = req.headers['x-branch-id'] || req.branchId || 'unknown';
+    const rawType = req.query?.type || 'expense';
+    const typeFolder = rawType === 'income' ? 'pemasukan' : 'pengeluaran';
+
+    const isPb1 = req.query?.isPb1 === 'true';
+    const categoryId = req.query?.categoryId;
+    const subCategoryId = req.query?.subCategoryId;
+
+    let basePathParts = ['uploads', branchId.toString(), typeFolder];
+    if (isPb1) {
+      basePathParts.push('pb1');
+    } else if (categoryId) {
+      basePathParts.push(categoryId.toString());
+      if (subCategoryId) {
+        basePathParts.push(subCategoryId.toString());
+      }
+    }
+    const baseUrl = config.baseUrl || `${req.protocol}://${req.get('host')}`;
+
     for (const file of req.files) {
       const filePath = file.path;
       const originalSize = file.size;
@@ -183,7 +217,6 @@ const uploadFiles = async (req, res, next) => {
       let originalSizeForResponse = originalSize;
       let compressed = false;
 
-      // Compress images automatically using Sharp
       const isImage = file.mimetype.startsWith('image/');
       if (isImage) {
         const result = await compressImage(filePath, originalSize);
@@ -194,6 +227,8 @@ const uploadFiles = async (req, res, next) => {
         compressed = result.compressed;
       }
 
+      const relativePath = `/${[...basePathParts, finalFilename].join('/')}`;
+
       uploadedFiles.push({
         filename: finalFilename,
         originalname: file.originalname,
@@ -201,11 +236,11 @@ const uploadFiles = async (req, res, next) => {
         size: finalSize,
         originalSize: isImage ? originalSizeForResponse : undefined,
         compressed: isImage ? compressed : undefined,
-        compressionRatio: isImage && compressed && originalSizeForResponse > 0 
-          ? Math.round((1 - finalSize / originalSizeForResponse) * 100) 
+        compressionRatio: isImage && compressed && originalSizeForResponse > 0
+          ? Math.round((1 - finalSize / originalSizeForResponse) * 100)
           : undefined,
-        path: `/uploads/${finalFilename}`,
-        url: `${config.baseUrl || `${req.protocol}://${req.get('host')}`}/uploads/${finalFilename}`
+        path: relativePath,
+        url: `${baseUrl}${relativePath}`
       });
     }
 
@@ -223,13 +258,12 @@ const uploadFiles = async (req, res, next) => {
   }
 };
 
-// Get file
 const getFile = async (req, res, next) => {
   try {
-    const { filename } = req.params;
-    const filePath = path.join(__dirname, '../uploads', filename);
+    // Support nested path: /uploads/branchId/type/filename
+    const nestedPath = req.params[0] || req.params.filename || '';
+    const filePath = path.join(__dirname, '../uploads', nestedPath);
 
-    // Check if file exists
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({
         success: false,
@@ -237,7 +271,6 @@ const getFile = async (req, res, next) => {
       });
     }
 
-    // Send file
     res.sendFile(filePath);
   } catch (error) {
     next(error);

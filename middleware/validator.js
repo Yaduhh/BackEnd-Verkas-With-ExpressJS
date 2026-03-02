@@ -68,6 +68,31 @@ const validateCreateTransaction = [
       }
       return true;
     }),
+  body('is_debt_payment')
+    .optional()
+    .isBoolean()
+    .withMessage('is_debt_payment must be a boolean'),
+  body('paid_amount')
+    .optional()
+    .isFloat({ min: 0 })
+    .withMessage('paid_amount must be a positive number')
+    .custom((value, { req }) => {
+      // If is_debt_payment is true, paid_amount should be provided
+      if (req.body.is_debt_payment === true || req.body.is_debt_payment === 'true' || req.body.is_debt_payment === 1) {
+        if (value === undefined || value === null) {
+          throw new Error('paid_amount is required when is_debt_payment is true');
+        }
+        // paid_amount should not exceed amount
+        if (req.body.amount && parseFloat(value) > parseFloat(req.body.amount)) {
+          throw new Error('paid_amount cannot exceed amount');
+        }
+      }
+      return true;
+    }),
+  body('remaining_debt')
+    .optional()
+    .isFloat({ min: 0 })
+    .withMessage('remaining_debt must be a positive number'),
   handleValidationErrors
 ];
 
@@ -109,8 +134,8 @@ const validateCreateCategory = [
     .withMessage('Name must be between 1 and 255 characters'),
   body('type')
     .optional({ nullable: true })
-    .isIn(['income', 'expense', null, ''])
-    .withMessage('Type must be income or expense'),
+    .isIn(['income', 'expense', 'both', null, ''])
+    .withMessage('Type must be income, expense, or both'),
   body('parent_id')
     .optional({ nullable: true })
     .isInt()
@@ -129,8 +154,8 @@ const validateUpdateCategory = [
     .withMessage('Name must be between 1 and 255 characters'),
   body('type')
     .optional({ nullable: true })
-    .isIn(['income', 'expense', null, ''])
-    .withMessage('Type must be income or expense'),
+    .isIn(['income', 'expense', 'both', null, ''])
+    .withMessage('Type must be income, expense, or both'),
   body('parent_id')
     .optional({ nullable: true })
     .isInt()

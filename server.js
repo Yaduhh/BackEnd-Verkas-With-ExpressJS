@@ -8,6 +8,7 @@ const { errorHandler, notFound } = require('./middleware/errorHandler');
 const authRoutes = require('./routes/authRoutes');
 const transactionRoutes = require('./routes/transactionRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
+const mitraPiutangRoutes = require('./routes/mitraPiutangRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
 const exportRoutes = require('./routes/exportRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
@@ -18,6 +19,7 @@ const teamRoutes = require('./routes/teamRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const logRoutes = require('./routes/logRoutes');
 const masterRoutes = require('./routes/masterRoutes');
+const branchReportRoutes = require('./routes/branchReportRoutes');
 
 // Initialize app
 const app = express();
@@ -37,9 +39,9 @@ const allowedOrigins = [
   'http://127.0.0.1:19006', // iOS Simulator Expo web
   'http://localhost:3000', // Backend (for testing)
   'http://127.0.0.1:3000', // Backend (for iOS simulator)
-  'http://192.168.1.3:8081', // Physical device Metro
+  'http://192.168.1.7:8081', // Physical device Metro
   'http://192.168.1.6:19006', // Physical device Expo web
-  'http://192.168.1.12:3000', // Physical device Backend
+  'http://192.168.1.7:3000', // Physical device Backend
   /^http:\/\/192\.168\.\d+\.\d+:8081$/, // Physical device Metro
   /^http:\/\/192\.168\.\d+\.\d+:19006$/, // Physical device Expo web
   /^http:\/\/192\.168\.\d+\.\d+:3000$/, // Physical device Backend
@@ -125,6 +127,7 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/categories', categoryRoutes);
+app.use('/api/mitra-piutang', mitraPiutangRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/export', exportRoutes);
 app.use('/api/upload', uploadRoutes);
@@ -135,6 +138,7 @@ app.use('/api/teams', teamRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/logs', logRoutes);
 app.use('/api/master', masterRoutes);
+app.use('/api/branch-reports', branchReportRoutes);
 
 // 404 handler
 app.use(notFound);

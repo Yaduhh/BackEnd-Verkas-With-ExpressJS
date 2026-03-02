@@ -7,13 +7,13 @@ const { uploadFile, uploadFiles, getFile, deleteFile } = require('../controllers
 router.post('/', authenticate, uploadFile);
 
 // Upload multiple files (requires authentication)
+// ?type=income atau ?type=expense untuk menentukan subfolder
 router.post('/multiple', authenticate, uploadFiles);
 
-// Get file (public access for viewing - files are served statically via /uploads)
-router.get('/:filename', getFile);
+// Get file - support nested path: /upload/branchId/type/filename
+router.get('/*', getFile);
 
 // Delete file (requires authentication)
 router.delete('/:filename', authenticate, deleteFile);
 
 module.exports = router;
-

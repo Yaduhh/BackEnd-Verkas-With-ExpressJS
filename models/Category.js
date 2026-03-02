@@ -29,8 +29,11 @@ class Category {
       sql += ' AND c.status_deleted = true';
     }
 
-    // Type parameter ignored - type column no longer exists
-    // All categories are flexible and can be used for both income and expense
+    // Branch ID filter (if provided, show branch-specific + global categories)
+    if (type !== undefined && type !== null && type !== '') {
+      sql += ' AND (c.type = ? OR c.type = "both")';
+      params.push(type);
+    }
 
 
     // Branch ID filter (if provided, show branch-specific + global categories)
@@ -75,23 +78,27 @@ class Category {
   }
 
   // Create category
-  static async create({ name, userId = null, branchId = null, isDefault = false, isFolder = false, parentId = null }) {
+  static async create({ name, type = 'both', userId = null, branchId = null, isDefault = false, isFolder = false, parentId = null }) {
     const result = await query(
-      `INSERT INTO categories (name, user_id, branch_id, is_default, is_folder, parent_id, status_deleted)
-       VALUES (?, ?, ?, ?, ?, ?, false)`,
-      [name, userId, branchId, isDefault, isFolder, parentId]
+      `INSERT INTO categories (name, type, user_id, branch_id, is_default, is_folder, parent_id, status_deleted)
+       VALUES (?, ?, ?, ?, ?, ?, ?, false)`,
+      [name, type, userId, branchId, isDefault, isFolder, parentId]
     );
     return await this.findById(result.insertId);
   }
 
   // Update category
-  static async update(id, { name, is_folder, parent_id }) {
+  static async update(id, { name, type, is_folder, parent_id }) {
     const updates = [];
     const params = [];
 
     if (name !== undefined) {
       updates.push('name = ?');
       params.push(name);
+    }
+    if (type !== undefined) {
+      updates.push('type = ?');
+      params.push(type);
     }
     if (is_folder !== undefined) {
       updates.push('is_folder = ?');

@@ -1,16 +1,47 @@
-const { query } = require('../config/database');
+const { query, transaction: dbTransaction } = require('../config/database');
 
 class Transaction {
   // Find by ID
   static async findById(id) {
     const results = await query(
-      `SELECT t.*, c.name as category_name
+      `SELECT t.*, c.name as category_name, COALESCE(u.name, u.email) as user_name,
+              mp.nama as mitra_piutang_nama
        FROM transactions t
-       JOIN categories c ON t.category_id = c.id
+       LEFT JOIN categories c ON t.category_id = c.id
+       LEFT JOIN users u ON t.user_id = u.id
+       LEFT JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
        WHERE t.id = ? AND t.status_deleted = false`,
       [id]
     );
-    return results[0] || null;
+
+    if (results.length === 0) return null;
+
+    const transaction = results[0];
+
+    // Fetch multi-mitra details
+    const mitraDetails = await query(
+      `SELECT tmd.*, mp.nama as mitra_nama
+       FROM transaction_mitra_details tmd
+       JOIN mitra_piutang mp ON tmd.mitra_piutang_id = mp.id
+       WHERE tmd.transaction_id = ?`,
+      [id]
+    );
+
+    transaction.mitra_details = mitraDetails;
+
+    // Fetch repayments
+    const repayments = await query(
+      `SELECT tr.*, mp.nama as mitra_nama, COALESCE(u.name, u.email) as user_name
+       FROM transaction_repayments tr
+       JOIN mitra_piutang mp ON tr.mitra_piutang_id = mp.id
+       LEFT JOIN users u ON tr.user_id = u.id
+       WHERE tr.transaction_id = ?
+       ORDER BY tr.payment_date DESC, tr.created_at DESC`,
+      [id]
+    );
+    transaction.repayments = repayments;
+
+    return transaction;
   }
 
   // Find all (with filters)
@@ -28,12 +59,20 @@ class Transaction {
     limit = 20,
     excludeFolders = false,
     onlyFolders = false,
-    isUmum = undefined
+    isUmum = undefined,
+    mitraPiutangId = null,
+    hasPb1 = false,
+    isPb1Payment = undefined
   } = {}) {
     let sql = `
-      SELECT t.*, c.name as category_name
+      SELECT t.*, c.name as category_name, COALESCE(u.name, u.email) as user_name,
+             mp.nama as mitra_piutang_nama,
+             tr_notif.transaction_id as parent_transaction_id
       FROM transactions t
-      JOIN categories c ON t.category_id = c.id
+      LEFT JOIN categories c ON t.category_id = c.id
+      LEFT JOIN users u ON t.user_id = u.id
+      LEFT JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
+      LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id
       WHERE 1=1
     `;
     const params = [];
@@ -94,6 +133,20 @@ class Transaction {
       sql += ' AND t.is_umum = false';
     }
 
+    if (mitraPiutangId !== null && mitraPiutangId !== undefined) {
+      sql += ` AND (t.mitra_piutang_id = ? OR EXISTS (SELECT 1 FROM transaction_mitra_details tmd WHERE tmd.transaction_id = t.id AND tmd.mitra_piutang_id = ?))`;
+      params.push(mitraPiutangId, mitraPiutangId);
+    }
+
+    if (hasPb1) {
+      sql += ' AND (t.pb1 > 0 OR t.is_pb1_payment = true)';
+    }
+
+    if (isPb1Payment !== undefined) {
+      sql += ' AND t.is_pb1_payment = ?';
+      params.push(isPb1Payment === 'true' || isPb1Payment === true || isPb1Payment === 1);
+    }
+
     // Sort
     if (sort === 'terbaru') {
       sql += ' ORDER BY t.transaction_date DESC, t.created_at DESC';
@@ -146,12 +199,15 @@ class Transaction {
     onlyDeleted = false,
     excludeFolders = false,
     onlyFolders = false,
-    isUmum = undefined
+    isUmum = undefined,
+    mitraPiutangId = null,
+    hasPb1 = false,
+    isPb1Payment = undefined
   } = {}) {
     let sql = `
       SELECT COUNT(*) as total
       FROM transactions t
-      JOIN categories c ON t.category_id = c.id
+      LEFT JOIN categories c ON t.category_id = c.id
       WHERE 1=1
     `;
     const params = [];
@@ -202,61 +258,138 @@ class Transaction {
       sql += ' AND t.is_umum = false';
     }
 
+    if (mitraPiutangId !== null && mitraPiutangId !== undefined) {
+      sql += ` AND (t.mitra_piutang_id = ? OR EXISTS (SELECT 1 FROM transaction_mitra_details tmd WHERE tmd.transaction_id = t.id AND tmd.mitra_piutang_id = ?))`;
+      params.push(mitraPiutangId, mitraPiutangId);
+    }
+
+    if (hasPb1) {
+      sql += ' AND (t.pb1 > 0 OR t.is_pb1_payment = true)';
+    }
+
+    if (isPb1Payment !== undefined) {
+      sql += ' AND t.is_pb1_payment = ?';
+      params.push(isPb1Payment === 'true' || isPb1Payment === true || isPb1Payment === 1);
+    }
+
     const results = await query(sql, params);
     return results[0].total;
   }
 
   // Create transaction
-  static async create({ userId, branchId, type, categoryId, amount, note, transactionDate, lampiran, isUmum = true }) {
-    const result = await query(
-      `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, note, transaction_date, lampiran, is_umum, status_deleted)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
-      [userId, branchId, type, categoryId, amount, note || null, transactionDate, lampiran || null, isUmum]
-    );
-    return await this.findById(result.insertId);
+  // Create transaction
+  static async create({ userId, branchId, type, categoryId, amount, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, mitraDetails = [], isPb1Payment = false }) {
+    const transactionId = await dbTransaction(async (conn) => {
+      const [result] = await conn.execute(
+        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, status_deleted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
+        [userId, branchId, type, categoryId, amount, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment]
+      );
+
+      const newId = result.insertId;
+
+      // Insert multi-mitra details
+      if ((isDebtPayment === true || isDebtPayment === 1) && mitraDetails && mitraDetails.length > 0) {
+        for (const detail of mitraDetails) {
+          await conn.execute(
+            `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
+             VALUES (?, ?, ?, ?, ?)`,
+            [newId, detail.mitra_piutang_id, detail.amount, detail.paid_amount || 0, detail.remaining_debt || 0]
+          );
+        }
+      }
+
+      return newId;
+    });
+
+    return await this.findById(transactionId);
   }
 
   // Update transaction
-  static async update(id, { type, categoryId, amount, note, transactionDate, lampiran, isUmum }) {
-    const updates = [];
-    const params = [];
+  static async update(id, { type, categoryId, amount, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, mitraDetails, isPb1Payment }) {
+    await dbTransaction(async (conn) => {
+      const updates = [];
+      const params = [];
 
-    if (type !== undefined) {
-      updates.push('type = ?');
-      params.push(type);
-    }
-    if (categoryId !== undefined) {
-      updates.push('category_id = ?');
-      params.push(categoryId);
-    }
-    if (amount !== undefined) {
-      updates.push('amount = ?');
-      params.push(amount);
-    }
-    if (note !== undefined) {
-      updates.push('note = ?');
-      params.push(note);
-    }
-    if (transactionDate !== undefined) {
-      updates.push('transaction_date = ?');
-      params.push(transactionDate);
-    }
-    if (lampiran !== undefined) {
-      updates.push('lampiran = ?');
-      params.push(lampiran || null);
-    }
-    if (isUmum !== undefined) {
-      updates.push('is_umum = ?');
-      params.push(isUmum);
-    }
+      if (type !== undefined) {
+        updates.push('type = ?');
+        params.push(type);
+      }
+      if (categoryId !== undefined) {
+        updates.push('category_id = ?');
+        params.push(categoryId);
+      }
+      if (amount !== undefined) {
+        updates.push('amount = ?');
+        params.push(amount);
+      }
+      if (pb1 !== undefined) {
+        updates.push('pb1 = ?');
+        params.push(pb1);
+      }
+      if (note !== undefined) {
+        updates.push('note = ?');
+        params.push(note);
+      }
+      if (transactionDate !== undefined) {
+        updates.push('transaction_date = ?');
+        params.push(transactionDate);
+      }
+      if (lampiran !== undefined) {
+        updates.push('lampiran = ?');
+        params.push(lampiran || null);
+      }
+      if (isUmum !== undefined) {
+        updates.push('is_umum = ?');
+        params.push(isUmum);
+      }
+      if (isDebtPayment !== undefined) {
+        updates.push('is_debt_payment = ?');
+        params.push(isDebtPayment);
+      }
+      if (paidAmount !== undefined) {
+        updates.push('paid_amount = ?');
+        params.push(paidAmount);
+      }
+      if (remainingDebt !== undefined) {
+        updates.push('remaining_debt = ?');
+        params.push(remainingDebt);
+      }
+      if (mitraPiutangId !== undefined) {
+        updates.push('mitra_piutang_id = ?');
+        params.push(mitraPiutangId);
+      }
+      if (isPb1Payment !== undefined) {
+        updates.push('is_pb1_payment = ?');
+        params.push(isPb1Payment === true || isPb1Payment === 'true' || isPb1Payment === 1);
+      }
 
-    if (updates.length === 0) return await this.findById(id);
+      if (updates.length > 0) {
+        params.push(id);
+        await conn.execute(
+          `UPDATE transactions SET ${updates.join(', ')} WHERE id = ? AND status_deleted = false`,
+          params
+        );
+      }
 
-    params.push(id);
-    await query(
-      `UPDATE transactions SET ${updates.join(', ')} WHERE id = ? AND status_deleted = false`,
-      params
-    );
+      // Handle multi-mitra details
+      if (mitraDetails !== undefined) {
+        // Delete old details
+        await conn.execute(`DELETE FROM transaction_mitra_details WHERE transaction_id = ?`, [id]);
+
+        // Insert new details if isDebtPayment is true
+        if ((isDebtPayment === true || isDebtPayment === 1) && mitraDetails && mitraDetails.length > 0) {
+          for (const detail of mitraDetails) {
+            await conn.execute(
+              `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
+               VALUES (?, ?, ?, ?, ?)`,
+              [id, detail.mitra_piutang_id, detail.amount, detail.paid_amount || 0, detail.remaining_debt || 0]
+            );
+          }
+        }
+      }
+    });
+
     return await this.findById(id);
   }
 
@@ -389,13 +522,21 @@ class Transaction {
   }
 
   // Get summary for date range
-  static async getSummary({ userId, branchId, startDate, endDate, includeDeleted = false, excludeFolders = false, onlyFolders = false, isUmum = undefined }) {
+  static async getSummary({ userId, branchId, categoryId, subCategoryId, startDate, endDate, includeDeleted = false, excludeFolders = false, onlyFolders = false, isUmum = undefined }) {
     let sql = `
       SELECT 
-        COALESCE(SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE 0 END), 0) as pemasukan,
-        COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END), 0) as pengeluaran
+        COALESCE(SUM(CASE 
+          WHEN t.type = 'income' AND (t.is_debt_payment = true OR t.is_debt_payment = 1) 
+          THEN COALESCE(t.paid_amount, 0)
+          WHEN t.type = 'income' 
+          THEN t.amount
+          ELSE 0 
+        END), 0) as pemasukan,
+        COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END), 0) as pengeluaran,
+        COALESCE(SUM(t.pb1), 0) as total_pb1,
+        COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.is_pb1_payment = true THEN t.amount ELSE 0 END), 0) as total_pb1_paid
       FROM transactions t
-      JOIN categories c ON t.category_id = c.id
+      LEFT JOIN categories c ON t.category_id = c.id
       WHERE 1=1
     `;
     const params = [];
@@ -410,6 +551,19 @@ class Transaction {
     if (branchId) {
       sql += ' AND t.branch_id = ?';
       params.push(branchId);
+    }
+
+    // Category ID filter (including sub-categories if needed)
+    if (categoryId) {
+      if (subCategoryId) {
+        // Specific sub-category
+        sql += ' AND t.category_id = ?';
+        params.push(subCategoryId);
+      } else {
+        // All transactions in parent category or specific category
+        sql += ' AND (t.category_id = ? OR c.parent_id = ?)';
+        params.push(categoryId, categoryId);
+      }
     }
 
     if (!includeDeleted) {
@@ -436,10 +590,11 @@ class Transaction {
     }
 
     const results = await query(sql, params);
-    const { pemasukan, pengeluaran } = results[0];
+    const { pemasukan, pengeluaran, total_pb1, total_pb1_paid } = results[0];
     const saldo = pemasukan - pengeluaran;
+    const saldo_pb1 = (total_pb1 || 0) - (total_pb1_paid || 0);
 
-    return { pemasukan, pengeluaran, saldo };
+    return { pemasukan, pengeluaran, saldo, total_pb1, total_pb1_paid, saldo_pb1 };
   }
 }
 

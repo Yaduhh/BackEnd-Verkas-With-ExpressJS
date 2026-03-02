@@ -18,7 +18,13 @@ function formatSection(date, items, transactions, req) {
   const d = parseDate(date);
   const income = transactions
     .filter(t => t.type === 'income')
-    .reduce((sum, t) => sum + parseFloat(t.amount), 0);
+    .reduce((sum, t) => {
+      // Jika transaksi hutang, gunakan paid_amount, jika tidak gunakan amount
+      const amount = (t.is_debt_payment === true || t.is_debt_payment === 1)
+        ? (parseFloat(t.paid_amount) || 0)
+        : parseFloat(t.amount);
+      return sum + amount;
+    }, 0);
   const expense = transactions
     .filter(t => t.type === 'expense')
     .reduce((sum, t) => sum + parseFloat(t.amount), 0);
@@ -71,23 +77,146 @@ function formatSection(date, items, transactions, req) {
 
       return {
         transaction_id: item.id, // Add transaction ID for detail navigation
-        category: item.category_name,
+        category: item.category_name || '-',
         note: item.note || '',
         amount: item.type === 'expense' ? -parseFloat(item.amount) : parseFloat(item.amount),
+        pb1: item.pb1 ? parseFloat(item.pb1) : null,
         lampiran: lampiran, // Always array or null with full URLs
-        edit_accepted: item.edit_accepted !== undefined && item.edit_accepted !== null ? parseInt(item.edit_accepted) : 0 // 0 = default, 1 = pending, 2 = approved, 3 = rejected
+        user_name: item.user_name || null,
+        edit_accepted: item.edit_accepted !== undefined && item.edit_accepted !== null ? parseInt(item.edit_accepted) : 0, // 0 = default, 1 = pending, 2 = approved, 3 = rejected
+        is_debt_payment: item.is_debt_payment === true || item.is_debt_payment === 1 || item.is_debt_payment === '1', // Pembayaran hutang
+        paid_amount: item.paid_amount !== undefined && item.paid_amount !== null ? parseFloat(item.paid_amount) : null,
+        parent_transaction_id: item.parent_transaction_id || null,
+        created_at: item.created_at || item.updated_at || item.createdAt || null,
+        is_pb1_payment: item.is_pb1_payment === true || item.is_pb1_payment === 1 || item.is_pb1_payment === '1'
       };
     })
   };
+}
+
+// Helper: Calculate trend against previous period
+async function calculateTrend(branchId, periodType, params, currentSummary, isUmum, hasPb1) {
+  let prevStart = null;
+  let prevEnd = null;
+
+  try {
+    switch (periodType) {
+      case 'Harian': {
+        const { finalStartDate, finalEndDate } = params;
+        const startObj = parseDate(finalStartDate);
+        const endObj = parseDate(finalEndDate);
+
+        // Calculate diff in days
+        const diffTime = Math.abs(endObj - startObj);
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+        const prevEndObj = new Date(startObj);
+        prevEndObj.setDate(prevEndObj.getDate() - 1);
+
+        const prevStartObj = new Date(prevEndObj);
+        prevStartObj.setDate(prevStartObj.getDate() - diffDays);
+
+        prevStart = formatDate(prevStartObj);
+        prevEnd = formatDate(prevEndObj);
+        break;
+      }
+      case 'Mingguan': {
+        const currentYear = parseInt(params.year);
+        const currentMonth = parseInt(params.month);
+        const currentWeek = parseInt(params.week) || 1;
+
+        const currentRange = getWeekRange(currentYear, currentMonth, currentWeek);
+        const curStartObj = parseDate(currentRange.start);
+
+        const prevEndObj = new Date(curStartObj);
+        prevEndObj.setDate(prevEndObj.getDate() - 1);
+        const prevStartObj = new Date(prevEndObj);
+        prevStartObj.setDate(prevStartObj.getDate() - 6);
+
+        prevStart = formatDate(prevStartObj);
+        prevEnd = formatDate(prevEndObj);
+        break;
+      }
+      case 'BulananAll': {
+        const prevYearRange = getYearRange(parseInt(params.year) - 1);
+        prevStart = prevYearRange.start;
+        prevEnd = prevYearRange.end;
+        break;
+      }
+      case 'Bulanan': {
+        const currentYear = parseInt(params.year);
+        const currentMonth = parseInt(params.month);
+        let prevYear = currentYear;
+        let prevMonth = currentMonth - 1;
+        if (prevMonth < 1) {
+          prevMonth = 12;
+          prevYear -= 1;
+        }
+        const prevMonthRange = getMonthRange(prevYear, prevMonth);
+        prevStart = prevMonthRange.start;
+        prevEnd = prevMonthRange.end;
+        break;
+      }
+      case 'Tahunan': {
+        if (params.year) {
+          const prevYearRange = getYearRange(parseInt(params.year) - 1);
+          prevStart = prevYearRange.start;
+          prevEnd = prevYearRange.end;
+        } else {
+          return null; // Cannot compare if all years are selected
+        }
+        break;
+      }
+    }
+
+    if (!prevStart || !prevEnd) return null;
+
+    const prevSummary = await Transaction.getSummary({
+      branchId,
+      startDate: prevStart,
+      endDate: prevEnd,
+      isUmum: isUmum,
+      hasPb1: hasPb1
+    });
+
+    const calculateChange = (current, previous) => {
+      const curVal = Number(current) || 0;
+      const prevVal = Number(previous) || 0;
+
+      if (prevVal === 0) {
+        if (curVal === 0) return { pctStr: '0.0%', isUp: true };
+        return { pctStr: '+100.0%', isUp: true };
+      }
+
+      const pct = ((curVal - prevVal) / Math.abs(prevVal)) * 100;
+      const isUp = pct >= 0;
+      const sign = isUp ? '+' : '';
+      return { pctStr: `${sign}${pct.toFixed(1)}%`, isUp };
+    };
+
+    const incTrend = calculateChange(currentSummary.pemasukan, prevSummary.pemasukan);
+    const expTrend = calculateChange(currentSummary.pengeluaran, prevSummary.pengeluaran);
+    const salTrend = calculateChange(currentSummary.saldo, prevSummary.saldo);
+
+    return {
+      inc: incTrend.pctStr,
+      incUp: incTrend.isUp,
+      exp: expTrend.pctStr,
+      expUp: expTrend.isUp,
+      expDesc: expTrend.isUp ? '(Naik)' : '(Hemat)',
+      sal: salTrend.pctStr,
+      salUp: salTrend.isUp
+    };
+  } catch (error) {
+    console.error('Trend calculation error:', error);
+    return null;
+  }
 }
 
 // Dashboard Harian
 const getHarian = async (req, res, next) => {
   try {
     const { date } = req.query;
-
-    // Get branch_id from middleware (getCurrentBranch already set req.branchId)
-    // For admin: auto-assigned, for owner: from X-Branch-Id header
     const branchId = req.branchId;
 
     if (!branchId) {
@@ -97,29 +226,31 @@ const getHarian = async (req, res, next) => {
       });
     }
 
-    // Accept both 'date' (single day) or 'startDate'/'endDate' (range)
     const finalStartDate = req.query.startDate || date;
     const finalEndDate = req.query.endDate || date;
+    const isUmum = req.query.is_umum === 'all' ? undefined : (req.query.is_umum === 'false' ? false : true);
+    const hasPb1 = req.query.has_pb1 === 'true';
 
-    // Get transactions for the range
     const transactions = await Transaction.findAll({
       branchId: branchId,
       startDate: finalStartDate,
       endDate: finalEndDate,
       limit: 10000,
       page: 1,
-      isUmum: true
+      isUmum: isUmum,
+      hasPb1: hasPb1
     });
 
-    // Get summary for the range
     const summary = await Transaction.getSummary({
       branchId: branchId,
       startDate: finalStartDate,
       endDate: finalEndDate,
-      isUmum: true
+      isUmum: isUmum,
+      hasPb1: hasPb1
     });
 
-    // Group by date
+    summary.trend = await calculateTrend(branchId, 'Harian', { finalStartDate, finalEndDate }, summary, isUmum, hasPb1) || null;
+
     const transactionsByDate = {};
     transactions.forEach(t => {
       let dateStr = t.transaction_date;
@@ -128,26 +259,24 @@ const getHarian = async (req, res, next) => {
       } else if (typeof dateStr === 'string' && dateStr.includes('T')) {
         dateStr = dateStr.split('T')[0];
       }
-      
+
       if (!transactionsByDate[dateStr]) {
         transactionsByDate[dateStr] = [];
       }
       transactionsByDate[dateStr].push(t);
     });
 
-    // Format title
     let title = '';
     const startObj = parseDate(finalStartDate);
     const endObj = parseDate(finalEndDate);
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
-    
+
     if (finalStartDate === finalEndDate) {
       title = `${startObj.getDate()} ${months[startObj.getMonth()]} ${startObj.getFullYear()}`;
     } else {
       title = `${startObj.getDate()} ${months[startObj.getMonth()]} - ${endObj.getDate()} ${months[endObj.getMonth()]} ${endObj.getFullYear()}`;
     }
 
-    // Sort dates descending
     const sortedDates = Object.keys(transactionsByDate).sort((a, b) => b.localeCompare(a));
     const sections = sortedDates.map(d => formatSection(d, transactionsByDate[d], transactionsByDate[d], req));
 
@@ -168,8 +297,6 @@ const getHarian = async (req, res, next) => {
 const getMingguan = async (req, res, next) => {
   try {
     const { year, month, week } = req.query;
-
-    // Get branch_id from middleware (getCurrentBranch already set req.branchId)
     const branchId = req.branchId;
 
     if (!branchId) {
@@ -179,48 +306,32 @@ const getMingguan = async (req, res, next) => {
       });
     }
 
-    // Get week range
-    const weekRange = getWeekRange(parseInt(year), parseInt(month), week ? parseInt(week) : 1);
-
-    // Get all transactions in the month (no pagination limit for dashboard)
-    // All users in branch, not just current user
+    const isUmum = req.query.is_umum === 'all' ? undefined : (req.query.is_umum === 'false' ? false : true);
+    const hasPb1 = req.query.has_pb1 === 'true';
     const monthRange = getMonthRange(parseInt(year), parseInt(month));
     const allTransactions = await Transaction.findAll({
-      // userId: undefined, // Don't filter by user - show all transactions in branch
-      branchId: branchId, // Already integer from middleware
+      branchId: branchId,
       startDate: monthRange.start,
       endDate: monthRange.end,
-      limit: 10000, // Large limit to get all transactions
+      limit: 10000,
       page: 1,
-      isUmum: true
+      isUmum: isUmum,
+      hasPb1: hasPb1
     });
 
-    // Group by week
     const weeks = [];
     for (let w = 1; w <= 5; w++) {
       const wr = getWeekRange(parseInt(year), parseInt(month), w);
       const weekTransactions = allTransactions.filter(t => {
-        // Handle both date (YYYY-MM-DD) and datetime (YYYY-MM-DDTHH:mm:ss.sssZ) formats
         let tDate = t.transaction_date;
-
-        // Convert to string if it's a Date object
         if (tDate instanceof Date) {
-          tDate = formatDate(tDate); // Get YYYY-MM-DD (local)
+          tDate = formatDate(tDate);
         } else if (typeof tDate === 'string') {
-          if (tDate.includes('T')) {
-            // Extract date part from datetime
-            tDate = tDate.split('T')[0];
-          }
-        } else {
-          // Skip if not a valid date
-          return false;
-        }
-
-        // Compare dates as strings (YYYY-MM-DD format is sortable)
+          if (tDate.includes('T')) tDate = tDate.split('T')[0];
+        } else return false;
         return tDate >= wr.start && tDate <= wr.end;
       });
 
-      // Always include week if it has transactions OR if it's the requested week
       if (weekTransactions.length > 0 || (week && w === parseInt(week))) {
         weeks.push({
           week: w,
@@ -230,33 +341,20 @@ const getMingguan = async (req, res, next) => {
       }
     }
 
-    console.log('📅 getMingguan - allTransactions count:', allTransactions.length);
-    console.log('📅 getMingguan - weeks count:', weeks.length);
-    console.log('📅 getMingguan - monthRange:', monthRange);
-    if (allTransactions.length > 0) {
-      console.log('📅 getMingguan - sample transaction:', {
-        date: allTransactions[0].transaction_date,
-        type: allTransactions[0].type,
-        amount: allTransactions[0].amount
-      });
-    }
-
-    // Get summary for the month (all users in branch, not just current user)
     const summary = await Transaction.getSummary({
-      // userId: undefined, // Don't filter by user - show all transactions in branch
-      branchId: branchId, // Already integer from middleware
+      branchId: branchId,
       startDate: monthRange.start,
       endDate: monthRange.end,
-      isUmum: true
+      isUmum: isUmum,
+      hasPb1: hasPb1
     });
 
-    // Format title
+    summary.trend = await calculateTrend(branchId, 'Mingguan', { year, month, week }, summary, isUmum, hasPb1) || null;
+
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
     const title = `${months[parseInt(month) - 1]} ${year}`;
 
-    // Format sections
     const sections = weeks.map(w => {
-      const startDate = parseDate(w.range.start);
       return formatSection(w.range.start, w.transactions, w.transactions, req);
     });
 
@@ -273,12 +371,10 @@ const getMingguan = async (req, res, next) => {
   }
 };
 
-// Dashboard Bulanan - Returns all months in a year (for Bulanan tab)
+// Dashboard Bulanan All
 const getBulananAll = async (req, res, next) => {
   try {
     const { year } = req.query;
-
-    // Get branch_id from middleware (getCurrentBranch already set req.branchId)
     const branchId = req.branchId;
 
     if (!branchId) {
@@ -288,132 +384,71 @@ const getBulananAll = async (req, res, next) => {
       });
     }
 
-    // Get year range
+    const isUmum = req.query.is_umum === 'all' ? undefined : (req.query.is_umum === 'false' ? false : true);
+    const hasPb1 = req.query.has_pb1 === 'true';
     const yearRange = getYearRange(parseInt(year));
 
-    console.log('📅 getBulananAll - yearRange:', yearRange);
-    console.log('📅 getBulananAll - year:', year);
-    console.log('📅 getBulananAll - branchId:', branchId);
-
-    // Get transactions (no pagination limit for dashboard)
-    // All users in branch, not just current user
     const transactions = await Transaction.findAll({
-      // userId: undefined, // Don't filter by user - show all transactions in branch
-      branchId: branchId, // Already integer from middleware
+      branchId: branchId,
       startDate: yearRange.start,
       endDate: yearRange.end,
-      limit: 10000, // Large limit to get all transactions
+      limit: 10000,
       page: 1,
-      isUmum: true
+      isUmum: isUmum,
+      hasPb1: hasPb1
     });
 
-    console.log('📅 getBulananAll - transactions count:', transactions.length);
-    if (transactions.length > 0) {
-      console.log('📅 getBulananAll - sample transaction:', {
-        date: transactions[0].transaction_date,
-        type: transactions[0].type,
-        amount: transactions[0].amount
-      });
-    }
-
-    // Get summary (all users in branch, not just current user)
     const summary = await Transaction.getSummary({
-      // userId: undefined, // Don't filter by user - show all transactions in branch
-      branchId: branchId, // Already integer from middleware
+      branchId: branchId,
       startDate: yearRange.start,
       endDate: yearRange.end,
-      isUmum: true
+      isUmum: isUmum,
+      hasPb1: hasPb1
     });
 
-    // Group by month
+    summary.trend = await calculateTrend(branchId, 'BulananAll', { year }, summary, isUmum, hasPb1) || null;
+
     const transactionsByMonth = {};
     transactions.forEach(t => {
-      // Handle both date (YYYY-MM-DD) and datetime (YYYY-MM-DDTHH:mm:ss.sssZ) formats
-      // Extract date part directly to avoid timezone issues
       let dateStr = t.transaction_date;
-
-      // Convert to string if it's a Date object
       if (dateStr instanceof Date) {
-        dateStr = formatDate(dateStr); // Get YYYY-MM-DD (local)
-      } else if (typeof dateStr === 'string') {
-        if (dateStr.includes('T')) {
-          dateStr = dateStr.split('T')[0]; // Extract YYYY-MM-DD part
-        }
-      } else {
-        console.error('❌ Invalid transaction_date type:', typeof dateStr, dateStr);
-        return;
-      }
+        dateStr = formatDate(dateStr);
+      } else if (typeof dateStr === 'string' && dateStr.includes('T')) {
+        dateStr = dateStr.split('T')[0];
+      } else return;
 
-      // Parse the date part
       const date = parseDate(dateStr);
-      if (!date || isNaN(date.getTime())) {
-        console.error('❌ Invalid transaction_date:', t.transaction_date, 'extracted:', dateStr);
-        return;
-      }
+      if (!date || isNaN(date.getTime())) return;
 
-      // Use local methods to avoid timezone issues
-      const year = date.getFullYear();
-      const month = date.getMonth() + 1; // 1-12
-      const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+      const y = date.getFullYear();
+      const m = date.getMonth() + 1;
+      const monthKey = `${y}-${String(m).padStart(2, '0')}`;
       if (!transactionsByMonth[monthKey]) {
         transactionsByMonth[monthKey] = [];
       }
       transactionsByMonth[monthKey].push(t);
     });
 
-    // Format title
     const title = String(year);
-
-    // Format sections (sorted by month descending)
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
     const monthKeys = Object.keys(transactionsByMonth).sort((a, b) => b.localeCompare(a));
 
-    console.log('📊 getBulananAll - monthKeys:', monthKeys);
-    console.log('📊 getBulananAll - transactionsByMonth keys:', Object.keys(transactionsByMonth));
-
     const sections = monthKeys.map(monthKey => {
       const parts = monthKey.split('-');
-      if (parts.length !== 2) {
-        console.error('❌ Invalid monthKey format:', monthKey);
-        return null;
-      }
       const y = parts[0];
       const m = parts[1];
       const yearNum = parseInt(y, 10);
       const monthIndex = parseInt(m, 10);
 
-      if (isNaN(yearNum) || yearNum < 2000 || yearNum > 2100) {
-        console.error('❌ Invalid year:', y, 'from monthKey:', monthKey);
-        return null;
-      }
-
-      if (isNaN(monthIndex) || monthIndex < 1 || monthIndex > 12) {
-        console.error('❌ Invalid month index:', m, 'from monthKey:', monthKey);
-        return null;
-      }
-
       const firstDate = `${y}-${m}-01`;
-      const testDate = parseDate(firstDate);
-      if (isNaN(testDate.getTime())) {
-        console.error('❌ Invalid date created from:', firstDate);
-        return null;
-      }
-
       const section = formatSection(firstDate, transactionsByMonth[monthKey], transactionsByMonth[monthKey], req);
 
-      // Override dengan format untuk bulanan (per bulan dalam tahun)
-      const monthName = months[monthIndex - 1]; // monthIndex is 1-12, array is 0-11
-      if (!monthName) {
-        console.error('❌ Month name not found for index:', monthIndex - 1);
-        return null;
-      }
-
-      section.dateLabel = monthName;
+      section.dateLabel = months[monthIndex - 1];
       section.dayLabel = 'Bulan';
-      section.monthLabel = String(yearNum); // Tahun
+      section.monthLabel = String(yearNum);
 
       return section;
-    }).filter(s => s !== null); // Filter out null sections
+    }).filter(s => s !== null);
 
     res.json({
       success: true,
@@ -428,12 +463,10 @@ const getBulananAll = async (req, res, next) => {
   }
 };
 
-// Dashboard Bulanan (single month)
+// Dashboard Bulanan (Single)
 const getBulanan = async (req, res, next) => {
   try {
     const { year, month } = req.query;
-
-    // Get branch_id from middleware (getCurrentBranch already set req.branchId)
     const branchId = req.branchId;
 
     if (!branchId) {
@@ -443,62 +476,37 @@ const getBulanan = async (req, res, next) => {
       });
     }
 
-    // Get month range
+    const isUmum = req.query.is_umum === 'all' ? undefined : (req.query.is_umum === 'false' ? false : true);
+    const hasPb1 = req.query.has_pb1 === 'true';
     const monthRange = getMonthRange(parseInt(year), parseInt(month));
-
-    console.log('📅 getBulanan - monthRange:', monthRange);
-    console.log('📅 getBulanan - year:', year, 'month:', month);
-    console.log('📅 getBulanan - branchId:', branchId);
-
-    // Get transactions (no pagination limit for dashboard)
-    // All users in branch, not just current user
     const transactions = await Transaction.findAll({
-      // userId: undefined, // Don't filter by user - show all transactions in branch
-      branchId: branchId, // Already integer from middleware
+      branchId: branchId,
       startDate: monthRange.start,
       endDate: monthRange.end,
-      limit: 10000, // Large limit to get all transactions
+      limit: 10000,
       page: 1,
-      isUmum: true
+      isUmum: isUmum,
+      hasPb1: hasPb1
     });
 
-    console.log('📅 getBulanan - transactions count:', transactions.length);
-    if (transactions.length > 0) {
-      console.log('📅 getBulanan - sample transaction:', {
-        date: transactions[0].transaction_date,
-        type: transactions[0].type,
-        amount: transactions[0].amount
-      });
-    }
-
-    // Get summary (all users in branch, not just current user)
     const summary = await Transaction.getSummary({
-      // userId: undefined, // Don't filter by user - show all transactions in branch
-      branchId: branchId, // Already integer from middleware
+      branchId: branchId,
       startDate: monthRange.start,
       endDate: monthRange.end,
-      isUmum: true
+      isUmum: isUmum,
+      hasPb1: hasPb1
     });
 
-    // Group by date
+    summary.trend = await calculateTrend(branchId, 'Bulanan', { year, month }, summary, isUmum, hasPb1) || null;
+
     const transactionsByDate = {};
     transactions.forEach(t => {
-      // Handle both date (YYYY-MM-DD) and datetime (YYYY-MM-DDTHH:mm:ss.sssZ) formats
       let date = t.transaction_date;
-
-      // Convert to string if it's a Date object
       if (date instanceof Date) {
-        date = formatDate(date); // Get YYYY-MM-DD (local)
-      } else if (typeof date === 'string') {
-        if (date.includes('T')) {
-          // Extract date part from datetime
-          date = date.split('T')[0];
-        }
-      } else {
-        // Skip if not a valid date
-        console.error('❌ Invalid transaction_date type:', typeof date, date);
-        return;
-      }
+        date = formatDate(date);
+      } else if (typeof date === 'string' && date.includes('T')) {
+        date = date.split('T')[0];
+      } else if (typeof date !== 'string') return;
 
       if (!transactionsByDate[date]) {
         transactionsByDate[date] = [];
@@ -506,11 +514,9 @@ const getBulanan = async (req, res, next) => {
       transactionsByDate[date].push(t);
     });
 
-    // Format title
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
     const title = `${months[parseInt(month) - 1]} ${year}`;
 
-    // Format sections (sorted by date descending)
     const dates = Object.keys(transactionsByDate).sort((a, b) => b.localeCompare(a));
     const sections = dates.map(date => formatSection(date, transactionsByDate[date], transactionsByDate[date], req));
 
@@ -527,13 +533,10 @@ const getBulanan = async (req, res, next) => {
   }
 };
 
-// Dashboard Tahunan - Returns data grouped by YEAR (not month)
-// This is used for the "Tahunan" tab which shows years, not months
+// Dashboard Tahunan
 const getTahunan = async (req, res, next) => {
   try {
-    const { year } = req.query; // Optional: filter by specific year, or get all years
-
-    // Get branch_id from middleware (getCurrentBranch already set req.branchId)
+    const { year } = req.query;
     const branchId = req.branchId;
 
     if (!branchId) {
@@ -543,127 +546,67 @@ const getTahunan = async (req, res, next) => {
       });
     }
 
-    // Get all transactions (no date filter, or filter by year if provided)
-    let startDate = null;
-    let endDate = null;
+    const isUmum = req.query.is_umum === 'all' ? undefined : (req.query.is_umum === 'false' ? false : true);
+    const hasPb1 = req.query.has_pb1 === 'true';
+    let startDate = '2000-01-01';
+    let endDate = '2100-12-31';
 
     if (year) {
-      // If year is provided, get transactions for that year only
       const yearRange = getYearRange(parseInt(year));
       startDate = yearRange.start;
       endDate = yearRange.end;
-    } else {
-      // If no year, get all transactions (for all years view)
-      // We'll use a wide range, or better: get all transactions without date filter
-      startDate = '2000-01-01'; // Start from year 2000
-      endDate = '2100-12-31'; // End at year 2100
     }
 
-    console.log('📅 getTahunan - startDate:', startDate, 'endDate:', endDate);
-    console.log('📅 getTahunan - branchId:', branchId);
-
-    // Get transactions (no pagination limit for dashboard)
-    // All users in branch, not just current user
     const transactions = await Transaction.findAll({
-      // userId: undefined, // Don't filter by user - show all transactions in branch
-      branchId: branchId, // Already integer from middleware
+      branchId: branchId,
       startDate: startDate,
       endDate: endDate,
-      limit: 10000, // Large limit to get all transactions
+      limit: 10000,
       page: 1,
-      isUmum: true
+      isUmum: isUmum,
+      hasPb1: hasPb1
     });
 
-    console.log('📅 getTahunan - transactions count:', transactions.length);
-    if (transactions.length > 0) {
-      console.log('📅 getTahunan - sample transaction:', {
-        date: transactions[0].transaction_date,
-        type: transactions[0].type,
-        amount: transactions[0].amount
-      });
-    }
-
-    // Get summary for all transactions (all users in branch, not just current user)
     const summary = await Transaction.getSummary({
-      // userId: undefined, // Don't filter by user - show all transactions in branch
-      branchId: branchId, // Already integer from middleware
+      branchId: branchId,
       startDate: startDate,
       endDate: endDate,
-      isUmum: true
+      isUmum: isUmum,
+      hasPb1: hasPb1
     });
 
-    // Group by YEAR (not month)
+    summary.trend = await calculateTrend(branchId, 'Tahunan', { year }, summary, isUmum, hasPb1) || null;
+
     const transactionsByYear = {};
     transactions.forEach(t => {
-      // Handle both date (YYYY-MM-DD) and datetime (YYYY-MM-DDTHH:mm:ss.sssZ) formats
-      // Extract date part directly to avoid timezone issues
       let dateStr = t.transaction_date;
-
-      // Convert to string if it's a Date object
       if (dateStr instanceof Date) {
-        dateStr = formatDate(dateStr); // Get YYYY-MM-DD (local)
-      } else if (typeof dateStr === 'string') {
-        if (dateStr.includes('T')) {
-          dateStr = dateStr.split('T')[0]; // Extract YYYY-MM-DD part
-        }
-      } else {
-        console.error('❌ Invalid transaction_date type:', typeof dateStr, dateStr);
-        return;
-      }
+        dateStr = formatDate(dateStr);
+      } else if (typeof dateStr === 'string' && dateStr.includes('T')) {
+        dateStr = dateStr.split('T')[0];
+      } else return;
 
-      // Parse the date part
       const date = parseDate(dateStr);
-      if (!date || isNaN(date.getTime())) {
-        console.error('❌ Invalid transaction_date:', t.transaction_date, 'extracted:', dateStr);
-        return;
-      }
+      if (!date || isNaN(date.getTime())) return;
 
-      // Use local methods to avoid timezone issues
-      const year = date.getFullYear();
-      const yearKey = String(year);
-
-      if (!transactionsByYear[yearKey]) {
-        transactionsByYear[yearKey] = [];
+      const yKey = String(date.getFullYear());
+      if (!transactionsByYear[yKey]) {
+        transactionsByYear[yKey] = [];
       }
-      transactionsByYear[yearKey].push(t);
+      transactionsByYear[yKey].push(t);
     });
 
-    // Format title - show selected year or "Semua Tahun"
     const title = year ? String(year) : 'Semua Tahun';
-
-    // Format sections (sorted by year descending)
     const yearKeys = Object.keys(transactionsByYear).sort((a, b) => parseInt(b) - parseInt(a));
 
-    console.log('📊 getTahunan - yearKeys:', yearKeys);
-    console.log('📊 getTahunan - transactionsByYear keys:', Object.keys(transactionsByYear));
-
     const sections = yearKeys.map(yearKey => {
-      const yearNum = parseInt(yearKey, 10);
-
-      if (isNaN(yearNum) || yearNum < 2000 || yearNum > 2100) {
-        console.error('❌ Invalid year:', yearKey);
-        return null;
-      }
-
-      // Use first day of year for section date
       const firstDate = `${yearKey}-01-01`;
-      const testDate = parseDate(firstDate);
-      if (isNaN(testDate.getTime())) {
-        console.error('❌ Invalid date created from:', firstDate);
-        return null;
-      }
-
       const section = formatSection(firstDate, transactionsByYear[yearKey], transactionsByYear[yearKey], req);
-
-      // Override dengan format untuk tahunan (per tahun, bukan per bulan)
-      section.dateLabel = yearKey; // Tahun sebagai dateLabel
+      section.dateLabel = yearKey;
       section.dayLabel = 'Tahun';
-      section.monthLabel = ''; // Kosongkan monthLabel karena ini per tahun
-
-      console.log(`✅ Section formatted - dateLabel: ${section.dateLabel}, dayLabel: ${section.dayLabel}`);
-
+      section.monthLabel = '';
       return section;
-    }).filter(s => s !== null); // Filter out null sections
+    }).filter(s => s !== null);
 
     res.json({
       success: true,
@@ -685,4 +628,3 @@ module.exports = {
   getBulananAll,
   getTahunan
 };
-

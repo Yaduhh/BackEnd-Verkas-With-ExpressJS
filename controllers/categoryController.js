@@ -61,7 +61,7 @@ const getById = async (req, res, next) => {
 // Create category
 const create = async (req, res, next) => {
   try {
-    const { name, is_folder, parent_id } = req.body;
+    const { name, type = 'both', is_folder, parent_id } = req.body;
 
     // Get branchId from header or middleware (optional for categories)
     const branchId = req.branchId || req.headers['x-branch-id'] || null;
@@ -83,6 +83,7 @@ const create = async (req, res, next) => {
 
     const category = await Category.create({
       name,
+      type,
       userId: req.userId,
       branchId: branchId ? parseInt(branchId) : null,
       isDefault: false,

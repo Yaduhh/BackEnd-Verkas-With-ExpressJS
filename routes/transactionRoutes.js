@@ -12,7 +12,11 @@ const {
   approveEdit,
   rejectEdit,
   getEditRequests,
-  getHistory
+  getSummary,
+  getHistory,
+  createRepayment,
+  updateRepayment,
+  deleteRepayment
 } = require('../controllers/transactionController');
 const { authenticate, authorize } = require('../middleware/auth');
 const { optionalBranchContext } = require('../middleware/branchContext');
@@ -29,6 +33,9 @@ router.use(optionalBranchContext);
 
 // Get all transactions
 router.get('/', getAll);
+
+// Get summary
+router.get('/summary', getSummary);
 
 // Get edit requests
 router.get('/edit-requests', getEditRequests);
@@ -62,6 +69,11 @@ router.post('/:id/approve-edit', approveEdit);
 
 // Reject edit request (owner and co-owner only)
 router.post('/:id/reject-edit', rejectEdit);
+
+// Repayment
+router.post('/:id/repayment', createRepayment);
+router.put('/:id/repayment/:repaymentId', updateRepayment);
+router.delete('/:id/repayment/:repaymentId', deleteRepayment);
 
 module.exports = router;
 

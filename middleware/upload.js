@@ -11,7 +11,29 @@ if (!fs.existsSync(uploadsDir)) {
 // Configure storage
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, uploadsDir);
+    // Ambil branchId dari header yang dikirim frontend
+    const branchId = req.headers['x-branch-id'] || req.branchId || 'unknown';
+    // Ambil type dari query param: ?type=income atau ?type=expense
+    const rawType = req.query?.type || 'expense';
+    const typeFolder = rawType === 'income' ? 'pemasukan' : 'pengeluaran';
+
+    const isPb1 = req.query?.isPb1 === 'true';
+    const categoryId = req.query?.categoryId;
+    const subCategoryId = req.query?.subCategoryId;
+
+    let pathParts = [branchId.toString(), typeFolder];
+    if (isPb1) {
+      pathParts.push('pb1');
+    } else if (categoryId) {
+      pathParts.push(categoryId.toString());
+      if (subCategoryId) {
+        pathParts.push(subCategoryId.toString());
+      }
+    }
+
+    const dir = path.join(uploadsDir, ...pathParts);
+    fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
   },
   filename: (req, file, cb) => {
     // Generate unique filename: timestamp-userId-originalname
@@ -26,37 +48,33 @@ const storage = multer.diskStorage({
 // File filter - allow images, videos, documents, PDFs
 const fileFilter = (req, file, cb) => {
   const allowedMimes = [
-    // Images
     'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp',
-    // Videos
     'video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo',
-    // Documents
     'application/pdf',
     'application/msword',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     'application/vnd.ms-excel',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     'application/vnd.ms-powerpoint',
-    'application/vnd.openxmlformats-officedocument.presentationml.presentation', // .pptx
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     'text/plain'
   ];
 
   if (allowedMimes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error(`File type not allowed. Allowed types: images, videos, PDF, Word, Excel, PowerPoint, and text files.`), false);
+    cb(new Error('File type not allowed. Allowed types: images, videos, PDF, Word, Excel, PowerPoint, and text files.'), false);
   }
 };
 
-// Configure multer - No file size limit, support unlimited files
+// Configure multer
 const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
-    fileSize: 500 * 1024 * 1024, // 500MB max file size (practically unlimited for most use cases)
-    files: undefined // No limit on number of files
+    fileSize: 500 * 1024 * 1024,
+    files: undefined
   }
 });
 
 module.exports = upload;
-

@@ -11,7 +11,7 @@ async function getCachedUser(userId) {
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return cached.data;
   }
-  
+
   const User = require('../models/User');
   const user = await User.findById(userId);
   if (user) {
@@ -34,7 +34,7 @@ async function getCachedBranch(branchId) {
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return cached.data;
   }
-  
+
   const Branch = require('../models/Branch');
   const branch = await Branch.findById(branchId);
   if (branch) {
@@ -280,11 +280,11 @@ class LogService {
   }) {
     let sql = 'SELECT * FROM activity_logs WHERE 1=1';
     const params = [];
-    
+
     // STRICT VALIDATION: Ensure page and limit are ALWAYS valid integers
     let pageInt = 1;
     let limitInt = 50;
-    
+
     // Validate page
     if (page !== null && page !== undefined && page !== '') {
       const parsed = parseInt(String(page));
@@ -292,7 +292,7 @@ class LogService {
         pageInt = parsed;
       }
     }
-    
+
     // Validate limit
     if (limit !== null && limit !== undefined && limit !== '') {
       const parsed = parseInt(String(limit));
@@ -304,7 +304,7 @@ class LogService {
     // Role-based filtering - STRICT VALIDATION: NO NULL/UNDEFINED ALLOWED
     // Normalize branchIds to array
     const normalizedBranchIds = Array.isArray(branchIds) ? branchIds : (branchIds ? [branchIds] : null);
-    
+
     if ((userRole === 'owner' || userRole === 'co-owner') && normalizedBranchIds && normalizedBranchIds.length > 0) {
       // Owner and co-owner: bisa lihat log di semua branch yang mereka akses
       // STRICT: Ensure all values are valid integers
@@ -314,7 +314,7 @@ class LogService {
           return (!isNaN(parsed) && isFinite(parsed) && parsed > 0) ? parsed : null;
         })
         .filter(id => id !== null && id !== undefined);
-      
+
       if (validBranchIds.length > 0) {
         if (validBranchIds.length === 1) {
           // Single branch - use = instead of IN for better performance
@@ -351,17 +351,17 @@ class LogService {
         params.push(userIdInt);
       }
     }
-    
+
     if (action && action !== null && action !== undefined && action !== '') {
       sql += ' AND action = ?';
       params.push(String(action).trim());
     }
-    
+
     if (entityType && entityType !== null && entityType !== undefined && entityType !== '') {
       sql += ' AND entity_type = ?';
       params.push(String(entityType).trim());
     }
-    
+
     if (entityId !== null && entityId !== undefined && entityId !== '') {
       const entityIdInt = parseInt(String(entityId));
       if (!isNaN(entityIdInt) && isFinite(entityIdInt) && entityIdInt > 0) {
@@ -369,30 +369,30 @@ class LogService {
         params.push(entityIdInt);
       }
     }
-    
+
     if (startDate && startDate !== null && startDate !== undefined && startDate !== '') {
       sql += ' AND created_at >= ?';
       params.push(String(startDate).trim());
     }
-    
+
     if (endDate && endDate !== null && endDate !== undefined && endDate !== '') {
       sql += ' AND created_at <= ?';
       params.push(String(endDate).trim());
     }
 
     sql += ' ORDER BY created_at DESC';
-    
+
     // Calculate offset (already validated at the top)
     const offsetInt = Math.max(0, (pageInt - 1) * limitInt);
-    
+
     // CRITICAL FIX for phpMyAdmin 5.2 / aapanel:
     // Use string interpolation for LIMIT and OFFSET instead of placeholders
     // This avoids prepared statement issues with LIMIT/OFFSET in some MySQL configurations
     sql += ` LIMIT ${limitInt} OFFSET ${offsetInt}`;
-    
+
     // Count placeholders in SQL (LIMIT and OFFSET are now in SQL string, not placeholders)
     const placeholderCount = (sql.match(/\?/g) || []).length;
-    
+
     // FINAL STRICT VALIDATION: NO EMPTY/NULL/UNDEFINED VALUES ALLOWED
     // This is critical for phpMyAdmin 5.2 / aapanel compatibility
     const finalParams = params.map((p, index) => {
@@ -403,7 +403,7 @@ class LogService {
         console.error('All params:', params);
         throw new Error(`Invalid parameter: undefined at index ${index} - phpMyAdmin 5.2 requires all parameters to be defined`);
       }
-      
+
       // STRICT: Reject null for numeric parameters (MySQL doesn't like null in WHERE clauses)
       if (p === null) {
         console.error(`❌ CRITICAL: Parameter at index ${index} is null`);
@@ -411,7 +411,7 @@ class LogService {
         console.error('All params:', params);
         throw new Error(`Invalid parameter: null at index ${index} - phpMyAdmin 5.2 requires non-null values`);
       }
-      
+
       // STRICT: Validate numbers - must be finite integers
       if (typeof p === 'number') {
         if (isNaN(p) || !isFinite(p)) {
@@ -426,7 +426,7 @@ class LogService {
           throw new Error(`Invalid parameter: non-integer number ${p} at index ${index}`);
         }
       }
-      
+
       // STRICT: Validate strings - must not be empty
       if (typeof p === 'string') {
         if (p === '' || p.trim() === '') {
@@ -434,10 +434,10 @@ class LogService {
           throw new Error(`Invalid parameter: empty string at index ${index}`);
         }
       }
-      
+
       return p;
     });
-    
+
     // STRICT: Final count validation
     if (finalParams.length !== placeholderCount) {
       console.error('❌ CRITICAL: SQL parameter count mismatch:', {
@@ -452,31 +452,21 @@ class LogService {
       });
       throw new Error(`SQL parameter count mismatch: expected ${placeholderCount}, got ${finalParams.length} - phpMyAdmin 5.2 requires exact match`);
     }
-    
-    // Debug log (always log for debugging phpMyAdmin issues)
-    console.log('✅ Executing query with validated params:', {
-        sql: sql.substring(0, 300),
-        paramCount: finalParams.length,
-        placeholderCount,
-        limitInt,
-        offsetInt,
-        params: finalParams.map((p, i) => ({ index: i, type: typeof p, value: p }))
-    });
 
     const logs = await query(sql, finalParams);
-    
+
     // Parse JSON fields - SAFE parsing with error handling
     return logs.map(log => {
       const safeParseJSON = (value) => {
         if (!value || value === null || value === 'null' || value === '') {
           return null;
         }
-        
+
         // If already an object, return as is
         if (typeof value === 'object' && !Array.isArray(value)) {
           return value;
         }
-        
+
         // If it's a string, try to parse
         if (typeof value === 'string') {
           try {
@@ -485,7 +475,7 @@ class LogService {
             if (trimmed === '' || trimmed === 'null' || trimmed === 'undefined') {
               return null;
             }
-            
+
             // Try to parse
             const parsed = JSON.parse(trimmed);
             return parsed;
@@ -498,10 +488,10 @@ class LogService {
             return null;
           }
         }
-        
+
         return null;
       };
-      
+
       return {
         ...log,
         old_values: safeParseJSON(log.old_values),
@@ -583,43 +573,43 @@ class LogService {
     }
 
     sql += ' ORDER BY created_at DESC';
-    
+
     // CRITICAL FIX for phpMyAdmin 5.2 / aapanel:
     // Use string interpolation for LIMIT and OFFSET instead of placeholders
     // Validate limit and offset first
     let limitInt = 50;
     let pageInt = 1;
-    
+
     if (limit !== null && limit !== undefined && limit !== '') {
       const parsed = parseInt(String(limit));
       if (!isNaN(parsed) && isFinite(parsed) && parsed > 0 && parsed <= 1000) {
         limitInt = parsed;
       }
     }
-    
+
     if (page !== null && page !== undefined && page !== '') {
       const parsed = parseInt(String(page));
       if (!isNaN(parsed) && isFinite(parsed) && parsed > 0) {
         pageInt = parsed;
       }
     }
-    
+
     const offsetInt = Math.max(0, (pageInt - 1) * limitInt);
     sql += ` LIMIT ${limitInt} OFFSET ${offsetInt}`;
 
     const logs = await query(sql, params);
-    
+
     // Parse JSON fields - SAFE parsing with error handling
     const safeParseJSON = (value) => {
       if (!value || value === null || value === 'null' || value === '') {
         return null;
       }
-      
+
       // If already an object, return as is
       if (typeof value === 'object' && !Array.isArray(value)) {
         return value;
       }
-      
+
       // If it's a string, try to parse
       if (typeof value === 'string') {
         try {
@@ -633,10 +623,10 @@ class LogService {
           return null;
         }
       }
-      
+
       return null;
     };
-    
+
     return logs.map(log => ({
       ...log,
       context: safeParseJSON(log.context),
@@ -659,13 +649,13 @@ class LogService {
     // Role-based filtering
     // Normalize branchIds to array
     const normalizedBranchIds = Array.isArray(branchIds) ? branchIds : (branchIds ? [branchIds] : null);
-    
+
     if (userRole === 'owner' && normalizedBranchIds && normalizedBranchIds.length > 0) {
       // Ensure all values are numbers
       const validBranchIds = normalizedBranchIds
         .map(id => parseInt(id))
         .filter(id => !isNaN(id) && id > 0);
-      
+
       if (validBranchIds.length > 0) {
         if (validBranchIds.length === 1) {
           // Single branch - use = instead of IN for better performance
@@ -686,18 +676,18 @@ class LogService {
     sql += ' ORDER BY created_at DESC';
 
     const logs = await query(sql, params);
-    
+
     // Parse JSON fields - SAFE parsing with error handling
     const safeParseJSON = (value) => {
       if (!value || value === null || value === 'null' || value === '') {
         return null;
       }
-      
+
       // If already an object, return as is
       if (typeof value === 'object' && !Array.isArray(value)) {
         return value;
       }
-      
+
       // If it's a string, try to parse
       if (typeof value === 'string') {
         try {
@@ -711,10 +701,10 @@ class LogService {
           return null;
         }
       }
-      
+
       return null;
     };
-    
+
     return logs.map(log => ({
       ...log,
       old_values: safeParseJSON(log.old_values),
