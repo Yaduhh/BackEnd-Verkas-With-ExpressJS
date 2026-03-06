@@ -36,6 +36,7 @@ class BranchReport {
             bagiHasil = null,
             stokAwal = undefined,
             stokAkhir = undefined,
+            workingDays = undefined,
         } = data;
 
         const salesChannelsJson = salesChannels !== null ? JSON.stringify(salesChannels) : null;
@@ -60,14 +61,17 @@ class BranchReport {
         if (stokAkhir !== undefined) {
             updateClause += `,\n        stok_akhir        = VALUES(stok_akhir)`;
         }
+        if (workingDays !== undefined) {
+            updateClause += `,\n        working_days      = VALUES(working_days)`;
+        }
 
         await query(
             `INSERT INTO branch_reports
-        (branch_id, month, year, omzet_total, pengeluaran_total, sales_channels, bagi_hasil, stok_awal, stok_akhir)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (branch_id, month, year, omzet_total, pengeluaran_total, sales_channels, bagi_hasil, stok_awal, stok_akhir, working_days)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
         ${updateClause}`,
-            [branchId, month, year, omzetTotal, pengeluaranTotal, salesChannelsJson, bagiHasilJson, insertStokAwal, insertStokAkhir]
+            [branchId, month, year, omzetTotal, pengeluaranTotal, salesChannelsJson, bagiHasilJson, insertStokAwal, insertStokAkhir, workingDays || 25]
         );
 
         return await this.findByBranchAndPeriod(branchId, month, year);
@@ -83,6 +87,7 @@ class BranchReport {
             bagiHasil,
             stokAwal,
             stokAkhir,
+            workingDays,
         } = data;
 
         const updates = [];
@@ -103,6 +108,10 @@ class BranchReport {
         if (stokAkhir !== undefined) {
             updates.push('stok_akhir = ?');
             params.push(stokAkhir);
+        }
+        if (workingDays !== undefined) {
+            updates.push('working_days = ?');
+            params.push(workingDays);
         }
 
         if (updates.length === 0) {

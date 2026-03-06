@@ -157,7 +157,7 @@ const updateReport = async (req, res, next) => {
             return res.status(403).json({ success: false, message: 'Akses ditolak' });
         }
 
-        const { sales_channels, bagi_hasil, stok_awal, stok_akhir } = req.body;
+        const { sales_channels, bagi_hasil, stok_awal, stok_akhir, working_days } = req.body;
 
         // Validasi format
         if (sales_channels !== undefined && !Array.isArray(sales_channels)) {
@@ -172,6 +172,7 @@ const updateReport = async (req, res, next) => {
             bagiHasil: bagi_hasil,
             stokAwal: stok_awal !== undefined ? parseFloat(stok_awal) : undefined,
             stokAkhir: stok_akhir !== undefined ? parseFloat(stok_akhir) : undefined,
+            workingDays: working_days !== undefined ? parseInt(working_days) : undefined,
         });
 
         if (!updated) {
@@ -264,7 +265,7 @@ const exportPdf = async (req, res, next) => {
         const filename = generateFilename('PDF', `Laporan_Keuangan_${branch.name}`);
         const selectedMonthDate = new Date(year, month - 1, 1);
 
-        const filepath = await exportFinancialReportToPDF(dataForPdf, filename, branch.name, selectedMonthDate, workingDays);
+        const filepath = await exportFinancialReportToPDF(dataForPdf, filename, branch.name, selectedMonthDate, report.working_days || workingDays);
 
         const fs = require('fs');
         res.setHeader('Content-Type', getMimeType('PDF'));
