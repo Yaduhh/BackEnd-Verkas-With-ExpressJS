@@ -70,6 +70,38 @@ const formatLampiran = (lampiran, req) => {
   }
 };
 
+// Helper: Strip base URL from lampiran paths before saving to DB
+const stripBaseUrl = (lampiran, baseUrl) => {
+  if (!lampiran) return null;
+
+  const cleanPath = (p) => {
+    if (typeof p !== 'string') return p;
+    if (p.startsWith('http://') || p.startsWith('https://')) {
+      try {
+        const url = new URL(p);
+        return url.pathname;
+      } catch (e) {
+        return p;
+      }
+    }
+    return p;
+  };
+
+  if (Array.isArray(lampiran)) {
+    return lampiran.map(cleanPath);
+  }
+
+  try {
+    const parsed = JSON.parse(lampiran);
+    if (Array.isArray(parsed)) {
+      return parsed.map(cleanPath);
+    }
+    return cleanPath(parsed);
+  } catch (e) {
+    return cleanPath(lampiran);
+  }
+};
+
 // Get all transactions
 const getAll = async (req, res, next) => {
   try {
@@ -416,10 +448,8 @@ const update = async (req, res, next) => {
     }
     if (note !== undefined) updateData.note = note;
     if (pb1 !== undefined) {
-      const parsedPb1 = pb1 === null ? null : parseFloat(pb1);
-      if (parsedPb1 === null || !isNaN(parsedPb1)) {
-        updateData.pb1 = parsedPb1;
-      }
+      // Sama persis dengan logika create: pb1 ? parseFloat(pb1) : null
+      updateData.pb1 = (pb1 && !isNaN(parseFloat(pb1)) && parseFloat(pb1) !== 0) ? parseFloat(pb1) : null;
     }
     if (is_umum !== undefined) updateData.isUmum = is_umum === true || is_umum === 'true' || is_umum === 1;
 
@@ -429,10 +459,13 @@ const update = async (req, res, next) => {
 
     // Handle lampiran update (ensure it's stringified if it's an array)
     if (lampiran !== undefined) {
-      if (Array.isArray(lampiran)) {
-        updateData.lampiran = JSON.stringify(lampiran);
+      const baseUrl = config.baseUrl || `${req.protocol}://${req.get('host')}`;
+      const cleanedLampiran = stripBaseUrl(lampiran, baseUrl);
+
+      if (Array.isArray(cleanedLampiran)) {
+        updateData.lampiran = JSON.stringify(cleanedLampiran);
       } else {
-        updateData.lampiran = lampiran;
+        updateData.lampiran = cleanedLampiran || null;
       }
     }
 
@@ -457,6 +490,20 @@ const update = async (req, res, next) => {
 
     if (mitra_details !== undefined) {
       updateData.mitraDetails = mitra_details;
+    }
+
+    // Pass debt payment fields to model
+    if (is_debt_payment !== undefined) {
+      updateData.isDebtPayment = is_debt_payment === true || is_debt_payment === 'true' || is_debt_payment === 1;
+    }
+    if (paid_amount !== undefined) {
+      updateData.paidAmount = parseFloat(paid_amount);
+    }
+    if (remaining_debt !== undefined) {
+      updateData.remainingDebt = parseFloat(remaining_debt);
+    }
+    if (mitra_piutang_id !== undefined) {
+      updateData.mitraPiutangId = (mitra_piutang_id === null || mitra_piutang_id === '') ? null : parseInt(mitra_piutang_id);
     }
 
     if (is_pb1_payment !== undefined) {
@@ -491,9 +538,13 @@ const update = async (req, res, next) => {
       changedFields.push('Catatan');
     }
     const finalReqDate = transaction_date || date;
-    if (finalReqDate !== undefined && existing.transaction_date !== finalReqDate) {
-      changes.date = { old: existing.transaction_date, new: finalReqDate };
-      changedFields.push('Tanggal');
+    if (finalReqDate !== undefined) {
+      const oldD = existing.transaction_date instanceof Date ? existing.transaction_date.toISOString().split('T')[0] : existing.transaction_date;
+      const newD = finalReqDate.split(' ')[0]; // Ambil YYYY-MM-DD saja
+      if (oldD !== newD) {
+        changes.date = { old: oldD, new: finalReqDate };
+        changedFields.push('Tanggal');
+      }
     }
     if (lampiran !== undefined) {
       const oldL = existing.lampiran;
@@ -521,7 +572,12 @@ const update = async (req, res, next) => {
         date: existing.transaction_date,
         lampiran: existing.lampiran,
         pb1: existing.pb1,
-        is_umum: existing.is_umum
+        is_umum: existing.is_umum,
+        is_debt_payment: existing.is_debt_payment,
+        paid_amount: existing.paid_amount,
+        remaining_debt: existing.remaining_debt,
+        mitra_piutang_id: existing.mitra_piutang_id,
+        is_pb1_payment: existing.is_pb1_payment
       },
       newData: {
         type: transaction.type,
@@ -531,7 +587,12 @@ const update = async (req, res, next) => {
         date: transaction.transaction_date,
         lampiran: transaction.lampiran,
         pb1: transaction.pb1,
-        is_umum: transaction.is_umum
+        is_umum: transaction.is_umum,
+        is_debt_payment: transaction.is_debt_payment,
+        paid_amount: transaction.paid_amount,
+        remaining_debt: transaction.remaining_debt,
+        mitra_piutang_id: transaction.mitra_piutang_id,
+        is_pb1_payment: transaction.is_pb1_payment
       },
       status: 'approved'
     });
@@ -1321,8 +1382,8 @@ const createRepayment = async (req, res, next) => {
 
       const [incomeResult] = await conn.execute(
         `INSERT INTO transactions (user_id, branch_id, type, amount, note, transaction_date, lampiran, is_umum, is_debt_payment, paid_amount, remaining_debt, status_deleted, category_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, false, NULL)`,
-        [req.userId, transaction.branch_id, 'income', repaymentAmount, repaymentNote, date, lampiranValue, true]
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, false, NULL)`,
+        [req.userId, transaction.branch_id, 'income', repaymentAmount, repaymentNote, date, lampiranValue, true, repaymentAmount]
       );
       incomeTransactionId = incomeResult.insertId;
 
@@ -1394,8 +1455,8 @@ const updateRepayment = async (req, res, next) => {
       });
     }
 
-    let lampiranValue = lampiran;
-    if (Array.isArray(lampiran)) lampiranValue = JSON.stringify(lampiran);
+    let lampiranValue = lampiran !== undefined ? lampiran : repayment.lampiran;
+    if (Array.isArray(lampiranValue)) lampiranValue = JSON.stringify(lampiranValue);
 
     await dbTransaction(async (conn) => {
       // 1. Update mitra detail
@@ -1415,8 +1476,8 @@ const updateRepayment = async (req, res, next) => {
       // 3. Update associated income transaction if exists
       if (repayment.income_transaction_id) {
         await conn.execute(
-          `UPDATE transactions SET amount = ?, note = ?, transaction_date = ?, lampiran = ? WHERE id = ?`,
-          [newAmount, `Pelunasan Piutang (Update): ${mitraDetail.mitra_nama} (Ref: #${id})`, date, lampiranValue, repayment.income_transaction_id]
+          `UPDATE transactions SET amount = ?, paid_amount = ?, note = ?, transaction_date = ?, lampiran = ? WHERE id = ?`,
+          [newAmount, newAmount, `Pelunasan Piutang (Update): ${mitraDetail.mitra_nama} (Ref: #${id})`, date, lampiranValue, repayment.income_transaction_id]
         );
       }
 
@@ -1424,7 +1485,7 @@ const updateRepayment = async (req, res, next) => {
       await TransactionRepayment.update(repaymentId, {
         amount: newAmount,
         paymentDate: date,
-        note,
+        note: note !== undefined ? note : repayment.note,
         lampiran: lampiranValue
       });
     });
@@ -1443,8 +1504,19 @@ const updateRepayment = async (req, res, next) => {
       transactionId: id,
       requesterId: req.userId,
       reason: 'Update Pelunasan',
-      oldData: { repayment_amount: oldAmount },
-      newData: { repayment_amount: newAmount, mitra: mitraDetail.mitra_nama },
+      oldData: {
+        repayment_amount: oldAmount,
+        note: repayment.note,
+        date: repayment.payment_date,
+        lampiran: repayment.lampiran
+      },
+      newData: {
+        repayment_amount: newAmount,
+        mitra: mitraDetail.mitra_nama,
+        note: note !== undefined ? note : repayment.note,
+        date: date,
+        lampiran: lampiranValue
+      },
       status: 'approved'
     });
 

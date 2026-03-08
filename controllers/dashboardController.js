@@ -18,13 +18,7 @@ function formatSection(date, items, transactions, req) {
   const d = parseDate(date);
   const income = transactions
     .filter(t => t.type === 'income')
-    .reduce((sum, t) => {
-      // Jika transaksi hutang, gunakan paid_amount, jika tidak gunakan amount
-      const amount = (t.is_debt_payment === true || t.is_debt_payment === 1)
-        ? (parseFloat(t.paid_amount) || 0)
-        : parseFloat(t.amount);
-      return sum + amount;
-    }, 0);
+    .reduce((sum, t) => sum + parseFloat(t.amount), 0);
   const expense = transactions
     .filter(t => t.type === 'expense')
     .reduce((sum, t) => sum + parseFloat(t.amount), 0);
@@ -88,7 +82,8 @@ function formatSection(date, items, transactions, req) {
         paid_amount: item.paid_amount !== undefined && item.paid_amount !== null ? parseFloat(item.paid_amount) : null,
         parent_transaction_id: item.parent_transaction_id || null,
         created_at: item.created_at || item.updated_at || item.createdAt || null,
-        is_pb1_payment: item.is_pb1_payment === true || item.is_pb1_payment === 1 || item.is_pb1_payment === '1'
+        is_pb1_payment: item.is_pb1_payment === true || item.is_pb1_payment === 1 || item.is_pb1_payment === '1',
+        category_id: item.category_id || null
       };
     })
   };

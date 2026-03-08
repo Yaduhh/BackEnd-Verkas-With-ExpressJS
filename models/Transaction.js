@@ -29,6 +29,20 @@ class Transaction {
 
     transaction.mitra_details = mitraDetails;
 
+    // SYNC: If it's a debt payment but has no multi-mitra details,
+    // synthesize a virtual detail from the main transaction fields
+    // to ensure Repayment (Pelunasan) and UI logic work as expected.
+    if (transaction.is_debt_payment && transaction.mitra_piutang_id && mitraDetails.length === 0) {
+      transaction.mitra_details = [{
+        transaction_id: transaction.id,
+        mitra_piutang_id: transaction.mitra_piutang_id,
+        mitra_nama: transaction.mitra_piutang_nama,
+        amount: transaction.amount,
+        paid_amount: transaction.paid_amount || 0,
+        remaining_debt: transaction.remaining_debt || 0
+      }];
+    }
+
     // Fetch repayments
     const repayments = await query(
       `SELECT tr.*, mp.nama as mitra_nama, COALESCE(u.name, u.email) as user_name
@@ -128,7 +142,8 @@ class Transaction {
       sql += ' AND t.is_umum = ?';
       params.push(isUmum === 'true' || isUmum === true || isUmum === 1);
     } else if (excludeFolders) {
-      sql += ' AND t.is_umum = true';
+      // User requested everything in dashboard, including internal folder transactions
+      // So we don't apply the is_umum = true filter here anymore
     } else if (onlyFolders) {
       sql += ' AND t.is_umum = false';
     }
@@ -253,7 +268,7 @@ class Transaction {
       sql += ' AND t.is_umum = ?';
       params.push(isUmum === 'true' || isUmum === true || isUmum === 1);
     } else if (excludeFolders) {
-      sql += ' AND t.is_umum = true';
+      // User requested everything in dashboard
     } else if (onlyFolders) {
       sql += ' AND t.is_umum = false';
     }
@@ -526,13 +541,22 @@ class Transaction {
     let sql = `
       SELECT 
         COALESCE(SUM(CASE 
-          WHEN t.type = 'income' AND (t.is_debt_payment = true OR t.is_debt_payment = 1) 
-          THEN COALESCE(t.paid_amount, 0)
-          WHEN t.type = 'income' 
-          THEN t.amount
+          WHEN t.type = 'income' THEN 
+            CASE 
+              /* Jika Piutang Utama (ada kategori): Ambil jumlah yang sudah dibayar (paid_amount) */
+              WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NOT NULL THEN COALESCE(t.paid_amount, 0)
+              /* Jika Notifikasi Pelunasan (tanpa kategori): Jangan dihitung lagi (0) karena sudah masuk di paid_amount Piutang Utama */
+              WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL THEN 0
+              /* Transaksi Normal: Ambil amount penuh */
+              ELSE t.amount 
+            END
+          WHEN t.type = 'expense' AND t.is_umum = true AND ${categoryId ? 'TRUE' : 'FALSE'} THEN t.amount
           ELSE 0 
         END), 0) as pemasukan,
-        COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END), 0) as pengeluaran,
+        COALESCE(SUM(CASE 
+          WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryId ? 'FALSE' : 'TRUE'}) THEN t.amount 
+          ELSE 0 
+        END), 0) as pengeluaran,
         COALESCE(SUM(t.pb1), 0) as total_pb1,
         COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.is_pb1_payment = true THEN t.amount ELSE 0 END), 0) as total_pb1_paid
       FROM transactions t
