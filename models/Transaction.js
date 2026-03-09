@@ -455,26 +455,90 @@ class Transaction {
   // Soft delete
   static async softDelete(id) {
     const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
-    await query(
-      'UPDATE transactions SET status_deleted = true, deleted_at = ? WHERE id = ?',
-      [now, id]
-    );
-    return { id, deleted_at: now };
+    return await dbTransaction(async (conn) => {
+      // 1. Get related income transaction IDs from repayments
+      const [repayments] = await conn.execute(
+        'SELECT income_transaction_id FROM transaction_repayments WHERE transaction_id = ? AND income_transaction_id IS NOT NULL',
+        [id]
+      );
+      const incomeIds = repayments.map(r => r.income_transaction_id);
+
+      // 2. Soft delete the main transaction
+      await conn.execute(
+        'UPDATE transactions SET status_deleted = true, deleted_at = ? WHERE id = ?',
+        [now, id]
+      );
+
+      // 3. Soft delete related income transactions (notifications)
+      if (incomeIds.length > 0) {
+        // Validation: ensure IDs are numbers before joining to prevent SQL injection
+        const validIds = incomeIds.filter(id => !isNaN(parseInt(id)));
+        if (validIds.length > 0) {
+          await conn.execute(
+            `UPDATE transactions SET status_deleted = true, deleted_at = ? WHERE id IN (${validIds.join(',')})`,
+            [now]
+          );
+        }
+      }
+
+      return { id, deleted_at: now };
+    });
   }
 
   // Restore
   static async restore(id) {
-    await query(
-      'UPDATE transactions SET status_deleted = false, deleted_at = NULL WHERE id = ?',
-      [id]
-    );
-    return await this.findById(id);
+    return await dbTransaction(async (conn) => {
+      // 1. Get related income transaction IDs from repayments
+      const [repayments] = await conn.execute(
+        'SELECT income_transaction_id FROM transaction_repayments WHERE transaction_id = ? AND income_transaction_id IS NOT NULL',
+        [id]
+      );
+      const incomeIds = repayments.map(r => r.income_transaction_id);
+
+      // 2. Restore main transaction
+      await conn.execute(
+        'UPDATE transactions SET status_deleted = false, deleted_at = NULL WHERE id = ?',
+        [id]
+      );
+
+      // 3. Restore related income transactions (notifications)
+      if (incomeIds.length > 0) {
+        const validIds = incomeIds.filter(id => !isNaN(parseInt(id)));
+        if (validIds.length > 0) {
+          await conn.execute(
+            `UPDATE transactions SET status_deleted = false, deleted_at = NULL WHERE id IN (${validIds.join(',')})`
+          );
+        }
+      }
+
+      return await this.findById(id);
+    });
   }
 
   // Hard delete (permanent)
   static async hardDelete(id) {
-    await query('DELETE FROM transactions WHERE id = ?', [id]);
-    return { id, deleted: true };
+    return await dbTransaction(async (conn) => {
+      // 1. Get related income transaction IDs from repayments
+      const [repayments] = await conn.execute(
+        'SELECT income_transaction_id FROM transaction_repayments WHERE transaction_id = ? AND income_transaction_id IS NOT NULL',
+        [id]
+      );
+      const incomeIds = repayments.map(r => r.income_transaction_id);
+
+      // 2. Delete main transaction
+      // Note: fk_tr_transaction will automatically clean up transaction_repayments records due to ON DELETE CASCADE
+      await conn.execute('DELETE FROM transactions WHERE id = ?', [id]);
+
+      // 3. Delete related income transactions (notifications)
+      if (incomeIds.length > 0) {
+        const validIds = incomeIds.filter(id => !isNaN(parseInt(id)));
+        if (validIds.length > 0) {
+          await conn.execute(`DELETE FROM transactions WHERE id IN (${validIds.join(',')})`);
+        }
+      }
+
+      return { id, deleted: true };
+    });
   }
 
   // Get edit requests (for owner: pending requests, for admin: their own requests)
