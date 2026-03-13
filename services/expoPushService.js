@@ -32,6 +32,7 @@ class ExpoPushService {
         title: title,
         body: body,
         priority: priority === 'high' ? 'high' : 'default',
+        channelId: 'verkas-notif-v2',
         data: { ...data, userId },
       }));
 
@@ -83,6 +84,59 @@ class ExpoPushService {
 
   async sendTest(userId, options = {}) {
     return await this.sendToUser(userId, { title: 'Test', body: 'This is a test', ...options });
+  }
+
+  chunkTokens(tokens) {
+    const chunkSize = 100;
+    const chunks = [];
+    for (let i = 0; i < tokens.length; i += chunkSize) {
+      chunks.push(tokens.slice(i, i + chunkSize));
+    }
+    return chunks;
+  }
+
+  async sendMulticast(tokens, { title, body, data = {}, sound = 'default', priority = 'high' }) {
+    if (tokens.length === 0) return { success: true, sent: 0 };
+
+    const messages = tokens.map(token => {
+      // Mendukung gambar rich notification untuk Android via direct channel Expo (opsional untuk iOS)
+      const messageObj = {
+        to: token,
+        sound: sound || 'default',
+        title: title,
+        body: body,
+        priority: priority === 'high' ? 'high' : 'default',
+        channelId: 'verkas-notif-v2',
+        data: data,
+      };
+
+      if (data.image_url) {
+        messageObj.categoryId = 'verkas-image-notif';
+        messageObj.attachments = [
+          {
+            url: data.image_url
+          }
+        ];
+      }
+
+      return messageObj;
+    });
+
+    const chunks = expo.chunkPushNotifications(messages);
+    const tickets = [];
+    let sentCount = 0;
+
+    for (let chunk of chunks) {
+      try {
+        const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+        tickets.push(...ticketChunk);
+        sentCount += ticketChunk.filter(t => t.status === 'ok').length;
+      } catch (error) {
+        console.error('❌ [BACKEND] Expo push multicast error:', error.message);
+      }
+    }
+
+    return { success: true, sent: sentCount, tickets };
   }
 }
 

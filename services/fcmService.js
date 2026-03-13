@@ -203,7 +203,7 @@ class FCMService {
           priority: priority === 'high' ? 'high' : 'normal',
           notification: {
             sound: sound === 'default' ? 'default' : sound,
-            channelId: 'default', // Must match channel ID in app
+            channelId: 'default', // IMPORTANT: Must match the MAX importance channel created in Frontend
           },
         },
         apns: {
@@ -304,6 +304,79 @@ class FCMService {
     };
   }
 
+  // Send multicast notification to an array of tokens
+  async sendMulticast(tokens, { title, body, data = {}, sound = 'default', priority = 'high' }) {
+    if (!this.initialized) {
+      throw new Error('FCM service not initialized.');
+    }
+    if (!tokens || tokens.length === 0) return { successCount: 0, failureCount: 0 };
+
+    const stringData = this.convertDataToStrings({
+      ...data,
+      timestamp: new Date().toISOString(),
+    });
+
+    const message = {
+      notification: {
+        title,
+        body,
+        // Optional native field Firebase
+        ...(data.image_url ? { imageUrl: data.image_url } : {})
+      },
+      data: stringData,
+      android: {
+        priority: priority === 'high' ? 'high' : 'normal',
+        notification: {
+          sound: sound === 'default' ? 'default' : sound,
+          channelId: 'verkas-notif-v2',
+          ...(data.image_url ? { imageUrl: data.image_url } : {})
+        },
+      },
+      apns: {
+        payload: {
+          aps: {
+            // Include mutable-content to tell iOS to wake up extension service to render image
+            'mutable-content': data.image_url ? 1 : 0,
+            sound: sound === 'default' ? 'default.aiff' : sound,
+          },
+        },
+        fcmOptions: data.image_url ? { imageUrl: data.image_url } : undefined
+      },
+    };
+
+    try {
+      let successCount = 0;
+      let failureCount = 0;
+
+      const chunkSize = 500;
+      for (let i = 0; i < tokens.length; i += chunkSize) {
+        const chunk = tokens.slice(i, i + chunkSize);
+        const response = await admin.messaging().sendEachForMulticast({
+          tokens: chunk,
+          ...message,
+        });
+
+        successCount += response.successCount;
+        failureCount += response.failureCount;
+
+        response.responses.forEach((resp, idx) => {
+          if (!resp.success) {
+            const errCode = resp.error?.code;
+            if (errCode === 'messaging/invalid-registration-token' ||
+              errCode === 'messaging/registration-token-not-registered') {
+              DeviceToken.unregisterByToken(chunk[idx]).catch(() => { });
+            }
+          }
+        });
+      }
+
+      return { successCount, failureCount };
+    } catch (error) {
+      console.error('❌ Error sending FCM multicast:', error);
+      throw error;
+    }
+  }
+
   // Send notification to specific token
   async sendToToken(token, { title, body, data = {}, sound = 'default', priority = 'high' }) {
     // Check if FCM is initialized
@@ -333,7 +406,7 @@ class FCMService {
           priority: priority === 'high' ? 'high' : 'normal',
           notification: {
             sound: sound === 'default' ? 'default' : sound,
-            channelId: 'default',
+            channelId: 'verkas-notif-v2',
           },
         },
         apns: {

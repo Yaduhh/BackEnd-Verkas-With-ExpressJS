@@ -8,6 +8,9 @@ const SubscriptionPlan = require('../models/SubscriptionPlan');
 const Payment = require('../models/Payment');
 const ActivityLog = require('../models/ActivityLog');
 const LogService = require('../services/logService');
+const DeviceToken = require('../models/DeviceToken');
+const expoPushService = require('../services/expoPushService');
+const fcmService = require('../services/fcmService');
 const { query } = require('../config/database');
 
 // Helper function untuk memastikan nilai integer yang valid (untuk LIMIT/OFFSET)
@@ -1403,6 +1406,88 @@ const approvePayment = async (req, res, next) => {
   }
 };
 
+// Get active device tokens for broadcast
+const getActiveDeviceTokens = async (req, res, next) => {
+  try {
+    const devices = await query(
+      `SELECT d.id, d.user_id, d.device_token, d.device_name, d.platform, d.is_active,
+              u.name as user_name, u.email as user_email, u.role as user_role
+       FROM device_tokens d
+       JOIN users u ON d.user_id = u.id
+       WHERE d.is_active = true AND u.status_deleted = false AND d.device_token IS NOT NULL
+       ORDER BY d.created_at DESC`
+    );
+
+    res.json({
+      success: true,
+      data: {
+        devices
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Broadcast notification to specific device tokens
+const broadcastNotification = async (req, res, next) => {
+  try {
+    const { title, body, data, device_tokens } = req.body;
+
+    if (!title || !body || !device_tokens || !Array.isArray(device_tokens) || device_tokens.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Title, body, and array of device_tokens are required'
+      });
+    }
+
+    // Separate tokens by type
+    const expoTokens = device_tokens.filter(token => expoPushService.isValidToken(token));
+    const fcmTokens = device_tokens.filter(token => fcmService.isValidToken(token));
+    
+    let totalSent = 0;
+    const errors = [];
+
+    // Send via Expo
+    if (expoTokens.length > 0) {
+      const expoChunks = expoPushService.chunkTokens(expoTokens);
+      for (const chunk of expoChunks) {
+        try {
+          const result = await expoPushService.sendMulticast(chunk, { title, body, data: data || {} });
+          // Note: In real world, we should process result tickets to update invalid tokens
+          totalSent += chunk.length;
+        } catch (err) {
+          errors.push(err.message);
+        }
+      }
+    }
+
+    // Send via FCM
+    if (fcmTokens.length > 0) {
+      try {
+        const result = await fcmService.sendMulticast(fcmTokens, { title, body, data: data || {} });
+        totalSent += result.successCount;
+      } catch (err) {
+        errors.push(err.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Notification broadcasted. Attempted to send to ${device_tokens.length} devices.`,
+      data: {
+        total_tokens: device_tokens.length,
+        expo_tokens: expoTokens.length,
+        fcm_tokens: fcmTokens.length,
+        sent_estimate: totalSent,
+        errors: errors.length > 0 ? errors : undefined
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getOverview,
   getAllUsers,
@@ -1423,5 +1508,7 @@ module.exports = {
   createPlan,
   updatePlan,
   deletePlan,
-  approvePayment
+  approvePayment,
+  getActiveDeviceTokens,
+  broadcastNotification
 };

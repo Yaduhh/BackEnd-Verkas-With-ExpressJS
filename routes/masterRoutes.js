@@ -20,7 +20,9 @@ const {
   createPlan,
   updatePlan,
   deletePlan,
-  approvePayment
+  approvePayment,
+  getActiveDeviceTokens,
+  broadcastNotification
 } = require('../controllers/masterController');
 const { authenticate, authorize } = require('../middleware/auth');
 
@@ -65,5 +67,9 @@ router.get('/plans', getAllPlans);
 router.post('/plans', createPlan);
 router.put('/plans/:id', updatePlan);
 router.delete('/plans/:id', deletePlan);
+
+// Broadcast Notifications
+router.get('/active-device-tokens', getActiveDeviceTokens);
+router.post('/notifications/broadcast', broadcastNotification);
 
 module.exports = router;
