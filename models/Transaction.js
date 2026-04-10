@@ -29,6 +29,16 @@ class Transaction {
 
     transaction.mitra_details = mitraDetails;
 
+    // Fetch savings details
+    const savingsDetails = await query(
+      `SELECT tsd.*, c.name as category_name
+       FROM transaction_savings_details tsd
+       JOIN categories c ON tsd.category_id = c.id
+       WHERE tsd.transaction_id = ?`,
+      [id]
+    );
+    transaction.savings_details = savingsDetails;
+
     // SYNC: If it's a debt payment but has no multi-mitra details,
     // synthesize a virtual detail from the main transaction fields
     // to ensure Repayment (Pelunasan) and UI logic work as expected.
@@ -78,18 +88,38 @@ class Transaction {
     hasPb1 = false,
     isPb1Payment = undefined
   } = {}) {
-    let sql = `
+    let selectFields = `
       SELECT t.*, c.name as category_name, COALESCE(u.name, u.email) as user_name,
              mp.nama as mitra_piutang_nama,
              tr_notif.transaction_id as parent_transaction_id
+    `;
+    let joinDetails = '';
+    const params = [];
+
+    const categoryName = (category && typeof category === 'string' && category.trim() !== '') ? category.trim() : null;
+
+    if (categoryName) {
+      selectFields += `, 
+             /* If filtered by category, use the specific amount from savings details if available */
+             CASE 
+               WHEN tsd.amount IS NOT NULL THEN tsd.amount 
+               ELSE t.amount 
+             END as amount`;
+      
+      joinDetails += ` LEFT JOIN transaction_savings_details tsd ON t.id = tsd.transaction_id AND EXISTS (SELECT 1 FROM categories c2 WHERE c2.id = tsd.category_id AND c2.name = ?)`;
+      params.push(categoryName);
+    }
+
+    let sql = `
+      ${selectFields}
       FROM transactions t
       LEFT JOIN categories c ON t.category_id = c.id
       LEFT JOIN users u ON t.user_id = u.id
       LEFT JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
       LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id
+      ${joinDetails}
       WHERE 1=1
     `;
-    const params = [];
 
     // Branch ID is required for data isolation - ensure it's a valid integer
     if (branchId === undefined || branchId === null) {
@@ -122,8 +152,8 @@ class Transaction {
     }
 
     if (category && typeof category === 'string' && category.trim() !== '') {
-      sql += ' AND c.name = ?';
-      params.push(category.trim());
+      sql += ` AND (c.name = ? OR EXISTS (SELECT 1 FROM transaction_savings_details tsd JOIN categories c2 ON tsd.category_id = c2.id WHERE tsd.transaction_id = t.id AND c2.name = ?))`;
+      params.push(category.trim(), category.trim());
     }
 
     if (startDate && typeof startDate === 'string' && startDate.trim() !== '') {
@@ -250,8 +280,8 @@ class Transaction {
     }
 
     if (category) {
-      sql += ' AND c.name = ?';
-      params.push(category);
+      sql += ` AND (c.name = ? OR EXISTS (SELECT 1 FROM transaction_savings_details tsd JOIN categories c2 ON tsd.category_id = c2.id WHERE tsd.transaction_id = t.id AND c2.name = ?))`;
+      params.push(category, category);
     }
 
     if (startDate) {
@@ -293,12 +323,12 @@ class Transaction {
 
   // Create transaction
   // Create transaction
-  static async create({ userId, branchId, type, categoryId, amount, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, mitraDetails = [], isPb1Payment = false }) {
+  static async create({ userId, branchId, type, categoryId, amount, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, mitraDetails = [], savingsDetails = [], isPb1Payment = false }) {
     const transactionId = await dbTransaction(async (conn) => {
       const [result] = await conn.execute(
-        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, status_deleted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
-        [userId, branchId, type, categoryId, amount, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment]
+        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, status_deleted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
+        [userId, branchId, type, categoryId, amount, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, (savingsDetails && savingsDetails.length > 0) || false, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment]
       );
 
       const newId = result.insertId;
@@ -314,6 +344,17 @@ class Transaction {
         }
       }
 
+      // Insert savings details
+      if (savingsDetails && savingsDetails.length > 0) {
+        for (const detail of savingsDetails) {
+          await conn.execute(
+            `INSERT INTO transaction_savings_details (transaction_id, category_id, amount)
+             VALUES (?, ?, ?)`,
+            [newId, detail.category_id, detail.amount]
+          );
+        }
+      }
+
       return newId;
     });
 
@@ -321,7 +362,7 @@ class Transaction {
   }
 
   // Update transaction
-  static async update(id, { type, categoryId, amount, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, mitraDetails, isPb1Payment }) {
+  static async update(id, { type, categoryId, amount, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, mitraDetails, savingsDetails, isPb1Payment }) {
     await dbTransaction(async (conn) => {
       const updates = [];
       const params = [];
@@ -374,6 +415,10 @@ class Transaction {
         updates.push('mitra_piutang_id = ?');
         params.push(mitraPiutangId);
       }
+      if (savingsDetails !== undefined) {
+        updates.push('is_savings = ?');
+        params.push(savingsDetails && savingsDetails.length > 0);
+      }
       if (isPb1Payment !== undefined) {
         updates.push('is_pb1_payment = ?');
         params.push(isPb1Payment === true || isPb1Payment === 'true' || isPb1Payment === 1);
@@ -399,6 +444,23 @@ class Transaction {
               `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
                VALUES (?, ?, ?, ?, ?)`,
               [id, detail.mitra_piutang_id, detail.amount, detail.paid_amount || 0, detail.remaining_debt || 0]
+            );
+          }
+        }
+      }
+
+      // Handle savings details
+      if (savingsDetails !== undefined) {
+        // Delete old details
+        await conn.execute(`DELETE FROM transaction_savings_details WHERE transaction_id = ?`, [id]);
+
+        // Insert new details
+        if (savingsDetails && savingsDetails.length > 0) {
+          for (const detail of savingsDetails) {
+            await conn.execute(
+              `INSERT INTO transaction_savings_details (transaction_id, category_id, amount)
+               VALUES (?, ?, ?)`,
+              [id, detail.category_id, detail.amount]
             );
           }
         }
@@ -602,6 +664,27 @@ class Transaction {
 
   // Get summary for date range
   static async getSummary({ userId, branchId, categoryId, subCategoryId, startDate, endDate, includeDeleted = false, excludeFolders = false, onlyFolders = false, isUmum = undefined }) {
+    const params = [];
+    
+    // Conditionally build portions of the query
+    let joinDetails = '';
+    let pengeluaranCase = `t.amount`;
+    let categoryConditionForIncome = `FALSE`;
+    let categoryConditionForExpense = `TRUE`;
+
+    if (categoryId) {
+      joinDetails = `
+        LEFT JOIN (
+          /* Virtual detail amount for specific category summary */
+          SELECT transaction_id, category_id, amount FROM transaction_savings_details
+        ) tsd_active ON t.id = tsd_active.transaction_id AND (tsd_active.category_id = ? OR EXISTS (SELECT 1 FROM categories c_sub WHERE c_sub.id = tsd_active.category_id AND c_sub.parent_id = ?))
+      `;
+      params.push(categoryId, categoryId);
+      pengeluaranCase = `CASE WHEN tsd_active.amount IS NOT NULL THEN tsd_active.amount ELSE t.amount END`;
+      categoryConditionForIncome = `TRUE`;
+      categoryConditionForExpense = `FALSE`;
+    }
+
     let sql = `
       SELECT 
         COALESCE(SUM(CASE 
@@ -614,43 +697,42 @@ class Transaction {
               /* Transaksi Normal: Ambil amount penuh */
               ELSE t.amount 
             END
-          WHEN t.type = 'expense' AND t.is_umum = true AND ${categoryId ? 'TRUE' : 'FALSE'} THEN t.amount
+          /* Alokasi Simpanan dari Kas Utama (dianggap pemasukan buat kantong) */
+          WHEN t.type = 'expense' AND t.is_umum = true AND tsd_active.amount IS NOT NULL THEN tsd_active.amount
           ELSE 0 
         END), 0) as pemasukan,
         COALESCE(SUM(CASE 
-          WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryId ? 'FALSE' : 'TRUE'}) THEN t.amount 
+          WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryConditionForExpense}) THEN t.amount
           ELSE 0 
         END), 0) as pengeluaran,
         COALESCE(SUM(t.pb1), 0) as total_pb1,
         COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.is_pb1_payment = true THEN t.amount ELSE 0 END), 0) as total_pb1_paid
       FROM transactions t
       LEFT JOIN categories c ON t.category_id = c.id
+      ${joinDetails}
       WHERE 1=1
     `;
-    const params = [];
 
-    // User ID is optional (for dashboard, we want all users in branch)
+    // User ID
     if (userId) {
       sql += ' AND t.user_id = ?';
       params.push(userId);
     }
 
-    // Branch ID is required for data isolation
+    // Branch ID
     if (branchId) {
       sql += ' AND t.branch_id = ?';
       params.push(branchId);
     }
 
-    // Category ID filter (including sub-categories if needed)
+    // Category Filter in WHERE clause
     if (categoryId) {
       if (subCategoryId) {
-        // Specific sub-category
-        sql += ' AND t.category_id = ?';
-        params.push(subCategoryId);
+        sql += ` AND (t.category_id = ? OR tsd_active.category_id = ?)`;
+        params.push(subCategoryId, subCategoryId);
       } else {
-        // All transactions in parent category or specific category
-        sql += ' AND (t.category_id = ? OR c.parent_id = ?)';
-        params.push(categoryId, categoryId);
+        sql += ` AND (t.category_id = ? OR c.parent_id = ? OR tsd_active.category_id = ? OR EXISTS (SELECT 1 FROM categories c2 WHERE c2.id = tsd_active.category_id AND c2.parent_id = ?))`;
+        params.push(categoryId, categoryId, categoryId, categoryId);
       }
     }
 
@@ -681,7 +763,6 @@ class Transaction {
     const { pemasukan, pengeluaran, total_pb1, total_pb1_paid } = results[0];
     const saldo = pemasukan - pengeluaran;
     const saldo_pb1 = (total_pb1 || 0) - (total_pb1_paid || 0);
-
     return { pemasukan, pengeluaran, saldo, total_pb1, total_pb1_paid, saldo_pb1 };
   }
 }

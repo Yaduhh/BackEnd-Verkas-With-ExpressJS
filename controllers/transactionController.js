@@ -246,7 +246,7 @@ const getById = async (req, res, next) => {
 
 const create = async (req, res, next) => {
   try {
-    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, mitra_details, is_pb1_payment } = req.body;
+    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, mitra_details, savings_details, is_pb1_payment } = req.body;
 
     // Get branch_id from header or middleware
     const branchId = req.branchId || req.headers['x-branch-id'];
@@ -350,6 +350,7 @@ const create = async (req, res, next) => {
       remainingDebt,
       mitraPiutangId,
       mitraDetails: mitra_details || [],
+      savingsDetails: savings_details || [],
       isPb1Payment: is_pb1_payment || false
     });
 
@@ -370,7 +371,8 @@ const create = async (req, res, next) => {
         is_umum: transaction.is_umum,
         is_debt_payment: transaction.is_debt_payment,
         paid_amount: transaction.paid_amount,
-        remaining_debt: transaction.remaining_debt
+        remaining_debt: transaction.remaining_debt,
+        savings_details: transaction.savings_details
       },
       status: 'approved'
     }).catch(err => console.error('Error creating creation history:', err));
@@ -415,7 +417,7 @@ const create = async (req, res, next) => {
 const update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, mitra_details, is_pb1_payment } = req.body;
+    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, mitra_details, savings_details, is_pb1_payment } = req.body;
 
     // Check if transaction exists and belongs to user
     const existing = await Transaction.findById(id);
@@ -490,6 +492,10 @@ const update = async (req, res, next) => {
 
     if (mitra_details !== undefined) {
       updateData.mitraDetails = mitra_details;
+    }
+
+    if (savings_details !== undefined) {
+      updateData.savingsDetails = savings_details;
     }
 
     // Pass debt payment fields to model
@@ -577,7 +583,8 @@ const update = async (req, res, next) => {
         paid_amount: existing.paid_amount,
         remaining_debt: existing.remaining_debt,
         mitra_piutang_id: existing.mitra_piutang_id,
-        is_pb1_payment: existing.is_pb1_payment
+        is_pb1_payment: existing.is_pb1_payment,
+        savings_details: existing.savings_details
       },
       newData: {
         type: transaction.type,
@@ -592,7 +599,8 @@ const update = async (req, res, next) => {
         paid_amount: transaction.paid_amount,
         remaining_debt: transaction.remaining_debt,
         mitra_piutang_id: transaction.mitra_piutang_id,
-        is_pb1_payment: transaction.is_pb1_payment
+        is_pb1_payment: transaction.is_pb1_payment,
+        savings_details: transaction.savings_details
       },
       status: 'approved'
     });
