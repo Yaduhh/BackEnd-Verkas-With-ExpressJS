@@ -698,7 +698,7 @@ class Transaction {
               ELSE t.amount 
             END
           /* Alokasi Simpanan dari Kas Utama (dianggap pemasukan buat kantong) */
-          WHEN t.type = 'expense' AND t.is_umum = true AND tsd_active.amount IS NOT NULL THEN tsd_active.amount
+          ${categoryId ? 'WHEN t.type = \'expense\' AND t.is_umum = true AND tsd_active.amount IS NOT NULL THEN tsd_active.amount' : ''}
           ELSE 0 
         END), 0) as pemasukan,
         COALESCE(SUM(CASE 
