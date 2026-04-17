@@ -9,7 +9,9 @@ class MitraPiutang {
               (
                 SELECT COALESCE(SUM(t.remaining_debt), 0)
                 FROM transactions t
-                WHERE t.mitra_piutang_id = mp.id AND t.status_deleted = false
+                WHERE t.mitra_piutang_id = mp.id 
+                AND t.status_deleted = false
+                AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
               ) + (
                 SELECT COALESCE(SUM(tmd.remaining_debt), 0)
                 FROM transaction_mitra_details tmd
@@ -36,7 +38,9 @@ class MitraPiutang {
              (
                SELECT COALESCE(SUM(t.remaining_debt), 0)
                FROM transactions t
-               WHERE t.mitra_piutang_id = mp.id AND t.status_deleted = false
+               WHERE t.mitra_piutang_id = mp.id 
+               AND t.status_deleted = false
+               AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
              ) + (
                SELECT COALESCE(SUM(tmd.remaining_debt), 0)
                FROM transaction_mitra_details tmd
