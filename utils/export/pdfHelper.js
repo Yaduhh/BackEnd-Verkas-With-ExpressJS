@@ -529,12 +529,26 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
     doc.text('Pengeluaran', margin, y);
     y += 18;
-    (data.expense_breakdown || []).forEach((ex, idx) => {
+    let parentIdx = 1;
+    (data.expense_breakdown || []).forEach((ex) => {
         checkNewPage(20);
-        doc.font(fontRegular).fontSize(9);
-        doc.text(`${idx + 1}`, margin, y, { width: 20, align: 'right' });
-        doc.text(ex.category_name, margin + 30, y, { width: 200 });
+
+        const isAdj = ex.is_adjustment;
+        doc.font(isAdj ? 'Helvetica-Oblique' : fontBold).fontSize(isAdj ? 8.5 : 9);
+
+        if (!isAdj) {
+            // Parent Category: show index and bold name
+            doc.text(`${parentIdx++}`, margin, y, { width: 20, align: 'right' });
+            doc.text(ex.category_name, margin + 30, y, { width: 200 });
+        } else {
+            // Adjustment: indented, no index, italicized
+            doc.text('—', margin + 35, y, { width: 10 });
+            doc.text(ex.category_name, margin + 48, y, { width: 182 });
+        }
+
+        doc.font(isAdj ? fontRegular : fontBold).fontSize(9);
         doc.text('Rp', margin + 330, y).text(formatCurrencyForPDF(ex.total), margin + 350, y, { align: 'right', width: 85 });
+
         // Individual expenses are also calculated against total income
         const perc = totalPemasukanFinal > 0 ? (ex.total / totalPemasukanFinal * 100).toFixed(2) : '0.00';
         doc.text(`${perc} %`, margin + 440, y, { align: 'right', width: 45 });
@@ -555,7 +569,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     const totalProfitAmount = totalPemasukanFinal - (Number(data.pengeluaran_total) || 0);
     doc.text('Rp', margin + 360, y + 6).text(formatCurrencyForPDF(totalProfitAmount), margin + 380, y + 6, { align: 'right', width: 85 });
     // Profit in percentage: (Total Income % [100%] - Total Expense %)
-    const pMar = totalPemasukanFinal > 0 ? (totalProfitAmount / totalPemasukanFinal * 100).toFixed(3) : '0.000';
+    const pMar = totalPemasukanFinal > 0 ? (totalProfitAmount / totalPemasukanFinal * 100).toFixed(2) : '0.00';
     doc.text(`${pMar} %`, margin + 470, y + 6, { align: 'right', width: 45 });
     y += 40;
 
@@ -598,7 +612,11 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     doc.text(formatCurrencyForPDF(data.stok_akhir), margin + 380, y, { align: 'right', width: 85 });
 
     doc.end();
-    return new Promise((resolve) => { writeStream.on('finish', () => resolve(filepath)); });
+    return new Promise((resolve, reject) => { 
+        writeStream.on('finish', () => resolve(filepath));
+        writeStream.on('error', reject);
+        doc.on('error', reject);
+    });
 }
 
 module.exports = {

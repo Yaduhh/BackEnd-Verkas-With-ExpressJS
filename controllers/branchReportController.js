@@ -31,107 +31,152 @@ const getReport = async (req, res, next) => {
         const prevMonthDate = new Date(year, month - 2, 1);
         const prevMonthName = prevMonthDate.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
 
-        // 1. Omzet Total (Kas Umum)
+        // 1. Omzet Total (Kas Umum) - Only include regular income (NOT debt payments)
+        // SYNC WITH ADD/EDIT: Use (paid_amount if debt else amount) + pb1, AND filter is_umum = true
+        
+        // AUDIT LOG: Temukan transaksi yang kategorinya 'Kas Simpanan' tapi is_savings-nya FALSE
+        const suspiciousSavings = await query(
+            `SELECT t.id, t.amount, t.note, t.transaction_date, c.name as category_name
+             FROM transactions t
+             JOIN categories c ON t.category_id = c.id
+             WHERE t.branch_id = ? 
+               AND t.transaction_date BETWEEN ? AND ? 
+               AND t.status_deleted = false
+               AND (t.is_savings = 0 OR t.is_savings IS NULL)
+               AND c.name LIKE '%Kas Simpanan%'`,
+            [branchId, startDate, endDate]
+        );
+
+
         const incomeResult = await query(
-            `SELECT SUM(CASE 
-                WHEN (is_debt_payment = true OR is_debt_payment = 1) 
-                THEN COALESCE(paid_amount, 0)
-                ELSE amount 
-             END) as total
-             FROM transactions
-             WHERE branch_id = ?
-               AND type = 'income'
-               AND (is_umum = true OR is_umum IS NULL)
-               AND transaction_date BETWEEN ? AND ?
-               AND status_deleted = false`,
-            [branchId, startDate, endDate]
-        );
-        const omzetTotal = parseFloat(incomeResult[0].total) || 0;
-
-        // 2. Pengeluaran Total (Kas Umum)
-        const expenseResult = await query(
-            `SELECT SUM(amount) as total
-             FROM transactions
-             WHERE branch_id = ?
-               AND type = 'expense'
-               AND (is_umum = true OR is_umum IS NULL)
-               AND transaction_date BETWEEN ? AND ?
-               AND status_deleted = false`,
-            [branchId, startDate, endDate]
-        );
-        const pengeluaranTotal = parseFloat(expenseResult[0].total) || 0;
-
-        // 3. Pengeluaran Breakdown (By Category)
-        const expenseBreakdown = await query(
-            `SELECT COALESCE(c.name, 'Lain-lain') as category_name, SUM(t.amount) as total
+            `SELECT SUM(
+                CASE 
+                    WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
+                    ELSE t.amount 
+                END + COALESCE(t.pb1, 0)
+             ) as total 
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
-             WHERE t.branch_id = ?
-               AND t.type = 'expense'
-               AND (t.is_umum = true OR t.is_umum IS NULL)
-               AND t.transaction_date BETWEEN ? AND ?
+             WHERE t.branch_id = ? 
+               AND t.type = 'income' 
+               AND (t.is_debt_payment = false OR t.is_debt_payment = 0 OR t.is_debt_payment IS NULL) 
+               AND t.transaction_date BETWEEN ? AND ? 
                AND t.status_deleted = false
-             GROUP BY c.name`,
-            [branchId, startDate, endDate]
+               AND t.is_umum = true
+               AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
+               AND (t.category_id NOT IN (SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false) OR t.category_id IS NULL)`,
+            [branchId, startDate, endDate, branchId]
+        );
+        const systemOmzet = parseFloat(incomeResult[0].total) || 0;
+
+        // 2. Pengeluaran Breakdown (Net per Category)
+        // SYNC WITH ADD/EDIT: Use (paid_amount if debt else amount) + pb1 for regular expenses
+        const expenseBreakdown = await query(
+            `SELECT category_name, SUM(total) as total
+             FROM (
+                /* 1. Pengeluaran Reguler & Retur (Hanya yang BUKAN transaksi simpanan rincian) */
+                SELECT COALESCE(c.name, 'Lain-lain') as category_name, 
+                       (CASE 
+                            WHEN t.type = 'expense' THEN 
+                                (CASE WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) ELSE t.amount END) + COALESCE(t.pb1, 0)
+                            ELSE 
+                                -(t.amount + COALESCE(t.pb1, 0))
+                        END) as total 
+                FROM transactions t 
+                LEFT JOIN categories c ON t.category_id = c.id 
+                WHERE t.branch_id = ? 
+                  AND t.transaction_date BETWEEN ? AND ? 
+                  AND t.status_deleted = false
+                  AND t.is_umum = true
+                  AND (t.is_savings = 0 OR t.is_savings IS NULL)
+                  AND (
+                    t.type = 'expense' 
+                    OR (t.type = 'income' AND t.category_id IN (
+                       SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false
+                    ))
+                  )
+
+                UNION ALL
+
+                /* 2. Rincian Simpanan (Diambil dari tabel detail simpanan) */
+                SELECT c.name as category_name,
+                       tsd.amount as total
+                FROM transaction_savings_details tsd
+                JOIN transactions t ON tsd.transaction_id = t.id
+                JOIN categories c ON tsd.category_id = c.id
+                WHERE t.branch_id = ? 
+                  AND t.transaction_date BETWEEN ? AND ? 
+                  AND t.status_deleted = false
+                  AND t.is_umum = true
+                  AND t.type = 'expense'
+                  AND t.is_savings = 1
+             ) as consolidated
+             GROUP BY category_name
+             HAVING SUM(total) != 0`,
+            [branchId, startDate, endDate, branchId, branchId, startDate, endDate]
         );
 
+
+        // 3. Pengeluaran Total (MUST match the sum of breakdown items)
+        const systemPengeluaran = expenseBreakdown.reduce((sum, item) => sum + (parseFloat(item.total) || 0), 0);
+
         // 4. Pelunasan Piutang Bulan Lalu
-        // (Uang masuk bulan ini untuk piutang yang dibuat di bulan-bulan sebelumnya)
         const debtRepaymentResult = await query(
             `SELECT SUM(tr.amount) as total
              FROM transaction_repayments tr
              JOIN transactions t ON tr.transaction_id = t.id
              WHERE tr.payment_date BETWEEN ? AND ?
                AND t.transaction_date < ?
-               AND t.branch_id = ?`,
+               AND t.branch_id = ?
+               AND t.status_deleted = false`,
             [startDate, endDate, startDate, branchId]
         );
         const pelunasanPiutangBulanLalu = parseFloat(debtRepaymentResult[0].total) || 0;
 
-        // 5. Pendapatan Breakdown (By Category) - Show Folders specifically, group others as 'Lain-lain'
+        // 5. Pendapatan Breakdown (By Category) 
+        // SYNC WITH ADD/EDIT: Include PB1 and filter is_umum = true
         const incomeBreakdownResult = await query(
             `SELECT 
-                CASE WHEN c.is_folder = true THEN c.name ELSE 'Lain-lain' END as category_group,
-                SUM(CASE 
-                    WHEN (t.is_debt_payment = true OR t.is_debt_payment = 1) 
-                    THEN COALESCE(t.paid_amount, 0)
-                    ELSE t.amount 
-                END) as total
+                CASE WHEN c.name = 'OMZET PENJUALAN' THEN 'OMZET PENJUALAN' ELSE 'Lain-lain' END as category_group,
+                SUM(t.amount + COALESCE(t.pb1, 0)) as total
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
              WHERE t.branch_id = ?
                AND t.type = 'income'
-               AND (t.is_umum = true OR t.is_umum IS NULL)
+               AND (t.is_debt_payment = false OR t.is_debt_payment = 0 OR t.is_debt_payment IS NULL)
                AND t.transaction_date BETWEEN ? AND ?
                AND t.status_deleted = false
+               AND t.is_umum = true
+               AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
+               AND (t.category_id NOT IN (SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false) OR t.category_id IS NULL)
              GROUP BY category_group`,
-            [branchId, startDate, endDate]
+            [branchId, startDate, endDate, branchId]
         );
 
-        // Map to standard format
         const incomeBreakdown = incomeBreakdownResult.map(item => ({
             category_name: item.category_group,
             total: parseFloat(item.total) || 0
         }));
 
-        // Upsert record (mantain manual fields)
+        // Total Omzet is pure system sum (Folders + Lain-lain)
+        const finalOmzetTotal = incomeBreakdown.reduce((sum, item) => sum + item.total, 0);
         const report = await BranchReport.upsert(branchId, month, year, {
-            omzetTotal,
-            pengeluaranTotal,
+            omzetTotal: finalOmzetTotal,
+            pengeluaranTotal: systemPengeluaran,
         });
 
-        const profit = omzetTotal - pengeluaranTotal;
+        const finalProfit = finalOmzetTotal - systemPengeluaran;
 
         return res.json({
             success: true,
             data: {
                 report: {
                     ...report,
-                    profit,
+                    profit: finalProfit,
                     pelunasan_piutang_bulan_lalu: pelunasanPiutangBulanLalu,
                     prev_month_label: prevMonthName,
                     income_breakdown: incomeBreakdown,
-                    expense_breakdown: expenseBreakdown
+                    expense_breakdown: expenseBreakdown // Use raw breakdown from query
                 },
             },
         });
@@ -157,7 +202,7 @@ const updateReport = async (req, res, next) => {
             return res.status(403).json({ success: false, message: 'Akses ditolak' });
         }
 
-        const { sales_channels, bagi_hasil, stok_awal, stok_akhir, working_days } = req.body;
+        const { sales_channels, bagi_hasil, expense_adjustments, expense_order, stok_awal, stok_akhir, working_days } = req.body;
 
         // Validasi format
         if (sales_channels !== undefined && !Array.isArray(sales_channels)) {
@@ -170,6 +215,8 @@ const updateReport = async (req, res, next) => {
         const updated = await BranchReport.updateManual(branchId, month, year, {
             salesChannels: sales_channels,
             bagiHasil: bagi_hasil,
+            expenseAdjustments: expense_adjustments,
+            expenseOrder: expense_order,
             stokAwal: stok_awal !== undefined ? parseFloat(stok_awal) : undefined,
             stokAkhir: stok_akhir !== undefined ? parseFloat(stok_akhir) : undefined,
             workingDays: working_days !== undefined ? parseInt(working_days) : undefined,
@@ -179,7 +226,77 @@ const updateReport = async (req, res, next) => {
             return res.status(404).json({ success: false, message: 'Laporan tidak ditemukan, fetch dulu' });
         }
 
-        const profit = (updated.omzet_total || 0) - (updated.pengeluaran_total || 0);
+        // Recalculate profit consistently with getReport
+        const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+        const daysInMonth = new Date(year, month, 0).getDate();
+        const endDate = `${year}-${String(month).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
+
+        const incomeResult = await query(
+            `SELECT SUM(
+                CASE 
+                    WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
+                    ELSE t.amount 
+                END + COALESCE(t.pb1, 0)
+             ) as total 
+             FROM transactions t
+             LEFT JOIN categories c ON t.category_id = c.id
+             WHERE t.branch_id = ? 
+               AND t.type = 'income' 
+               AND (t.is_debt_payment = false OR t.is_debt_payment = 0 OR t.is_debt_payment IS NULL) 
+               AND t.transaction_date BETWEEN ? AND ? 
+               AND t.status_deleted = false
+               AND t.is_umum = true
+               AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
+               AND (t.category_id NOT IN (SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false) OR t.category_id IS NULL)`,
+            [branchId, startDate, endDate, branchId]
+        );
+        const systemOmzet = parseFloat(incomeResult[0].total) || 0;
+
+        // Recalculate net expense consistently with getReport logic
+        const expenseResult = await query(
+            `SELECT SUM(category_total) as grand_total FROM (
+                SELECT SUM(
+                    CASE 
+                        WHEN t.type = 'expense' THEN 
+                            (CASE WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) ELSE t.amount END) + COALESCE(t.pb1, 0)
+                        ELSE 
+                            -(t.amount + COALESCE(t.pb1, 0))
+                    END
+                ) as category_total 
+                FROM transactions t 
+                LEFT JOIN categories c ON t.category_id = c.id 
+                WHERE t.branch_id = ? 
+                  AND t.transaction_date BETWEEN ? AND ? 
+                  AND t.status_deleted = false
+                  AND t.is_umum = true
+                  AND (
+                    t.type = 'expense' 
+                    OR (t.type = 'income' AND t.category_id IN (
+                       SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false
+                    ))
+                  )
+                GROUP BY c.name
+                HAVING SUM(CASE WHEN t.type = 'expense' THEN 1 ELSE 0 END) > 0
+            ) as subtotals`,
+            [branchId, startDate, endDate, branchId]
+        );
+        const systemPengeluaran = parseFloat(expenseResult[0].grand_total) || 0;
+
+        const debtRepaymentResult = await query(
+            `SELECT SUM(tr.amount) as total FROM transaction_repayments tr JOIN transactions t ON tr.transaction_id = t.id WHERE tr.payment_date BETWEEN ? AND ? AND t.transaction_date < ? AND t.branch_id = ? AND t.status_deleted = false`,
+            [startDate, endDate, startDate, branchId]
+        );
+        const pelunasanPiutangBulanLalu = parseFloat(debtRepaymentResult[0].total) || 0;
+
+        const finalOmzetTotal = systemOmzet;
+
+        await BranchReport.upsert(branchId, month, year, {
+            omzetTotal: finalOmzetTotal,
+            pengeluaranTotal: systemPengeluaran
+        });
+
+        const finalProfit = finalOmzetTotal - systemPengeluaran;
+
 
         return res.json({
             success: true,
@@ -187,7 +304,9 @@ const updateReport = async (req, res, next) => {
             data: {
                 report: {
                     ...updated,
-                    profit,
+                    omzet_total: finalOmzetTotal,
+                    profit: finalProfit,
+                    pelunasan_piutang_bulan_lalu: pelunasanPiutangBulanLalu
                 },
             },
         });
@@ -221,65 +340,212 @@ const exportPdf = async (req, res, next) => {
         const prevMonthName = prevMonthDate.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
 
         const incomeResult = await query(
-            `SELECT SUM(CASE WHEN (is_debt_payment = true OR is_debt_payment = 1) THEN COALESCE(paid_amount, 0) ELSE amount END) as total FROM transactions WHERE branch_id = ? AND type = 'income' AND (is_umum = true OR is_umum IS NULL) AND transaction_date BETWEEN ? AND ? AND status_deleted = false`,
+            `SELECT SUM(
+                CASE 
+                    WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
+                    ELSE t.amount 
+                END + COALESCE(t.pb1, 0)
+             ) as total 
+             FROM transactions t
+             LEFT JOIN categories c ON t.category_id = c.id
+             WHERE t.branch_id = ? 
+               AND t.type = 'income' 
+               AND (t.is_debt_payment = false OR t.is_debt_payment = 0 OR t.is_debt_payment IS NULL) 
+               AND t.transaction_date BETWEEN ? AND ? 
+               AND t.status_deleted = false
+               AND t.is_umum = true
+               AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)`,
             [branchId, startDate, endDate]
         );
-        const omzetTotal = parseFloat(incomeResult[0].total) || 0;
-
-        const expenseResult = await query(
-            `SELECT SUM(amount) as total FROM transactions WHERE branch_id = ? AND type = 'expense' AND (is_umum = true OR is_umum IS NULL) AND transaction_date BETWEEN ? AND ? AND status_deleted = false`,
-            [branchId, startDate, endDate]
-        );
-        const pengeluaranTotal = parseFloat(expenseResult[0].total) || 0;
+        const systemOmzet = parseFloat(incomeResult[0].total) || 0;
 
         const expenseBreakdown = await query(
-            `SELECT COALESCE(c.name, 'Lain-lain') as category_name, SUM(t.amount) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.branch_id = ? AND t.type = 'expense' AND (t.is_umum = true OR t.is_umum IS NULL) AND t.transaction_date BETWEEN ? AND ? AND t.status_deleted = false GROUP BY c.name`,
-            [branchId, startDate, endDate]
+            `SELECT category_name, SUM(total) as total
+             FROM (
+                /* 1. Pengeluaran Reguler & Retur (Hanya yang BUKAN transaksi simpanan rincian) */
+                SELECT COALESCE(c.name, 'Lain-lain') as category_name, 
+                       (CASE 
+                            WHEN t.type = 'expense' THEN 
+                                (CASE WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) ELSE t.amount END) + COALESCE(t.pb1, 0)
+                            ELSE 
+                                -(t.amount + COALESCE(t.pb1, 0))
+                        END) as total 
+                FROM transactions t 
+                LEFT JOIN categories c ON t.category_id = c.id 
+                WHERE t.branch_id = ? 
+                  AND t.transaction_date BETWEEN ? AND ? 
+                  AND t.status_deleted = false
+                  AND t.is_umum = true
+                  AND (t.is_savings = 0 OR t.is_savings IS NULL)
+                  AND (
+                    t.type = 'expense' 
+                    OR (t.type = 'income' AND t.category_id IN (
+                       SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false
+                    ))
+                  )
+
+                UNION ALL
+
+                /* 2. Rincian Simpanan (Diambil dari tabel detail simpanan) */
+                SELECT c.name as category_name,
+                       tsd.amount as total
+                FROM transaction_savings_details tsd
+                JOIN transactions t ON tsd.transaction_id = t.id
+                JOIN categories c ON tsd.category_id = c.id
+                WHERE t.branch_id = ? 
+                  AND t.transaction_date BETWEEN ? AND ? 
+                  AND t.status_deleted = false
+                  AND t.is_umum = true
+                  AND t.type = 'expense'
+                  AND t.is_savings = 1
+             ) as consolidated
+             GROUP BY category_name
+             HAVING SUM(total) != 0`,
+            [branchId, startDate, endDate, branchId, branchId, startDate, endDate]
         );
+        const systemPengeluaran = expenseBreakdown.reduce((sum, item) => sum + (parseFloat(item.total) || 0), 0);
 
         const debtRepaymentResult = await query(
-            `SELECT SUM(tr.amount) as total FROM transaction_repayments tr JOIN transactions t ON tr.transaction_id = t.id WHERE tr.payment_date BETWEEN ? AND ? AND t.transaction_date < ? AND t.branch_id = ?`,
+            `SELECT SUM(tr.amount) as total FROM transaction_repayments tr JOIN transactions t ON tr.transaction_id = t.id WHERE tr.payment_date BETWEEN ? AND ? AND t.transaction_date < ? AND t.branch_id = ? AND t.status_deleted = false`,
             [startDate, endDate, startDate, branchId]
         );
         const pelunasanPiutangBulanLalu = parseFloat(debtRepaymentResult[0].total) || 0;
 
         const incomeBreakdownResult = await query(
-            `SELECT CASE WHEN c.is_folder = true THEN c.name ELSE 'Lain-lain' END as category_group, SUM(CASE WHEN (t.is_debt_payment = true OR t.is_debt_payment = 1) THEN COALESCE(t.paid_amount, 0) ELSE t.amount END) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.branch_id = ? AND t.type = 'income' AND (t.is_umum = true OR t.is_umum IS NULL) AND t.transaction_date BETWEEN ? AND ? AND t.status_deleted = false GROUP BY category_group`,
-            [branchId, startDate, endDate]
+            `SELECT 
+                CASE WHEN c.name = 'OMZET PENJUALAN' THEN 'OMZET PENJUALAN' ELSE 'Lain-lain' END as category_group, 
+                SUM(t.amount + COALESCE(t.pb1, 0)) as total 
+             FROM transactions t 
+             LEFT JOIN categories c ON t.category_id = c.id 
+             WHERE t.branch_id = ? 
+               AND t.type = 'income' 
+               AND (t.is_debt_payment = false OR t.is_debt_payment = 0 OR t.is_debt_payment IS NULL) 
+               AND t.transaction_date BETWEEN ? AND ? 
+               AND t.status_deleted = false 
+               AND t.is_umum = true
+               AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
+               AND (t.category_id NOT IN (SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false) OR t.category_id IS NULL)
+             GROUP BY category_group`,
+            [branchId, startDate, endDate, branchId]
         );
-        const incomeBreakdown = incomeBreakdownResult.map(item => ({ category_name: item.category_group, total: parseFloat(item.total) || 0 }));
 
-        const report = await BranchReport.upsert(branchId, month, year, { omzetTotal, pengeluaranTotal });
+        // Fetch existing manual report data
+        const reportInDb = await BranchReport.findByBranchAndPeriod(branchId, month, year);
+        const manualSalesTotal = (reportInDb?.sales_channels || []).reduce((sum, sc) => sum + (Number(sc.amount) || 0), 0);
+
+        let incomeBreakdown = incomeBreakdownResult.map(item => ({ category_name: item.category_group, total: parseFloat(item.total) || 0 }));
+
+        const finalOmzetTotal = incomeBreakdown.reduce((sum, item) => sum + item.total, 0);
+        const finalProfit = finalOmzetTotal - systemPengeluaran;
+
+        const report = await BranchReport.upsert(branchId, month, year, {
+            omzetTotal: finalOmzetTotal,
+            pengeluaranTotal: systemPengeluaran
+        });
+
+        // APPLY EXPENSE ADJUSTMENTS AND SORTING FOR PDF
+        const adjustmentsByParent = {};
+        if (report.expense_adjustments && report.expense_adjustments.length > 0) {
+            report.expense_adjustments.forEach(adj => {
+                if (!adjustmentsByParent[adj.parent_category]) {
+                    adjustmentsByParent[adj.parent_category] = [];
+                }
+                adjustmentsByParent[adj.parent_category].push(adj);
+            });
+        }
+
+        // Initialize processed layout
+        let processedExpenseBreakdown = [];
+        
+        // 1. Sort the raw categories based on custom order if exists
+        let sortedCategories = [...expenseBreakdown];
+        if (report.expense_order && Array.isArray(report.expense_order)) {
+            const orderMap = {};
+            report.expense_order.forEach((name, idx) => { orderMap[name] = idx; });
+            
+            sortedCategories.sort((a, b) => {
+                const orderA = orderMap[a.category_name] !== undefined ? orderMap[a.category_name] : 1000;
+                const orderB = orderMap[b.category_name] !== undefined ? orderMap[b.category_name] : 1000;
+                return orderA - orderB;
+            });
+        }
+
+        // 2. Build the final flat list with adjustments right after their parents
+        sortedCategories.forEach(item => {
+            const adjs = adjustmentsByParent[item.category_name] || [];
+            const adjTotal = adjs.reduce((sum, a) => sum + (parseFloat(a.amount) || 0), 0);
+            const parentTotal = (parseFloat(item.total) || 0) - adjTotal;
+
+            // Only add parent if it has value
+            if (Math.abs(parentTotal) > 0.01) {
+                processedExpenseBreakdown.push({
+                    category_name: item.category_name,
+                    total: parentTotal
+                });
+            }
+            
+            // Add adjustments directly under the parent
+            adjs.forEach(adj => {
+                if (Math.abs(parseFloat(adj.amount) || 0) > 0.01) {
+                    processedExpenseBreakdown.push({
+                        category_name: adj.name,
+                        total: parseFloat(adj.amount) || 0,
+                        is_adjustment: true
+                    });
+                }
+            });
+        });
 
         const dataForPdf = {
             ...report,
-            omzet_total: omzetTotal,
-            pengeluaran_total: pengeluaranTotal,
+            omzet_total: finalOmzetTotal,
+            pengeluaran_total: systemPengeluaran,
+            profit: finalProfit,
             pelunasan_piutang_bulan_lalu: pelunasanPiutangBulanLalu,
             prev_month_label: prevMonthName,
             income_breakdown: incomeBreakdown,
-            expense_breakdown: expenseBreakdown
+            expense_breakdown: processedExpenseBreakdown
         };
 
         const { exportFinancialReportToPDF, generateFilename, getMimeType } = require('../utils/exportHelper');
         const filename = generateFilename('PDF', `Laporan_Keuangan_${branch.name}`);
         const selectedMonthDate = new Date(year, month - 1, 1);
 
-        const filepath = await exportFinancialReportToPDF(dataForPdf, filename, branch.name, selectedMonthDate, report.working_days || workingDays);
+        try {
+            const filepath = await exportFinancialReportToPDF(dataForPdf, filename, branch.name, selectedMonthDate, report.working_days || workingDays);
+            
+            const fs = require('fs');
+            if (!fs.existsSync(filepath)) {
+                return res.status(500).json({ success: false, message: 'File PDF gagal dibuat' });
+            }
 
-        const fs = require('fs');
-        res.setHeader('Content-Type', getMimeType('PDF'));
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            res.setHeader('Content-Type', getMimeType('PDF') || 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
-        const fileStream = fs.createReadStream(filepath);
-        fileStream.pipe(res);
+            const fileStream = fs.createReadStream(filepath);
+            fileStream.pipe(res);
 
-        fileStream.on('end', () => {
-            setTimeout(() => {
-                fs.unlink(filepath, (err) => { if (err) console.error(err); });
-            }, 5000);
-        });
+            fileStream.on('end', () => {
+                setTimeout(() => {
+                    fs.unlink(filepath, (err) => { 
+                        if (err) console.error(`[EXPORT] Error deleting temp file:`, err); 
+                    });
+                }, 10000);
+            });
+
+            fileStream.on('error', (streamErr) => {
+                console.error(`[EXPORT] Stream Error:`, streamErr);
+                if (!res.headersSent) {
+                    res.status(500).json({ success: false, message: 'Gagal mengirim file PDF' });
+                }
+            });
+
+        } catch (pdfError) {
+            console.error(`[EXPORT] PDF Gen Error:`, pdfError);
+            return res.status(500).json({ success: false, message: 'Gagal memproses PDF: ' + pdfError.message });
+        }
     } catch (error) {
+        console.error(`[EXPORT] Global Controller Error:`, error);
         next(error);
     }
 };

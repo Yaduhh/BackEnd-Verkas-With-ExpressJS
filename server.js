@@ -69,7 +69,6 @@ app.use(cors({
 
     // In development, allow all origins for easier testing
     if (process.env.NODE_ENV === 'development') {
-      console.log(`✅ Allowing origin in development: ${origin}`);
       return callback(null, true);
     }
 
