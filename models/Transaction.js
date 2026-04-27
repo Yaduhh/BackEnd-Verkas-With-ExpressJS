@@ -91,7 +91,8 @@ class Transaction {
     let selectFields = `
       SELECT t.*, c.name as category_name, COALESCE(u.name, u.email) as user_name,
              mp.nama as mitra_piutang_nama,
-             tr_notif.transaction_id as parent_transaction_id
+             tr_notif.transaction_id as parent_transaction_id,
+             COALESCE(tr_sum.total_repayment, 0) as total_repayment
     `;
     let joinDetails = '';
     const params = [];
@@ -117,6 +118,11 @@ class Transaction {
       LEFT JOIN users u ON t.user_id = u.id
       LEFT JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
       LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id
+      LEFT JOIN (
+        SELECT transaction_id, SUM(amount) as total_repayment 
+        FROM transaction_repayments 
+        GROUP BY transaction_id
+      ) tr_sum ON t.id = tr_sum.transaction_id
       ${joinDetails}
       WHERE 1=1
     `;
@@ -690,10 +696,14 @@ class Transaction {
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' THEN 
             CASE 
-              /* Jika Piutang Utama (ada kategori): Ambil jumlah yang sudah dibayar (paid_amount) */
-              WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NOT NULL THEN COALESCE(t.paid_amount, 0)
-              /* Jika Notifikasi Pelunasan (tanpa kategori): Jangan dihitung lagi (0) karena sudah masuk di paid_amount Piutang Utama */
-              WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL THEN 0
+              /* Jika Piutang Utama (ada kategori): Ambil hanya pembayaran AWAL (DP) */
+              /* Caranya: Total paid_amount saat ini dikurangi total semua cicilan yang pernah ada */
+              WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NOT NULL THEN 
+                (COALESCE(t.paid_amount, 0) - COALESCE(tr_sum.total_repayment, 0))
+              
+              /* Jika Notifikasi Pelunasan (tanpa kategori): Ambil nominal cicilannya */
+              WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL THEN t.amount
+              
               /* Transaksi Normal: Ambil amount penuh */
               ELSE t.amount 
             END
@@ -709,6 +719,12 @@ class Transaction {
         COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.is_pb1_payment = true THEN t.amount ELSE 0 END), 0) as total_pb1_paid
       FROM transactions t
       LEFT JOIN categories c ON t.category_id = c.id
+      /* Join untuk dapet total pelunasan per transaksi */
+      LEFT JOIN (
+        SELECT transaction_id, SUM(amount) as total_repayment 
+        FROM transaction_repayments 
+        GROUP BY transaction_id
+      ) tr_sum ON t.id = tr_sum.transaction_id
       ${joinDetails}
       WHERE 1=1
     `;

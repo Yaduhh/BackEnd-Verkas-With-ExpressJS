@@ -487,8 +487,8 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     doc.strokeColor('#000000').lineWidth(1.5).moveTo(margin, y).lineTo(margin + contentWidth, y).stroke();
     y += 10;
 
-    // Calculate total base income for percentages (Total real cash incoming)
-    const totalPemasukanFinal = (Number(data.omzet_total) || 0) + (Number(data.pelunasan_piutang_bulan_lalu) || 0);
+    // Calculate total base income (Already includes everything from backend)
+    const totalPemasukanFinal = Number(data.omzet_total) || 0;
 
     doc.font(fontBold).fontSize(10).text('Omzet Penjualan', margin, y);
     y += 18;
@@ -539,11 +539,11 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         if (!isAdj) {
             // Parent Category: show index and bold name
             doc.text(`${parentIdx++}`, margin, y, { width: 20, align: 'right' });
-            doc.text(ex.category_name, margin + 30, y, { width: 200 });
+            doc.text(ex.category_name, margin + 30, y, { width: 290 });
         } else {
             // Adjustment: indented, no index, italicized
             doc.text('—', margin + 35, y, { width: 10 });
-            doc.text(ex.category_name, margin + 48, y, { width: 182 });
+            doc.text(ex.category_name, margin + 48, y, { width: 272 });
         }
 
         doc.font(isAdj ? fontRegular : fontBold).fontSize(9);
@@ -565,8 +565,8 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
     doc.rect(margin, y, contentWidth, 24).fillColor('#8B0000').fill();
     doc.fillColor('#FFFFFF').text('Profit', margin + 20, y + 6);
-    // Profit in IDR: Total Income - Total Expense
-    const totalProfitAmount = totalPemasukanFinal - (Number(data.pengeluaran_total) || 0);
+    // Profit in IDR: Use pre-calculated profit from backend
+    const totalProfitAmount = Number(data.profit) || (totalPemasukanFinal - (Number(data.pengeluaran_total) || 0));
     doc.text('Rp', margin + 360, y + 6).text(formatCurrencyForPDF(totalProfitAmount), margin + 380, y + 6, { align: 'right', width: 85 });
     // Profit in percentage: (Total Income % [100%] - Total Expense %)
     const pMar = totalPemasukanFinal > 0 ? (totalProfitAmount / totalPemasukanFinal * 100).toFixed(2) : '0.00';

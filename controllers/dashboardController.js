@@ -18,7 +18,14 @@ function formatSection(date, items, transactions, req) {
   const d = parseDate(date);
   const income = transactions
     .filter(t => t.type === 'income')
-    .reduce((sum, t) => sum + parseFloat(t.amount), 0);
+    .reduce((sum, t) => {
+      let val = parseFloat(t.amount);
+      // Debt logic: for main transaction (has category), only count initial paid amount
+      if ((t.is_debt_payment === true || t.is_debt_payment === 1 || t.is_debt_payment === '1') && t.category_id) {
+        val = parseFloat(t.paid_amount || 0) - parseFloat(t.total_repayment || 0);
+      }
+      return sum + val;
+    }, 0);
   const expense = transactions
     .filter(t => t.type === 'expense')
     .reduce((sum, t) => sum + parseFloat(t.amount), 0);
@@ -69,11 +76,25 @@ function formatSection(date, items, transactions, req) {
         }
       }
 
+      let displayAmount = item.type === 'expense' ? -parseFloat(item.amount) : parseFloat(item.amount);
+      
+      // Handle debt payment cash flow logic for dashboard list
+      if (item.type === 'income' && (item.is_debt_payment === true || item.is_debt_payment === 1 || item.is_debt_payment === '1')) {
+        if (item.category_id) {
+          // Piutang Utama: Ambil hanya pembayaran awal (Initial Cash Received)
+          // t.paid_amount (total paid so far) - total_repayment (sum of later payments)
+          displayAmount = parseFloat(item.paid_amount || 0) - parseFloat(item.total_repayment || 0);
+        } else {
+          // Notifikasi Pelunasan: Gunakan nominal pelunasannya (sudah benar di item.amount)
+          displayAmount = parseFloat(item.amount);
+        }
+      }
+
       return {
         transaction_id: item.id, // Add transaction ID for detail navigation
         category: item.category_name || '-',
         note: item.note || '',
-        amount: item.type === 'expense' ? -parseFloat(item.amount) : parseFloat(item.amount),
+        amount: displayAmount,
         pb1: item.pb1 ? parseFloat(item.pb1) : null,
         lampiran: lampiran, // Always array or null with full URLs
         user_name: item.user_name || null,
