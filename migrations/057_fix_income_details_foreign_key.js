@@ -8,14 +8,21 @@ module.exports = {
     }
 
     // 2. Tambahkan Foreign Key yang benar (ngerujuk ke payment_methods)
-    await db.query(`
-      ALTER TABLE transaction_income_details 
-      ADD CONSTRAINT fk_tid_payment_method 
-      FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) 
-      ON DELETE CASCADE
-    `);
-    
-    console.log('  Fixed foreign key: payment_method_id now references payment_methods(id)');
+    try {
+      await db.query(`
+        ALTER TABLE transaction_income_details 
+        ADD CONSTRAINT fk_tid_payment_method 
+        FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) 
+        ON DELETE CASCADE
+      `);
+      console.log('  Fixed foreign key: payment_method_id now references payment_methods(id)');
+    } catch (e) {
+      if (e.code === 'ER_FK_DUP_NAME' || e.message.includes('Duplicate foreign key')) {
+        console.log('  Constraint fk_tid_payment_method already exists, skipping.');
+      } else {
+        throw e;
+      }
+    }
   },
 
   down: async (db) => {
