@@ -49,12 +49,21 @@ const getReport = async (req, res, next) => {
 
 
         const incomeResult = await query(
-            `SELECT SUM(
-                CASE 
-                    WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
-                    ELSE t.amount 
-                END + COALESCE(t.pb1, 0)
-             ) as total 
+            `SELECT 
+                SUM(
+                    CASE 
+                        WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
+                        ELSE t.amount 
+                    END
+                ) as total_gross,
+                SUM(
+                    COALESCE((
+                        SELECT SUM(tid.amount_app)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), 0)
+                ) as taxable_amount
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
              WHERE t.branch_id = ? 
@@ -66,7 +75,9 @@ const getReport = async (req, res, next) => {
             [branchId, startDate, endDate]
         );
 
-        const systemOmzet = parseFloat(incomeResult[0].total) || 0;
+        const systemOmzetGross = parseFloat(incomeResult[0].total_gross) || 0;
+        const systemTaxable = parseFloat(incomeResult[0].taxable_amount) || 0;
+        const systemOmzet = systemOmzetGross - Math.round((systemTaxable * 10) / 110);
 
         // 2. Pengeluaran Breakdown (Net per Category)
         // SYNC WITH ADD/EDIT: Use (paid_amount if debt else amount) + pb1 for regular expenses
@@ -157,9 +168,18 @@ const getReport = async (req, res, next) => {
         // SYNC WITH ADD/EDIT: Include PB1 and filter is_umum = true
         const incomeBreakdownResult = await query(
             `SELECT 
-                COALESCE(c.name, 'Tanpa Kategori') as category_name,
+                t.category_id,
+                COALESCE(c.name, 'Lain-lain') as category_name,
                 t.is_debt_payment,
-                SUM(t.amount + COALESCE(t.pb1, 0)) as total,
+                SUM(t.amount) as total_gross,
+                SUM(
+                    COALESCE((
+                        SELECT SUM(tid.amount_app)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), 0)
+                ) as taxable_amount,
                 (SELECT COUNT(*) FROM transactions t2 WHERE t2.category_id = t.category_id AND t2.type = 'expense' AND t2.status_deleted = false AND t2.branch_id = t.branch_id) as has_expense
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
@@ -175,34 +195,49 @@ const getReport = async (req, res, next) => {
 
         // Group them into the display format
         const groupedIncome = {
-            'OMZET PENJUALAN': 0,
-            'Lain-lain': 0
+            'OMZET PENJUALAN': { total_net: 0, total_tax: 0, category_id: null },
+            'Lain-lain': { total_net: 0, total_tax: 0, category_id: null }
         };
-
+        
         incomeBreakdownResult.forEach(item => {
-            const amount = parseFloat(item.total) || 0;
+            const gross = parseFloat(item.total_gross) || 0;
+            const taxable = parseFloat(item.taxable_amount) || 0;
+            const tax = Math.round((taxable * 10) / 110);
+            const net = gross - tax;
+
+            const nameUpper = item.category_name.toUpperCase();
             const hasExpense = parseInt(item.has_expense) > 0;
 
-            if (item.category_name === 'OMZET PENJUALAN') {
-                // Untuk Omzet Penjualan, masukkan SEMUA (Cash + Pelunasan)
-                groupedIncome['OMZET PENJUALAN'] += amount;
+            // Check if it's an Omzet variation
+            const isOmzet = nameUpper.includes('OMZET') || nameUpper.includes('OMSET');
+
+            if (isOmzet) {
+                groupedIncome['OMZET PENJUALAN'].total_net += net;
+                groupedIncome['OMZET PENJUALAN'].total_tax += tax;
+                if (!groupedIncome['OMZET PENJUALAN'].category_id && item.category_id) {
+                    groupedIncome['OMZET PENJUALAN'].category_id = item.category_id;
+                }
             } else {
-                // Untuk kategori lain, balik ke logic awal yang saklek:
-                // 1. Bukan pelunasan hutang
-                // 2. Kategori tersebut tidak boleh punya transaksi 'expense' (has_expense == 0)
                 if ((!item.is_debt_payment || item.is_debt_payment == 0) && !hasExpense) {
-                    groupedIncome['Lain-lain'] += amount;
+                    groupedIncome['Lain-lain'].total_net += net;
+                    groupedIncome['Lain-lain'].total_tax += tax;
+                    if (!groupedIncome['Lain-lain'].category_id && item.category_id) {
+                        groupedIncome['Lain-lain'].category_id = item.category_id;
+                    }
                 }
             }
         });
 
-        const incomeBreakdown = Object.entries(groupedIncome).map(([name, total]) => ({
+        const incomeBreakdown = Object.entries(groupedIncome).map(([name, data]) => ({
+            category_id: data.category_id,
             category_name: name,
-            total: total
+            total_net: data.total_net,
+            total_tax: data.total_tax,
+            total: data.total_net + data.total_tax // Gross for backward compatibility in some views if needed
         }));
 
-        // Total Income = Folders + Previous Month Repayments
-        const finalOmzetTotal = incomeBreakdown.reduce((sum, item) => sum + item.total, 0) + pelunasanPiutangBulanLalu;
+        // Total Income = Folders (NET) + Previous Month Repayments
+        const finalOmzetTotal = incomeBreakdown.reduce((sum, item) => sum + item.total_net, 0) + pelunasanPiutangBulanLalu;
 
         const report = await BranchReport.upsert(branchId, month, year, {
             omzetTotal: finalOmzetTotal,
@@ -276,12 +311,21 @@ const updateReport = async (req, res, next) => {
         const endDate = `${year}-${String(month).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
 
         const incomeResult = await query(
-            `SELECT SUM(
-                CASE 
-                    WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
-                    ELSE t.amount 
-                END + COALESCE(t.pb1, 0)
-             ) as total 
+            `SELECT 
+                SUM(
+                    CASE 
+                        WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
+                        ELSE t.amount 
+                    END
+                ) as total_gross,
+                SUM(
+                    COALESCE((
+                        SELECT SUM(tid.amount_app)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), 0)
+                ) as taxable_amount
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
              WHERE t.branch_id = ? 
@@ -292,7 +336,9 @@ const updateReport = async (req, res, next) => {
                AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)`,
             [branchId, startDate, endDate]
         );
-        const systemOmzet = parseFloat(incomeResult[0].total) || 0;
+        const systemOmzetGross = parseFloat(incomeResult[0].total_gross) || 0;
+        const systemTaxable = parseFloat(incomeResult[0].taxable_amount) || 0;
+        const systemOmzet = systemOmzetGross - Math.round((systemTaxable * 10) / 110);
 
         // Recalculate net expense consistently with getReport logic
         const folderResult = await query(
@@ -402,12 +448,21 @@ const exportPdf = async (req, res, next) => {
         const prevMonthName = prevMonthDate.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
 
         const incomeResult = await query(
-            `SELECT SUM(
-                CASE 
-                    WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
-                    ELSE t.amount 
-                END + COALESCE(t.pb1, 0)
-             ) as total 
+            `SELECT 
+                SUM(
+                    CASE 
+                        WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
+                        ELSE t.amount 
+                    END
+                ) as total_gross,
+                SUM(
+                    COALESCE((
+                        SELECT SUM(tid.amount_app)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), 0)
+                ) as taxable_amount
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
              WHERE t.branch_id = ? 
@@ -418,7 +473,9 @@ const exportPdf = async (req, res, next) => {
                AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)`,
             [branchId, startDate, endDate]
         );
-        const systemOmzet = parseFloat(incomeResult[0].total) || 0;
+        const systemOmzetGross = parseFloat(incomeResult[0].total_gross) || 0;
+        const systemTaxable = parseFloat(incomeResult[0].taxable_amount) || 0;
+        const systemOmzet = systemOmzetGross - Math.round((systemTaxable * 10) / 110);
 
         const expenseBreakdown = await query(
             `SELECT category_name, SUM(total) as total
@@ -494,7 +551,15 @@ const exportPdf = async (req, res, next) => {
         const incomeBreakdownRaw = await query(
             `SELECT 
                 COALESCE(c.name, 'Lain-lain') as category_name, 
-                SUM(t.amount + COALESCE(t.pb1, 0)) as total,
+                SUM(t.amount) as total_gross,
+                SUM(
+                    COALESCE((
+                        SELECT SUM(tid.amount_app)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), 0)
+                ) as taxable_amount,
                 t.is_debt_payment,
                 (SELECT COUNT(*) FROM transactions WHERE category_id = t.category_id AND type = 'expense' AND status_deleted = false) as has_expense
              FROM transactions t 
@@ -515,14 +580,23 @@ const exportPdf = async (req, res, next) => {
         };
 
         incomeBreakdownRaw.forEach(item => {
-            const amount = parseFloat(item.total) || 0;
+            const gross = parseFloat(item.total_gross) || 0;
+            const taxable = parseFloat(item.taxable_amount) || 0;
+            const tax = Math.round((taxable * 10) / 110);
+            const net = gross - tax;
+
+            const nameUpper = item.category_name.toUpperCase();
             const hasExpense = parseInt(item.has_expense) > 0;
 
-            if (item.category_name === 'OMZET PENJUALAN') {
-                groupedIncome['OMZET PENJUALAN'] += amount;
+            // Check if it's an Omzet variation
+            const isOmzet = nameUpper.includes('OMZET') || nameUpper.includes('OMSET');
+
+            if (isOmzet) {
+                groupedIncome['OMZET PENJUALAN'] += net;
             } else {
+                // Original strict logic for Other items:
                 if ((!item.is_debt_payment || item.is_debt_payment == 0) && !hasExpense) {
-                    groupedIncome['Lain-lain'] += amount;
+                    groupedIncome['Lain-lain'] += net;
                 }
             }
         });
@@ -560,7 +634,7 @@ const exportPdf = async (req, res, next) => {
 
         // 1. Sort the raw categories based on custom order if exists
         let sortedCategories = [...expenseBreakdown];
-        
+
         // Add PIUTANG Mitra to the raw list so it can be sorted/displayed
         const piutangLabel = `PIUTANG ${prevMonthName.toUpperCase()}`;
         if (totalPiutangMitra > 0) {
@@ -661,4 +735,51 @@ const exportPdf = async (req, res, next) => {
     }
 };
 
-module.exports = { getReport, updateReport, exportPdf };
+const exportBagiHasilPdf = async (req, res, next) => {
+    try {
+        const { branchId } = req.params;
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+
+        const branch = await Branch.findById(branchId);
+        if (!branch) return res.status(404).json({ success: false, message: 'Branch not found' });
+
+        const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
+        if (!hasAccess) {
+            return res.status(403).json({ success: false, message: 'Akses ditolak' });
+        }
+
+        const report = await BranchReport.findByBranchAndPeriod(branchId, month, year);
+        if (!report) return res.status(404).json({ success: false, message: 'Laporan tidak ditemukan' });
+
+        const { exportBagiHasilToPDF, generateFilename, getMimeType } = require('../utils/exportHelper');
+        const filename = generateFilename('PDF', `Bagi_Hasil_${branch.name}`);
+        const selectedMonthDate = new Date(year, month - 1, 1);
+
+        try {
+            const filepath = await exportBagiHasilToPDF(report, filename, branch.name, selectedMonthDate);
+
+            const fs = require('fs');
+            res.setHeader('Content-Type', getMimeType('PDF') || 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+            const fileStream = fs.createReadStream(filepath);
+            fileStream.pipe(res);
+
+            fileStream.on('end', () => {
+                setTimeout(() => {
+                    fs.unlink(filepath, (err) => {
+                        if (err) console.error(`[EXPORT] Error deleting temp file:`, err);
+                    });
+                }, 10000);
+            });
+        } catch (pdfError) {
+            console.error(`[EXPORT BH] PDF Gen Error:`, pdfError);
+            return res.status(500).json({ success: false, message: 'Gagal memproses PDF: ' + pdfError.message });
+        }
+    } catch (error) {
+        next(error);
+    }
+};
+
+module.exports = { getReport, updateReport, exportPdf, exportBagiHasilPdf };

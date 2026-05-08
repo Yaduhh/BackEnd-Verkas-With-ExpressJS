@@ -505,10 +505,18 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     doc.font(fontBold).fontSize(10).text('Sales Channel', margin, y);
     y += 14;
 
+    // Calculate total categorized Omzet specifically for sales channel percentage base
+    const totalCategorizedOmzet = (data.income_breakdown || [])
+        .filter(ch => ch.category_name !== 'Lain-lain')
+        .reduce((sum, ch) => sum + Number(ch.total), 0);
+
     (data.sales_channels || []).forEach(ch => {
         doc.font(fontRegular).fontSize(9).text(ch.name, margin + 40, y);
-        doc.text('Rp', margin + 330, y);
-        doc.text(formatCurrencyForPDF(ch.amount), margin + 350, y, { align: 'right', width: 85 });
+        doc.text('Rp', margin + 360, y);
+        doc.text(formatCurrencyForPDF(ch.amount), margin + 380, y, { align: 'right', width: 85 });
+
+        const scPerc = totalCategorizedOmzet > 0 ? (Number(ch.amount) / totalCategorizedOmzet * 100).toFixed(2) : '0.00';
+        doc.text(`${scPerc} %`, margin + 470, y, { align: 'right', width: 45 });
         y += 14;
     });
 
@@ -547,11 +555,11 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         }
 
         doc.font(isAdj ? fontRegular : fontBold).fontSize(9);
-        doc.text('Rp', margin + 330, y).text(formatCurrencyForPDF(ex.total), margin + 350, y, { align: 'right', width: 85 });
+        doc.text('Rp', margin + 360, y).text(formatCurrencyForPDF(ex.total), margin + 380, y, { align: 'right', width: 85 });
 
         // Individual expenses are also calculated against total income
         const perc = totalPemasukanFinal > 0 ? (ex.total / totalPemasukanFinal * 100).toFixed(2) : '0.00';
-        doc.text(`${perc} %`, margin + 440, y, { align: 'right', width: 45 });
+        doc.text(`${perc} %`, margin + 470, y, { align: 'right', width: 45 });
         y += 16;
     });
 
@@ -575,27 +583,46 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
     // Section: Bagi Hasil
     if (data.bagi_hasil && data.bagi_hasil.length > 0) {
+        checkNewPage(60); // Ensure header + some items fit
         doc.font(fontBold).fontSize(10).fillColor('#000000').text('Bagi Hasil', margin, y);
         y += 18;
         data.bagi_hasil.forEach(bh => {
-            checkNewPage(20);
-            const nameToDisplay = bh.name || bh.title || 'Partner';
-            doc.font(fontRegular).fontSize(9).text(nameToDisplay, margin + 40, y);
+            checkNewPage(40); // Check per item group
+            const nameToDisplay = bh.title || bh.name || 'Partner';
+            doc.font(fontBold).fontSize(10).fillColor('#000000').text(nameToDisplay, margin + 40, y);
 
             // Display percentage if exists - Aligned with main percentage column
-            if (bh.percentage !== undefined) {
+            if (bh.percentage !== undefined && bh.percentage !== '') {
                 doc.text(`${bh.percentage}%`, margin + 470, y, { align: 'right', width: 45 });
             }
 
             // Aligned with main Rp and Amount columns
             doc.text('Rp', margin + 360, y);
             doc.text(formatCurrencyForPDF(bh.amount), margin + 380, y, { align: 'right', width: 85 });
-            y += 16;
+            y += 18;
+
+            // Render Sub Items if they exist
+            if (bh.subItems && bh.subItems.length > 0) {
+                bh.subItems.forEach(sh => {
+                    checkNewPage(16);
+                    doc.font(fontRegular).fontSize(8.5).fillColor('#444444').text(`— ${sh.title}`, margin + 55, y);
+
+                    if (sh.percentage !== undefined && sh.percentage !== '') {
+                        doc.text(`${sh.percentage}%`, margin + 470, y, { align: 'right', width: 45 });
+                    }
+
+                    doc.text('Rp', margin + 360, y);
+                    doc.text(formatCurrencyForPDF(sh.amount), margin + 380, y, { align: 'right', width: 85 });
+                    y += 15;
+                });
+                y += 5; // Extra spacing after a group of sub-items
+            }
         });
         doc.strokeColor('#000000').lineWidth(1).moveTo(margin + 360, y).lineTo(pageWidth - margin, y).stroke();
         y += 25;
     }
 
+    checkNewPage(80); // Ensure header + Stok Awal + Stok Akhir fit together
     doc.font(fontBold).fontSize(10).fillColor('#000000').text('Nilai Stok Persediaan', margin, y);
     y += 20;
     doc.font(fontRegular).fontSize(9);
@@ -612,7 +639,108 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     doc.text(formatCurrencyForPDF(data.stok_akhir), margin + 380, y, { align: 'right', width: 85 });
 
     doc.end();
-    return new Promise((resolve, reject) => { 
+
+    return new Promise((resolve, reject) => {
+        writeStream.on('finish', () => resolve(filepath));
+        writeStream.on('error', reject);
+        doc.on('error', reject);
+    });
+}
+
+async function exportBagiHasilToPDF(report, filename, branchName, selectedMonthDate) {
+    const filepath = path.join(EXPORTS_DIR, filename);
+    const doc = new PDFDocument({ margin: 50, size: 'A4' });
+    const writeStream = fs.createWriteStream(filepath);
+    doc.pipe(writeStream);
+
+    const pageWidth = doc.page.width;
+    const margin = 50;
+    const contentWidth = pageWidth - 2 * margin;
+    let y = margin;
+
+    const fontBold = 'Helvetica-Bold';
+    const fontRegular = 'Helvetica';
+
+    const monthLabel = getMonthName(selectedMonthDate.getMonth() + 1);
+    const yearLabel = selectedMonthDate.getFullYear();
+
+    // 1. Header
+    doc.fillColor('#1e3a8a').fontSize(20).font(fontBold).text(`BAGI HASIL ${branchName.toUpperCase()}`, margin, y, { align: 'center' });
+    y += 25;
+    doc.fontSize(10).text(`Periode ${monthLabel} ${yearLabel}`, margin, y, { align: 'center' });
+    y += 30;
+
+    doc.strokeColor('#e5e7eb').lineWidth(1).moveTo(margin, y).lineTo(pageWidth - margin, y).stroke();
+    y += 20;
+
+    // 2. Summary (Simple)
+    const bagiHasilData = report.bagi_hasil || [];
+    const totalBagiHasil = Math.floor(bagiHasilData.reduce((sum, bh) => sum + (Number(bh.amount) || 0), 0));
+
+    doc.fillColor('#111827').fontSize(10).font(fontBold).text('TOTAL PROFIT', margin, y);
+    y += 15;
+    doc.fontSize(18).fillColor('#1e3a8a').text(`Rp ${formatCurrency(totalBagiHasil).replace('Rp', '').trim()}`, margin, y);
+    y += 40;
+
+    // 3. Detail Table
+    doc.fontSize(11).font(fontBold).fillColor('#111827').text('RINCIAN BAGI HASIL', margin, y);
+    y += 20;
+
+    // Table Header
+    doc.fillColor('#374151').fontSize(9).font(fontBold);
+    doc.text('PENERIMA', margin + 10, y);
+    doc.text('PORSI', margin + 300, y, { width: 50, align: 'right' });
+    doc.text('NOMINAL', margin + 380, y, { width: 100, align: 'right' });
+    y += 15;
+    doc.strokeColor('#000000').lineWidth(1).moveTo(margin, y).lineTo(pageWidth - margin, y).stroke();
+    y += 10;
+
+    bagiHasilData.forEach(bh => {
+        // Check if item will fit on page
+        if (y > doc.page.height - 120) { doc.addPage(); y = 50; }
+
+        // Parent row
+        doc.fillColor('#111827').fontSize(10).font(fontBold).text(bh.title || bh.name || 'Partner', margin + 10, y);
+        if (bh.percentage) doc.text(`${bh.percentage}%`, margin + 300, y, { width: 50, align: 'right' });
+        doc.text(`Rp ${formatCurrency(bh.amount).replace('Rp', '').trim()}`, margin + 380, y, { width: 100, align: 'right' });
+        y += 18;
+
+        // Sub items
+        if (bh.subItems && bh.subItems.length > 0) {
+            bh.subItems.forEach(sh => {
+                if (y > doc.page.height - 40) { doc.addPage(); y = 50; }
+                doc.fillColor('#4b5563').fontSize(9).font(fontRegular).text(`— ${sh.title}`, margin + 25, y);
+                if (sh.percentage) doc.text(`${sh.percentage}%`, margin + 300, y, { width: 50, align: 'right' });
+                doc.text(`Rp ${formatCurrency(sh.amount).replace('Rp', '').trim()}`, margin + 380, y, { width: 100, align: 'right' });
+                y += 15;
+            });
+            y += 5;
+        }
+
+        doc.strokeColor('#f3f4f6').lineWidth(0.5).moveTo(margin + 10, y).lineTo(pageWidth - margin, y).stroke();
+        y += 10;
+    });
+
+    y += 30;
+
+    const now = new Date();
+    const formattedDate = now.toLocaleDateString('id-ID', {
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric'
+    });
+    const formattedTime = now.toLocaleTimeString('id-ID', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+    }).replace('.', ':');
+
+    doc.fontSize(8).font(fontRegular).fillColor('#9ca3af').text(`Dokumen ini dicetak otomatis melalui Aplikasi Keuangan VERKAS pada ${formattedDate} Pukul ${formattedTime}`, margin, y, { align: 'center' });
+
+    doc.end();
+
+    return new Promise((resolve, reject) => {
         writeStream.on('finish', () => resolve(filepath));
         writeStream.on('error', reject);
         doc.on('error', reject);
@@ -623,5 +751,6 @@ module.exports = {
     exportToPDF,
     exportBukuKasToPDF,
     exportCategoryToPDF,
-    exportFinancialReportToPDF
+    exportFinancialReportToPDF,
+    exportBagiHasilToPDF
 };

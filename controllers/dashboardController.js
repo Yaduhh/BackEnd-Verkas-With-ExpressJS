@@ -24,11 +24,25 @@ function formatSection(date, items, transactions, req) {
       if ((t.is_debt_payment === true || t.is_debt_payment === 1 || t.is_debt_payment === '1') && t.category_id) {
         val = parseFloat(t.paid_amount || 0) - parseFloat(t.total_repayment || 0);
       }
+      
+      // If this is for PB1 dashboard, header income is the PB1 tax, not gross income
+      if (req.query.has_pb1 === 'true') {
+        return sum + (parseFloat(t.pb1) || 0);
+      }
+      
       return sum + val;
     }, 0);
+
+  // If for PB1, round the total income tax at the end
+  const incomeHeader = req.query.has_pb1 === 'true' ? Math.round(income) : income;
+
   const expense = transactions
     .filter(t => t.type === 'expense')
-    .reduce((sum, t) => sum + parseFloat(t.amount), 0);
+    .reduce((sum, t) => {
+      // If for PB1, only count setoran pajak
+      if (req.query.has_pb1 === 'true' && !t.is_pb1_payment) return sum;
+      return sum + parseFloat(t.amount);
+    }, 0);
 
   // Get base URL from config (prioritize config over req)
   const baseUrl = config.baseUrl || `${req.protocol}://${req.get('host')}`;
@@ -55,7 +69,7 @@ function formatSection(date, items, transactions, req) {
     dateLabel: formatDateLabel(d, 'day'),
     dayLabel: getDayName(d),
     monthLabel: formatMonthLabel(d),
-    headerIncome: income,
+    headerIncome: incomeHeader,
     headerExpense: expense,
     items: items.map(item => {
       // Parse lampiran if it's JSON string (array), otherwise use as string
@@ -103,6 +117,7 @@ function formatSection(date, items, transactions, req) {
         paid_amount: item.paid_amount !== undefined && item.paid_amount !== null ? parseFloat(item.paid_amount) : null,
         parent_transaction_id: item.parent_transaction_id || null,
         created_at: item.created_at || item.updated_at || item.createdAt || null,
+        transaction_date: item.transaction_date,
         is_pb1_payment: item.is_pb1_payment === true || item.is_pb1_payment === 1 || item.is_pb1_payment === '1',
         category_id: item.category_id || null
       };

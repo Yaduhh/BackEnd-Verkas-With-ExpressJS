@@ -19,6 +19,7 @@ const teamRoutes = require('./routes/teamRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const logRoutes = require('./routes/logRoutes');
 const masterRoutes = require('./routes/masterRoutes');
+const paymentMethodRoutes = require('./routes/paymentMethodRoutes');
 const branchReportRoutes = require('./routes/branchReportRoutes');
 
 // Initialize app
@@ -137,6 +138,7 @@ app.use('/api/teams', teamRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/logs', logRoutes);
 app.use('/api/master', masterRoutes);
+app.use('/api/payment-methods', paymentMethodRoutes);
 app.use('/api/branch-reports', branchReportRoutes);
 
 // 404 handler

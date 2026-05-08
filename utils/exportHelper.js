@@ -21,5 +21,6 @@ module.exports = {
   exportToPDF: pdf.exportToPDF,
   exportBukuKasToPDF: pdf.exportBukuKasToPDF,
   exportCategoryToPDF: pdf.exportCategoryToPDF,
-  exportFinancialReportToPDF: pdf.exportFinancialReportToPDF
+  exportFinancialReportToPDF: pdf.exportFinancialReportToPDF,
+  exportBagiHasilToPDF: pdf.exportBagiHasilToPDF
 };

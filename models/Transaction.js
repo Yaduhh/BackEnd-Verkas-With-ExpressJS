@@ -39,6 +39,16 @@ class Transaction {
     );
     transaction.savings_details = savingsDetails;
 
+    // Fetch income details
+    const incomeDetails = await query(
+      `SELECT tid.*, pm.name as payment_method_name
+       FROM transaction_income_details tid
+       JOIN payment_methods pm ON tid.payment_method_id = pm.id
+       WHERE tid.transaction_id = ?`,
+      [id]
+    );
+    transaction.income_details = incomeDetails;
+
     // SYNC: If it's a debt payment but has no multi-mitra details,
     // synthesize a virtual detail from the main transaction fields
     // to ensure Repayment (Pelunasan) and UI logic work as expected.
@@ -86,13 +96,29 @@ class Transaction {
     isUmum = undefined,
     mitraPiutangId = null,
     hasPb1 = false,
-    isPb1Payment = undefined
+    isPb1Payment = undefined,
+    paymentMethodId = null,
+    paymentMethodCategoryId = null,
+    includeIncomeDetails = false
   } = {}) {
     let selectFields = `
       SELECT t.*, c.name as category_name, COALESCE(u.name, u.email) as user_name,
              mp.nama as mitra_piutang_nama,
              tr_notif.transaction_id as parent_transaction_id,
-             COALESCE(tr_sum.total_repayment, 0) as total_repayment
+             COALESCE(tr_sum.total_repayment, 0) as total_repayment,
+             /* Standardized dynamic PB1 calculation (10/110) - Using ROUND to match Report logic */
+             CASE 
+               WHEN t.type = 'income' THEN 
+                 COALESCE(
+                   (SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                    FROM transaction_income_details tid
+                    JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                    WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
+                   t.pb1,
+                   0
+                 )
+               ELSE 0 
+             END as pb1
     `;
     let joinDetails = '';
     const params = [];
@@ -190,12 +216,42 @@ class Transaction {
     }
 
     if (hasPb1) {
-      sql += ' AND (t.pb1 > 0 OR t.is_pb1_payment = true)';
+      sql += ` AND (
+        t.pb1 > 0 
+        OR t.is_pb1_payment = true 
+        OR EXISTS (
+          SELECT 1 FROM transaction_income_details tid
+          JOIN payment_methods pm ON tid.payment_method_id = pm.id
+          WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+        )
+      )`;
     }
 
     if (isPb1Payment !== undefined) {
       sql += ' AND t.is_pb1_payment = ?';
       params.push(isPb1Payment === 'true' || isPb1Payment === true || isPb1Payment === 1);
+    }
+
+    if (paymentMethodId) {
+      sql += ` AND EXISTS (SELECT 1 FROM transaction_income_details tid WHERE tid.transaction_id = t.id AND tid.payment_method_id = ?)`;
+      params.push(paymentMethodId);
+    }
+
+    if (paymentMethodCategoryId) {
+      if (paymentMethodCategoryId === 'null') {
+        sql += ` AND EXISTS (
+          SELECT 1 FROM transaction_income_details tid 
+          JOIN payment_methods pm ON tid.payment_method_id = pm.id 
+          WHERE tid.transaction_id = t.id AND pm.category_id IS NULL
+        )`;
+      } else {
+        sql += ` AND EXISTS (
+          SELECT 1 FROM transaction_income_details tid 
+          JOIN payment_methods pm ON tid.payment_method_id = pm.id 
+          WHERE tid.transaction_id = t.id AND pm.category_id = ?
+        )`;
+        params.push(paymentMethodCategoryId);
+      }
     }
 
     // Sort
@@ -228,14 +284,31 @@ class Transaction {
       throw new Error(`Parameter count mismatch: ${params.length} params but ${placeholderCount} placeholders`);
     }
 
-    // Check for undefined/null values
     const hasInvalidParams = params.some(p => p === undefined || p === null);
     if (hasInvalidParams) {
       console.error('❌ Invalid parameters detected!', params);
       throw new Error('Invalid parameters: undefined or null values detected');
     }
 
-    return await query(sql, params);
+    const transactions = await query(sql, params);
+
+    if (includeIncomeDetails && transactions.length > 0) {
+      const transactionIds = transactions.map(t => t.id);
+      const placeholders = transactionIds.map(() => '?').join(',');
+      const incomeSql = `
+        SELECT tid.*, pm.name as payment_method_name, pm.category_id 
+        FROM transaction_income_details tid
+        LEFT JOIN payment_methods pm ON tid.payment_method_id = pm.id
+        WHERE tid.transaction_id IN (${placeholders})
+      `;
+      const allIncomeDetails = await query(incomeSql, transactionIds);
+      
+      transactions.forEach(t => {
+        t.income_details = allIncomeDetails.filter(d => d.transaction_id === t.id);
+      });
+    }
+
+    return transactions;
   }
 
   // Count total (for pagination)
@@ -253,7 +326,9 @@ class Transaction {
     isUmum = undefined,
     mitraPiutangId = null,
     hasPb1 = false,
-    isPb1Payment = undefined
+    isPb1Payment = undefined,
+    paymentMethodId = null,
+    paymentMethodCategoryId = null
   } = {}) {
     let sql = `
       SELECT COUNT(*) as total
@@ -314,8 +389,38 @@ class Transaction {
       params.push(mitraPiutangId, mitraPiutangId);
     }
 
+    if (paymentMethodId) {
+      sql += ` AND EXISTS (SELECT 1 FROM transaction_income_details tid WHERE tid.transaction_id = t.id AND tid.payment_method_id = ?)`;
+      params.push(paymentMethodId);
+    }
+
+    if (paymentMethodCategoryId) {
+      if (paymentMethodCategoryId === 'null') {
+        sql += ` AND EXISTS (
+          SELECT 1 FROM transaction_income_details tid 
+          JOIN payment_methods pm ON tid.payment_method_id = pm.id 
+          WHERE tid.transaction_id = t.id AND pm.category_id IS NULL
+        )`;
+      } else {
+        sql += ` AND EXISTS (
+          SELECT 1 FROM transaction_income_details tid 
+          JOIN payment_methods pm ON tid.payment_method_id = pm.id 
+          WHERE tid.transaction_id = t.id AND pm.category_id = ?
+        )`;
+        params.push(paymentMethodCategoryId);
+      }
+    }
+
     if (hasPb1) {
-      sql += ' AND (t.pb1 > 0 OR t.is_pb1_payment = true)';
+      sql += ` AND (
+        t.pb1 > 0 
+        OR t.is_pb1_payment = true 
+        OR EXISTS (
+          SELECT 1 FROM transaction_income_details tid
+          JOIN payment_methods pm ON tid.payment_method_id = pm.id
+          WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+        )
+      )`;
     }
 
     if (isPb1Payment !== undefined) {
@@ -329,7 +434,7 @@ class Transaction {
 
   // Create transaction
   // Create transaction
-  static async create({ userId, branchId, type, categoryId, amount, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, mitraDetails = [], savingsDetails = [], isPb1Payment = false }) {
+  static async create({ userId, branchId, type, categoryId, amount, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, mitraDetails = [], savingsDetails = [], incomeDetails = [], isPb1Payment = false }) {
     const transactionId = await dbTransaction(async (conn) => {
       const [result] = await conn.execute(
         `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, status_deleted)
@@ -361,6 +466,17 @@ class Transaction {
         }
       }
 
+      // Insert income details
+      if (incomeDetails && incomeDetails.length > 0) {
+        for (const detail of incomeDetails) {
+          await conn.execute(
+            `INSERT INTO transaction_income_details (transaction_id, payment_method_id, amount_app, amount_cashier)
+             VALUES (?, ?, ?, ?)`,
+            [newId, detail.payment_method_id, detail.amount_app || 0, detail.amount_cashier || 0]
+          );
+        }
+      }
+
       return newId;
     });
 
@@ -368,7 +484,7 @@ class Transaction {
   }
 
   // Update transaction
-  static async update(id, { type, categoryId, amount, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, mitraDetails, savingsDetails, isPb1Payment }) {
+  static async update(id, { type, categoryId, amount, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, mitraDetails, savingsDetails, incomeDetails, isPb1Payment }) {
     await dbTransaction(async (conn) => {
       const updates = [];
       const params = [];
@@ -467,6 +583,23 @@ class Transaction {
               `INSERT INTO transaction_savings_details (transaction_id, category_id, amount)
                VALUES (?, ?, ?)`,
               [id, detail.category_id, detail.amount]
+            );
+          }
+        }
+      }
+
+      // Handle income details
+      if (incomeDetails !== undefined) {
+        // Delete old details
+        await conn.execute(`DELETE FROM transaction_income_details WHERE transaction_id = ?`, [id]);
+
+        // Insert new details
+        if (incomeDetails && incomeDetails.length > 0) {
+          for (const detail of incomeDetails) {
+            await conn.execute(
+              `INSERT INTO transaction_income_details (transaction_id, payment_method_id, amount_app, amount_cashier)
+               VALUES (?, ?, ?, ?)`,
+              [id, detail.payment_method_id, detail.amount_app || 0, detail.amount_cashier || 0]
             );
           }
         }
@@ -715,7 +848,22 @@ class Transaction {
           WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryConditionForExpense}) THEN t.amount
           ELSE 0 
         END), 0) as pengeluaran,
-        COALESCE(SUM(t.pb1), 0) as total_pb1,
+        ROUND(COALESCE(SUM(
+          CASE 
+            WHEN t.type = 'income' AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN 
+              COALESCE(
+                (SELECT SUM(tid.amount_app)
+                 FROM transaction_income_details tid
+                 JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                 WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
+                /* Fallback ke kolom pb1 lama dikali 11 (karena pb1 lama itu hasil 10/110, kita butuh nilai taxable-nya buat di-SUM dulu) */
+                /* Tapi lebih aman sum pb1 langsung di luar jika tidak ada details */
+                t.pb1 * 11, 
+                0
+              )
+            ELSE 0 
+          END
+        ), 0) * 10 / 110) as total_pb1,
         COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.is_pb1_payment = true THEN t.amount ELSE 0 END), 0) as total_pb1_paid
       FROM transactions t
       LEFT JOIN categories c ON t.category_id = c.id
@@ -779,9 +927,16 @@ class Transaction {
     const { pemasukan, pengeluaran, total_pb1, total_pb1_paid } = results[0];
     const saldo = pemasukan - pengeluaran;
     const saldo_pb1 = (total_pb1 || 0) - (total_pb1_paid || 0);
-    return { pemasukan, pengeluaran, saldo, total_pb1, total_pb1_paid, saldo_pb1 };
+
+    return { 
+      pemasukan: Number(pemasukan), 
+      pengeluaran: Number(pengeluaran), 
+      saldo: Number(saldo), 
+      total_pb1: Number(total_pb1), 
+      total_pb1_paid: Number(total_pb1_paid),
+      saldo_pb1: Number(saldo_pb1)
+    };
   }
 }
 
 module.exports = Transaction;
-
