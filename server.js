@@ -41,7 +41,7 @@ const allowedOrigins = [
   'http://localhost:3000', // Backend (for testing)
   'http://127.0.0.1:3000', // Backend (for iOS simulator)
   'http://192.168.1.46:8081', // Physical device Metro
-  'http://192.168.1.6:19006', // Physical device Expo web
+  'http://192.168.1.16:19006', // Physical device Expo web
   'https://verkas.bosgilserver.cloud', // Physical device Backend
   /^http:\/\/192\.168\.\d+\.\d+:8081$/, // Physical device Metro
   /^http:\/\/192\.168\.\d+\.\d+:19006$/, // Physical device Expo web
