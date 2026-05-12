@@ -194,7 +194,11 @@ const getAll = async (req, res, next) => {
     // Format lampiran paths to full URLs for all transactions
     const formattedTransactions = transactions.map(t => ({
       ...t,
-      lampiran: formatLampiran(t.lampiran, req)
+      lampiran: formatLampiran(t.lampiran, req),
+      income_details: t.income_details ? t.income_details.map(id => ({
+        ...id,
+        lampiran: formatLampiran(id.lampiran, req)
+      })) : []
     }));
 
     res.json({
@@ -218,7 +222,7 @@ const getAll = async (req, res, next) => {
 const getById = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const transaction = await Transaction.findById(id);
+    const transaction = await Transaction.findById(id, true);
 
     if (!transaction) {
       return res.status(404).json({
@@ -240,7 +244,11 @@ const getById = async (req, res, next) => {
     // Format lampiran paths to full URLs
     const formattedTransaction = {
       ...transaction,
-      lampiran: formatLampiran(transaction.lampiran, req)
+      lampiran: formatLampiran(transaction.lampiran, req),
+      income_details: transaction.income_details ? transaction.income_details.map(id => ({
+        ...id,
+        lampiran: formatLampiran(id.lampiran, req)
+      })) : []
     };
 
     res.json({
@@ -395,11 +403,8 @@ const create = async (req, res, next) => {
       entityId: transaction.id,
       branchId: parseInt(branchId),
       newValues: {
-        type: transaction.type,
-        amount: transaction.amount,
-        category: category,
-        note: transaction.note,
-        date: transaction.transaction_date,
+        ...transaction,
+        category: category, // Include category name
       },
       ipAddress: req.ip,
       userAgent: req.get('user-agent'),
@@ -410,7 +415,11 @@ const create = async (req, res, next) => {
     // Format lampiran paths to full URLs
     const formattedTransaction = {
       ...transaction,
-      lampiran: formatLampiran(transaction.lampiran, req)
+      lampiran: formatLampiran(transaction.lampiran, req),
+      income_details: transaction.income_details ? transaction.income_details.map(id => ({
+        ...id,
+        lampiran: formatLampiran(id.lampiran, req)
+      })) : []
     };
 
     res.status(201).json({
@@ -643,22 +652,12 @@ const update = async (req, res, next) => {
       entityId: transaction.id,
       branchId: existing.branch_id,
       oldValues: {
-        type: existing.type,
-        amount: existing.amount,
+        ...existing,
         category: existing.category_name,
-        note: existing.note,
-        date: existing.transaction_date,
-        pb1: existing.pb1,
-        is_umum: existing.is_umum
       },
       newValues: {
-        type: transaction.type,
-        amount: transaction.amount,
+        ...transaction,
         category: transaction.category_name,
-        note: transaction.note,
-        date: transaction.transaction_date,
-        pb1: transaction.pb1,
-        is_umum: transaction.is_umum
       },
       changes: Object.keys(changes).length > 0 ? changes : null,
       ipAddress: req.ip,
@@ -670,7 +669,11 @@ const update = async (req, res, next) => {
     // Format lampiran paths to full URLs
     const formattedTransaction = {
       ...transaction,
-      lampiran: formatLampiran(transaction.lampiran, req)
+      lampiran: formatLampiran(transaction.lampiran, req),
+      income_details: transaction.income_details ? transaction.income_details.map(id => ({
+        ...id,
+        lampiran: formatLampiran(id.lampiran, req)
+      })) : []
     };
 
     res.json({
@@ -716,11 +719,8 @@ const softDelete = async (req, res, next) => {
       entityId: existing.id,
       branchId: existing.branch_id,
       oldValues: {
-        type: existing.type,
-        amount: existing.amount,
+        ...existing,
         category: existing.category_name,
-        note: existing.note,
-        date: existing.transaction_date,
       },
       ipAddress: req.ip,
       userAgent: req.get('user-agent'),
@@ -743,7 +743,7 @@ const restore = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    const existing = await Transaction.findById(id);
+    const existing = await Transaction.findById(id, true);
     if (!existing) {
       return res.status(404).json({
         success: false,

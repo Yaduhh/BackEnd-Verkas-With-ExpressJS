@@ -2,7 +2,7 @@ const { query, transaction: dbTransaction } = require('../config/database');
 
 class Transaction {
   // Find by ID
-  static async findById(id) {
+  static async findById(id, includeDeleted = false) {
     const results = await query(
       `SELECT t.*, c.name as category_name, COALESCE(u.name, u.email) as user_name,
               mp.nama as mitra_piutang_nama
@@ -10,7 +10,7 @@ class Transaction {
        LEFT JOIN categories c ON t.category_id = c.id
        LEFT JOIN users u ON t.user_id = u.id
        LEFT JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
-       WHERE t.id = ? AND t.status_deleted = false`,
+       WHERE t.id = ? ${includeDeleted ? '' : 'AND t.status_deleted = false'}`,
       [id]
     );
 
@@ -469,10 +469,11 @@ class Transaction {
       // Insert income details
       if (incomeDetails && incomeDetails.length > 0) {
         for (const detail of incomeDetails) {
+          const rowLampiran = detail.lampiran ? (Array.isArray(detail.lampiran) ? JSON.stringify(detail.lampiran) : detail.lampiran) : null;
           await conn.execute(
-            `INSERT INTO transaction_income_details (transaction_id, payment_method_id, amount_app, amount_cashier)
-             VALUES (?, ?, ?, ?)`,
-            [newId, detail.payment_method_id, detail.amount_app || 0, detail.amount_cashier || 0]
+            `INSERT INTO transaction_income_details (transaction_id, payment_method_id, amount_app, amount_cashier, lampiran)
+             VALUES (?, ?, ?, ?, ?)`,
+            [newId, detail.payment_method_id, detail.amount_app || 0, detail.amount_cashier || 0, rowLampiran]
           );
         }
       }
@@ -596,10 +597,11 @@ class Transaction {
         // Insert new details
         if (incomeDetails && incomeDetails.length > 0) {
           for (const detail of incomeDetails) {
+            const rowLampiran = detail.lampiran ? (Array.isArray(detail.lampiran) ? JSON.stringify(detail.lampiran) : detail.lampiran) : null;
             await conn.execute(
-              `INSERT INTO transaction_income_details (transaction_id, payment_method_id, amount_app, amount_cashier)
-               VALUES (?, ?, ?, ?)`,
-              [id, detail.payment_method_id, detail.amount_app || 0, detail.amount_cashier || 0]
+              `INSERT INTO transaction_income_details (transaction_id, payment_method_id, amount_app, amount_cashier, lampiran)
+               VALUES (?, ?, ?, ?, ?)`,
+              [id, detail.payment_method_id, detail.amount_app || 0, detail.amount_cashier || 0, rowLampiran]
             );
           }
         }
