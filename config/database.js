@@ -16,7 +16,6 @@ const pool = mysql.createPool({
   keepAliveInitialDelay: 0
 });
 
-// Test connection (non-blocking, will retry on first query)
 let connectionTested = false;
 pool.getConnection()
   .then(connection => {

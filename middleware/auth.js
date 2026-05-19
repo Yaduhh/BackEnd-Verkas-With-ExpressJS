@@ -31,6 +31,14 @@ const authenticate = async (req, res, next) => {
       });
     }
 
+    // Single-device policy for Web: Check if the token's webSessionToken matches the database
+    if (decoded.webSessionToken && user.web_session_token && decoded.webSessionToken !== user.web_session_token) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sesi Anda telah berakhir karena Anda login dari browser lain. Silakan login kembali.'
+      });
+    }
+
     // Attach user to request
     req.user = user;
     req.userId = user.id;
@@ -101,8 +109,13 @@ const authorize = (...roles) => {
 };
 
 // Generate JWT token
-const generateToken = (userId) => {
-  return jwt.sign({ userId }, config.jwtSecret, {
+const generateToken = (userId, webSessionToken = null) => {
+  const payload = { userId };
+  if (webSessionToken) {
+    payload.webSessionToken = webSessionToken;
+  }
+  
+  return jwt.sign(payload, config.jwtSecret, {
     expiresIn: config.jwtExpire
   });
 };

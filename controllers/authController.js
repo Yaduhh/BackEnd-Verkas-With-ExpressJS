@@ -1,12 +1,13 @@
 const User = require('../models/User');
 const { generateToken } = require('../middleware/auth');
 const LogService = require('../services/logService');
+const crypto = require('crypto');
 
 // Login
 const login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
-    
+
     // Find user
     const user = await User.findByEmail(email);
     if (!user) {
@@ -23,13 +24,13 @@ const login = async (req, res, next) => {
         requestMethod: req.method,
         requestPath: req.path,
       });
-      
+
       return res.status(401).json({
         success: false,
         message: 'Email tidak ditemukan. Pastikan email yang Anda masukkan benar.'
       });
     }
-    
+
     // Verify password
     const isValid = await User.verifyPassword(password, user.password_hash);
     if (!isValid) {
@@ -46,16 +47,28 @@ const login = async (req, res, next) => {
         requestMethod: req.method,
         requestPath: req.path,
       });
-      
+
       return res.status(401).json({
         success: false,
         message: 'Sandi salah. Silakan periksa kembali sandi Anda.'
       });
     }
-    
+
+    // Determine if this is a web login
+    // Usually Mobile sends 'platform' or its user-agent has 'Expo' or 'okhttp'
+    const userAgent = req.get('user-agent') || '';
+    const isMobileApp = req.body.platform === 'mobile' || userAgent.includes('Expo') || userAgent.includes('okhttp') || userAgent.includes('Dalvik');
+    const isWeb = !isMobileApp;
+
+    let webSessionToken = null;
+    if (isWeb) {
+      webSessionToken = crypto.randomUUID();
+      await User.updateWebSessionToken(user.id, webSessionToken);
+    }
+
     // Generate token
-    const token = generateToken(user.id);
-    
+    const token = generateToken(user.id, webSessionToken);
+
     // Log successful login (no branchId needed for auth logs)
     // Note: Login doesn't have branchId, so we'll log to system_logs instead
     LogService.logSystem({
@@ -73,10 +86,10 @@ const login = async (req, res, next) => {
       requestMethod: req.method,
       requestPath: req.path,
     });
-    
+
     // Return user data (without password)
     const { password_hash, status_deleted, deleted_at, ...userData } = user;
-    
+
     res.json({
       success: true,
       data: {
@@ -99,7 +112,7 @@ const getMe = async (req, res, next) => {
         message: 'User not found'
       });
     }
-    
+
     res.json({
       success: true,
       data: { user }
@@ -113,7 +126,7 @@ const getMe = async (req, res, next) => {
 const register = async (req, res, next) => {
   try {
     const { email, password, name, role = 'owner' } = req.body;
-    
+
     // Validate
     if (!email || !password) {
       return res.status(400).json({
@@ -121,11 +134,11 @@ const register = async (req, res, next) => {
         message: 'Email and password are required'
       });
     }
-    
+
     // Only allow owner role for self-registration
     // Co-owner, admin, and master must be created by existing owners
     const finalRole = role === 'owner' ? 'owner' : 'owner'; // Force owner for registration
-    
+
     // Check if email already exists
     const existing = await User.findByEmail(email);
     if (existing) {
@@ -134,16 +147,27 @@ const register = async (req, res, next) => {
         message: 'Email already registered'
       });
     }
-    
+
     // Create user (always owner for self-registration)
     const user = await User.create({ email, password, name, role: finalRole });
-    
+
+    // Determine if this is a web registration
+    const userAgent = req.get('user-agent') || '';
+    const isMobileApp = req.body.platform === 'mobile' || userAgent.includes('Expo') || userAgent.includes('okhttp') || userAgent.includes('Dalvik');
+    const isWeb = !isMobileApp;
+
+    let webSessionToken = null;
+    if (isWeb) {
+      webSessionToken = crypto.randomUUID();
+      await User.updateWebSessionToken(user.id, webSessionToken);
+    }
+
     // Generate token
-    const token = generateToken(user.id);
-    
+    const token = generateToken(user.id, webSessionToken);
+
     // Return user data (without password)
     const { password_hash, status_deleted, deleted_at, ...userData } = user;
-    
+
     res.status(201).json({
       success: true,
       data: {
@@ -180,8 +204,15 @@ const logout = async (req, res, next) => {
         requestMethod: req.method,
         requestPath: req.path,
       });
+
+      // If it's a web logout, invalidate the web session token
+      const userAgent = req.get('user-agent') || '';
+      const isMobileApp = req.body.platform === 'mobile' || userAgent.includes('Expo') || userAgent.includes('okhttp') || userAgent.includes('Dalvik');
+      if (!isMobileApp) {
+        await User.updateWebSessionToken(req.userId, null);
+      }
     }
-    
+
     res.json({
       success: true,
       message: 'Logged out successfully'
@@ -202,7 +233,7 @@ const getAdmins = async (req, res, next) => {
         message: 'Access denied. Only owner and co-owner can view admin users.'
       });
     }
-    
+
     // For co-owner, get admin users from the owner who created them
     let targetUserId = req.userId;
     if (req.user.role === 'co-owner') {
@@ -211,11 +242,11 @@ const getAdmins = async (req, res, next) => {
         targetUserId = currentUser.created_by;
       }
     }
-    
+
     // Get admin users that are assigned as PIC to owner's branches
     // This ensures we only show admins that belong to this owner's team
     const admins = await User.findAdminsByOwnerTeam(targetUserId);
-    
+
     res.json({
       success: true,
       data: {

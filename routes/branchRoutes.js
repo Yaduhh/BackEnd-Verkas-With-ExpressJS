@@ -13,6 +13,7 @@ const {
   restore,
   checkLimit
 } = require('../controllers/branchController');
+const { getLockedPeriods, toggleLock } = require('../controllers/lockedPeriodController');
 const { authenticate, authorize } = require('../middleware/auth');
 
 // All routes require authentication
@@ -50,6 +51,12 @@ router.delete('/:id', authorize('owner'), softDelete);
 
 // Restore branch (owner only)
 router.post('/:id/restore', authorize('owner'), restore);
+
+// Get locked periods for a branch (requires auth, any role can read)
+router.get('/:id/locked-periods', getLockedPeriods);
+
+// Toggle locked period (owner and co-owner only)
+router.post('/:id/toggle-lock', authorize('owner', 'co-owner'), toggleLock);
 
 module.exports = router;
 

@@ -3,6 +3,7 @@ const Transaction = require('../models/Transaction');
 const TransactionRepayment = require('../models/TransactionRepayment');
 const TransactionEdit = require('../models/TransactionEdit');
 const Category = require('../models/Category');
+const LockedPeriod = require('../models/LockedPeriod');
 const LogService = require('../services/logService');
 const config = require('../config/config');
 
@@ -284,6 +285,19 @@ const create = async (req, res, next) => {
       });
     }
 
+    // Check if the period is locked
+    const transactionDateObj = new Date(date);
+    const txMonth = transactionDateObj.getMonth() + 1;
+    const txYear = transactionDateObj.getFullYear();
+    const isLocked = await LockedPeriod.isLocked(branchId, txMonth, txYear);
+    
+    if (isLocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses Ditolak: Pembukuan untuk periode transaksi ini sudah dikunci.'
+      });
+    }
+
     // Find category by name
     const categoryRecord = await Category.findAll({
       type,
@@ -457,6 +471,35 @@ const update = async (req, res, next) => {
       });
     }
 
+    // Check if existing transaction's period is locked
+    const oldDateObj = new Date(existing.transaction_date);
+    const oldMonth = oldDateObj.getMonth() + 1;
+    const oldYear = oldDateObj.getFullYear();
+    const isOldLocked = await LockedPeriod.isLocked(existing.branch_id, oldMonth, oldYear);
+    
+    if (isOldLocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses Ditolak: Transaksi ini berada di periode yang sudah dikunci.'
+      });
+    }
+
+    // Check if new transaction's period is locked
+    const finalReqDate = transaction_date || date;
+    if (finalReqDate) {
+      const newDateObj = new Date(finalReqDate);
+      const newMonth = newDateObj.getMonth() + 1;
+      const newYear = newDateObj.getFullYear();
+      if (newMonth !== oldMonth || newYear !== oldYear) {
+        const isNewLocked = await LockedPeriod.isLocked(existing.branch_id, newMonth, newYear);
+        if (isNewLocked) {
+          return res.status(403).json({
+            success: false,
+            message: 'Akses Ditolak: Anda tidak dapat memindahkan transaksi ke periode yang sudah dikunci.'
+          });
+        }
+      }
+    }
 
     // Prepare update data
     const updateData = {};
@@ -566,7 +609,6 @@ const update = async (req, res, next) => {
       changes.note = { old: existing.note, new: note };
       changedFields.push('Catatan');
     }
-    const finalReqDate = transaction_date || date;
     if (finalReqDate !== undefined) {
       const oldD = existing.transaction_date instanceof Date ? existing.transaction_date.toISOString().split('T')[0] : existing.transaction_date;
       const newD = finalReqDate.split(' ')[0]; // Ambil YYYY-MM-DD saja
@@ -709,6 +751,19 @@ const softDelete = async (req, res, next) => {
       });
     }
 
+    // Check if existing transaction's period is locked
+    const txDateObj = new Date(existing.transaction_date);
+    const txMonth = txDateObj.getMonth() + 1;
+    const txYear = txDateObj.getFullYear();
+    const isLocked = await LockedPeriod.isLocked(existing.branch_id, txMonth, txYear);
+    
+    if (isLocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses Ditolak: Transaksi ini berada di periode yang sudah dikunci.'
+      });
+    }
+
     const result = await Transaction.softDelete(id);
 
     // Log activity
@@ -758,6 +813,19 @@ const restore = async (req, res, next) => {
       return res.status(403).json({
         success: false,
         message: 'Access denied'
+      });
+    }
+
+    // Check if existing transaction's period is locked
+    const txDateObj = new Date(existing.transaction_date);
+    const txMonth = txDateObj.getMonth() + 1;
+    const txYear = txDateObj.getFullYear();
+    const isLocked = await LockedPeriod.isLocked(existing.branch_id, txMonth, txYear);
+    
+    if (isLocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses Ditolak: Transaksi ini berada di periode yang sudah dikunci.'
       });
     }
 
