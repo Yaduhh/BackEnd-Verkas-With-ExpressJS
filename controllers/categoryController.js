@@ -1,4 +1,5 @@
 const Category = require('../models/Category');
+const Branch = require('../models/Branch');
 const LogService = require('../services/logService');
 
 // Get all categories
@@ -142,12 +143,17 @@ const update = async (req, res, next) => {
       });
     }
 
-    // Check ownership (user can only update their own categories)
-    if (!existing.is_default && existing.user_id !== req.userId) {
-      return res.status(403).json({
-        success: false,
-        message: 'Access denied'
-      });
+    // Check ownership or branch access (owner/co-owner of the branch can update any categories in that branch)
+    if (!existing.is_default) {
+      const hasAccess = existing.branch_id ? await Branch.userHasAccess(req.userId, existing.branch_id, req.user.role) : false;
+      const isOwnerOrCoOwner = req.user.role === 'owner' || req.user.role === 'co-owner';
+      
+      if (existing.user_id !== req.userId && !(isOwnerOrCoOwner && hasAccess)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied'
+        });
+      }
     }
 
     const category = await Category.update(id, {
@@ -218,12 +224,17 @@ const softDelete = async (req, res, next) => {
       });
     }
 
-    // Check ownership
-    if (!existing.is_default && existing.user_id !== req.userId) {
-      return res.status(403).json({
-        success: false,
-        message: 'Access denied'
-      });
+    // Check ownership or branch access (owner/co-owner of the branch can delete any categories in that branch)
+    if (!existing.is_default) {
+      const hasAccess = existing.branch_id ? await Branch.userHasAccess(req.userId, existing.branch_id, req.user.role) : false;
+      const isOwnerOrCoOwner = req.user.role === 'owner' || req.user.role === 'co-owner';
+      
+      if (existing.user_id !== req.userId && !(isOwnerOrCoOwner && hasAccess)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied'
+        });
+      }
     }
 
     try {

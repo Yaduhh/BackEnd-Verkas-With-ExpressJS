@@ -258,11 +258,77 @@ const getAdmins = async (req, res, next) => {
   }
 };
 
+// Change password
+const changePassword = async (req, res, next) => {
+  try {
+    const { oldPassword, newPassword } = req.body;
+
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Kata sandi lama dan baru wajib diisi'
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Kata sandi baru minimal harus 6 karakter'
+      });
+    }
+
+    // Get current user details including password_hash
+    const user = await User.findByEmail(req.user.email);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User tidak ditemukan'
+      });
+    }
+
+    // Verify old password
+    const isValid = await User.verifyPassword(oldPassword, user.password_hash);
+    if (!isValid) {
+      return res.status(400).json({
+        success: false,
+        message: 'Kata sandi lama salah'
+      });
+    }
+
+    // Change password
+    await User.changePassword(req.userId, newPassword);
+
+    // Log change password action
+    LogService.logSystem({
+      level: 'info',
+      category: 'auth',
+      message: 'User changed password successfully',
+      context: {
+        user_id: req.userId,
+        email: req.user.email
+      },
+      userId: req.userId,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+      requestMethod: req.method,
+      requestPath: req.path,
+    });
+
+    res.json({
+      success: true,
+      message: 'Kata sandi berhasil diubah'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   login,
   register,
   getMe,
   logout,
-  getAdmins
+  getAdmins,
+  changePassword
 };
 

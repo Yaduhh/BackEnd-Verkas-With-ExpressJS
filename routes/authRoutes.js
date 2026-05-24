@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { login, register, getMe, logout, getAdmins } = require('../controllers/authController');
+const { login, register, getMe, logout, getAdmins, changePassword } = require('../controllers/authController');
 const { authenticate, authorize } = require('../middleware/auth');
 const { validateLogin, handleValidationErrors } = require('../middleware/validator');
 const { body } = require('express-validator');
@@ -36,6 +36,7 @@ router.post('/logout', authenticate, logout);
 // Protected routes
 router.get('/me', authenticate, getMe);
 router.get('/admins', authenticate, authorize('owner', 'co-owner'), getAdmins);
+router.post('/change-password', authenticate, changePassword);
 
 module.exports = router;
 
