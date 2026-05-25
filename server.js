@@ -21,6 +21,7 @@ const logRoutes = require('./routes/logRoutes');
 const masterRoutes = require('./routes/masterRoutes');
 const paymentMethodRoutes = require('./routes/paymentMethodRoutes');
 const branchReportRoutes = require('./routes/branchReportRoutes');
+const appConfigRoutes = require('./routes/appConfigRoutes');
 
 // Initialize app
 const app = express();
@@ -123,6 +124,10 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Global App Version Check blocker
+const versionCheck = require('./middleware/versionCheck');
+app.use(versionCheck);
+
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/transactions', transactionRoutes);
@@ -140,6 +145,7 @@ app.use('/api/logs', logRoutes);
 app.use('/api/master', masterRoutes);
 app.use('/api/payment-methods', paymentMethodRoutes);
 app.use('/api/branch-reports', branchReportRoutes);
+app.use('/api/app-config', appConfigRoutes);
 
 // 404 handler
 app.use(notFound);
