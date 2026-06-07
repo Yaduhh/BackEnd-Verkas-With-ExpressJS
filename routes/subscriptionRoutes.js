@@ -10,11 +10,11 @@ const {
 } = require('../controllers/subscriptionController');
 const { authenticate, authorize } = require('../middleware/auth');
 
-// All routes require authentication
-router.use(authenticate);
-
-// Get all available plans (public for authenticated users)
+// Get all available plans (public)
 router.get('/plans', getPlans);
+
+// All other routes require authentication
+router.use(authenticate);
 
 // Get current subscription (owner and co-owner)
 router.get('/current', authorize('owner', 'co-owner'), getCurrent);
