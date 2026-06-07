@@ -10,12 +10,17 @@ const {
   getXenditPaymentStatus,
   verifyXenditPayment,
   xenditWebhook,
-  simulateXenditPayment
+  simulateXenditPayment,
+  createMidtransPayment,
+  midtransWebhook,
+  cancelPayment,
+  verifyMidtransPayment
 } = require('../controllers/paymentController');
 const { authenticate, authorize } = require('../middleware/auth');
 
-// Webhook routes (no auth required, but verified via token)
+// Webhook routes (no auth required, but verified via token/signature)
 router.post('/xendit/webhook', xenditWebhook);
+router.post('/midtrans/webhook', midtransWebhook);
 
 // All other routes require authentication
 router.use(authenticate);
@@ -33,6 +38,11 @@ router.get('/:id', getById);
 router.post('/:id/xendit/create', createXenditPayment);
 router.get('/xendit/:xenditId/status', getXenditPaymentStatus);
 router.post('/:id/xendit/verify', verifyXenditPayment);
+
+// Midtrans payment routes
+router.post('/:id/midtrans/create', createMidtransPayment);
+router.post('/:id/midtrans/verify', verifyMidtransPayment);
+router.post('/:id/cancel', authorize('owner', 'co-owner'), cancelPayment);
 
 // Verify payment (webhook - no auth required, but should verify signature)
 router.post('/verify', verify);

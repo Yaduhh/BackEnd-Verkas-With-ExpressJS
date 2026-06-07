@@ -8,8 +8,8 @@ const versionCheck = (req, res, next) => {
     // 1. Lewati pengecekan untuk route publik & asset static agar tidak terganggu
     const path = req.path;
     if (
-        path.startsWith('/api/app-config') || 
-        path.startsWith('/uploads') || 
+        path.startsWith('/api/app-config') ||
+        path.startsWith('/uploads') ||
         path === '/health' ||
         path === '/favicon.ico'
     ) {

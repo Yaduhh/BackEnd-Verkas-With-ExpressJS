@@ -121,23 +121,8 @@ const verify = async (req, res, next) => {
       const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
       await Payment.updateStatus(payment.id, 'paid', transaction_id, now);
       
-      // Activate subscription
-      await Subscription.updateStatus(payment.subscription_id, 'active');
-      
-      // Set start and end dates if not set
-      const subscription = await Subscription.findById(payment.subscription_id);
-      if (subscription.status === 'active') {
-        const startDate = new Date();
-        const endDate = new Date(startDate);
-        
-        if (subscription.billing_period === 'monthly') {
-          endDate.setMonth(endDate.getMonth() + 1);
-        } else {
-          endDate.setFullYear(endDate.getFullYear() + 1);
-        }
-        
-        await Subscription.updateEndDate(payment.subscription_id, endDate.toISOString().split('T')[0]);
-      }
+      // Activate or extend subscription
+      const subscription = await Subscription.activateOrExtend(payment.subscription_id);
       
       // Send notification to user - NON-BLOCKING
       setImmediate(async () => {
@@ -241,19 +226,7 @@ const updateStatus = async (req, res, next) => {
     
     // If paid, activate subscription
     if (status === 'paid' && payment.status === 'pending') {
-      await Subscription.updateStatus(payment.subscription_id, 'active');
-      
-      const subscription = await Subscription.findById(payment.subscription_id);
-      const startDate = new Date();
-      const endDate = new Date(startDate);
-      
-      if (subscription.billing_period === 'monthly') {
-        endDate.setMonth(endDate.getMonth() + 1);
-      } else {
-        endDate.setFullYear(endDate.getFullYear() + 1);
-      }
-      
-      await Subscription.updateEndDate(payment.subscription_id, endDate.toISOString().split('T')[0]);
+      await Subscription.activateOrExtend(payment.subscription_id);
     }
     
     res.json({
@@ -856,6 +829,370 @@ const simulateXenditPayment = async (req, res, next) => {
   }
 };
 
+// Create Midtrans payment
+const createMidtransPayment = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    
+    // Get payment
+    const payment = await Payment.findById(id);
+    
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner' && req.user.created_by) {
+      targetUserId = req.user.created_by;
+    }
+    
+    if (!payment || payment.user_id !== targetUserId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Payment not found'
+      });
+    }
+    
+    // Check if payment already has Midtrans transaction
+    if (payment.payment_provider === 'midtrans' && payment.midtrans_token) {
+      return res.json({
+        success: true,
+        message: 'Midtrans transaction already exists',
+        data: {
+          payment,
+          midtrans: {
+            token: payment.midtrans_token,
+            redirect_url: payment.midtrans_redirect_url
+          }
+        }
+      });
+    }
+    
+    // Create Midtrans transaction
+    const midtransService = require('../services/midtransService');
+    const orderId = `PAYMENT-${payment.id}-${Date.now()}`;
+    
+    const midtransRes = await midtransService.createSnapTransaction({
+      orderId,
+      grossAmount: payment.amount,
+      customerDetails: {
+        name: req.user.name,
+        email: req.user.email,
+        phone: req.user.phone || ''
+      }
+    });
+    
+    // Update payment record in database
+    await require('../config/database').query(
+      `UPDATE payments 
+       SET payment_provider = 'midtrans', 
+           transaction_id = ?, 
+           midtrans_token = ?, 
+           midtrans_redirect_url = ? 
+       WHERE id = ?`,
+      [orderId, midtransRes.token, midtransRes.redirect_url, payment.id]
+    );
+    
+    // Reload payment
+    const updatedPayment = await Payment.findById(payment.id);
+    
+    res.json({
+      success: true,
+      message: 'Midtrans transaction created successfully',
+      data: {
+        payment: updatedPayment,
+        midtrans: {
+          token: midtransRes.token,
+          redirect_url: midtransRes.redirect_url
+        }
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Midtrans webhook handler
+const midtransWebhook = async (req, res, next) => {
+  try {
+    const midtransService = require('../services/midtransService');
+    const payload = req.body;
+    
+    // Verify signature key
+    if (!midtransService.verifyWebhookSignature(payload)) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid signature key'
+      });
+    }
+    
+    const { order_id, transaction_status } = payload;
+    
+    // Parse paymentId from order_id (format: PAYMENT-{id}-{timestamp})
+    const match = order_id.match(/PAYMENT-(\d+)-/);
+    if (!match) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid order ID format'
+      });
+    }
+    
+    const paymentId = parseInt(match[1]);
+    const payment = await Payment.findById(paymentId);
+    if (!payment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Payment not found'
+      });
+    }
+    
+    // Update status based on transaction_status
+    if (transaction_status === 'settlement' || transaction_status === 'capture') {
+      if (payment.status === 'pending') {
+        const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        await Payment.updateStatus(payment.id, 'paid', order_id, now);
+        
+        // Activate subscription
+        await Subscription.updateStatus(payment.subscription_id, 'active');
+        
+        const subscription = await Subscription.findById(payment.subscription_id);
+        if (subscription && subscription.status === 'active') {
+          const startDate = new Date();
+          const endDate = new Date(startDate);
+          
+          if (subscription.billing_period === 'monthly') {
+            endDate.setMonth(endDate.getMonth() + 1);
+          } else {
+            endDate.setFullYear(endDate.getFullYear() + 1);
+          }
+          
+          await Subscription.updateEndDate(payment.subscription_id, endDate.toISOString().split('T')[0]);
+        }
+        
+        // Push notification
+        setImmediate(async () => {
+          try {
+            const notificationQueue = require('../services/notificationQueue');
+            const SubscriptionPlan = require('../models/SubscriptionPlan');
+            const plan = await SubscriptionPlan.findById(subscription.plan_id);
+            
+            const amountStr = new Intl.NumberFormat('id-ID', {
+              style: 'currency',
+              currency: 'IDR',
+              minimumFractionDigits: 0
+            }).format(payment.amount);
+            
+            notificationQueue.enqueue({
+              userId: subscription.user_id,
+              title: 'Pembayaran Berhasil',
+              body: `Pembayaran subscription ${plan?.name || 'Plan'} sebesar ${amountStr} telah berhasil via Midtrans`,
+              data: {
+                screen: 'subscription',
+                paymentId: payment.id,
+                subscriptionId: subscription.id,
+                type: 'payment_success',
+              },
+            });
+          } catch (notifError) {
+            console.error('Error queuing notification:', notifError);
+          }
+        });
+      }
+    } else if (['deny', 'cancel', 'expire', 'failure'].includes(transaction_status)) {
+      if (payment.status === 'pending') {
+        await Payment.updateStatus(payment.id, 'failed', order_id);
+        
+        // Push notification
+        setImmediate(async () => {
+          try {
+            const notificationQueue = require('../services/notificationQueue');
+            const subscription = await Subscription.findById(payment.subscription_id);
+            
+            const amountStr = new Intl.NumberFormat('id-ID', {
+              style: 'currency',
+              currency: 'IDR',
+              minimumFractionDigits: 0
+            }).format(payment.amount);
+            
+            notificationQueue.enqueue({
+              userId: subscription.user_id,
+              title: 'Pembayaran Gagal',
+              body: `Pembayaran sebesar ${amountStr} gagal/kedaluwarsa. Silakan coba lagi.`,
+              data: {
+                screen: 'payment',
+                paymentId: payment.id,
+                type: 'payment_failed',
+              },
+            });
+          } catch (notifError) {
+            console.error('Error queuing notification:', notifError);
+          }
+        });
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: 'Webhook processed successfully'
+    });
+  } catch (error) {
+    console.error('❌ Midtrans Webhook Error:', error.message);
+    next(error);
+  }
+};
+
+// Cancel payment and subscription
+const cancelPayment = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    
+    // Find payment
+    const payment = await Payment.findById(id);
+    
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner' && req.user.created_by) {
+      targetUserId = req.user.created_by;
+    }
+    
+    if (!payment || payment.user_id !== targetUserId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Payment not found'
+      });
+    }
+    
+    if (payment.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'Only pending payments can be cancelled'
+      });
+    }
+    
+    // If it has a Midtrans transaction, cancel it in Midtrans
+    if (payment.payment_provider === 'midtrans' && payment.transaction_id) {
+      const midtransService = require('../services/midtransService');
+      try {
+        await midtransService.cancelTransaction(payment.transaction_id);
+        console.log(`✅ Cancelled transaction ${payment.transaction_id} in Midtrans`);
+      } catch (midtransError) {
+        console.warn(`⚠️ Failed to cancel transaction in Midtrans:`, midtransError.message);
+      }
+    }
+    
+    // Update local payment status to failed (cancelled/failed)
+    await Payment.updateStatus(payment.id, 'failed', payment.transaction_id);
+    
+    // Cancel subscription status to cancelled
+    await Subscription.updateStatus(payment.subscription_id, 'cancelled');
+    
+    // Reload payment
+    const updatedPayment = await Payment.findById(payment.id);
+    
+    res.json({
+      success: true,
+      message: 'Transaksi berhasil dibatalkan',
+      data: { payment: updatedPayment }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Verify/sync status directly from Midtrans API (fallback if webhook fails or on localhost)
+const verifyMidtransPayment = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const payment = await Payment.findById(id);
+    
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner' && req.user.created_by) {
+      targetUserId = req.user.created_by;
+    }
+    
+    if (!payment || payment.user_id !== targetUserId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Payment not found'
+      });
+    }
+
+    if (payment.status === 'paid') {
+      return res.json({
+        success: true,
+        message: 'Payment is already paid',
+        data: { payment }
+      });
+    }
+
+    if (!payment.transaction_id || payment.payment_provider !== 'midtrans') {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment is not a Midtrans transaction or has no transaction ID'
+      });
+    }
+
+    const midtransClient = require('midtrans-client');
+    const config = require('../config/config');
+    const snap = new midtransClient.Snap({
+      isProduction: config.midtrans.isProduction,
+      serverKey: config.midtrans.serverKey,
+      clientKey: config.midtrans.clientKey
+    });
+
+    let statusResponse;
+    try {
+      statusResponse = await snap.transaction.status(payment.transaction_id);
+    } catch (err) {
+      console.error('Error fetching Midtrans status:', err.message);
+      return res.status(500).json({
+        success: false,
+        message: `Failed to fetch Midtrans status: ${err.message}`
+      });
+    }
+
+    const { transaction_status } = statusResponse;
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+    if (transaction_status === 'settlement' || transaction_status === 'capture') {
+      await Payment.updateStatus(payment.id, 'paid', payment.transaction_id, now);
+      await Subscription.updateStatus(payment.subscription_id, 'active');
+      
+      const subscription = await Subscription.findById(payment.subscription_id);
+      if (subscription) {
+        const startDate = new Date();
+        const endDate = new Date(startDate);
+        if (subscription.billing_period === 'monthly') {
+          endDate.setMonth(endDate.getMonth() + 1);
+        } else {
+          endDate.setFullYear(endDate.getFullYear() + 1);
+        }
+        await Subscription.updateEndDate(payment.subscription_id, endDate.toISOString().split('T')[0]);
+      }
+      
+      const updatedPayment = await Payment.findById(payment.id);
+      return res.json({
+        success: true,
+        message: 'Payment verified successfully as PAID',
+        data: { payment: updatedPayment }
+      });
+    } else if (['deny', 'cancel', 'expire', 'failure'].includes(transaction_status)) {
+      await Payment.updateStatus(payment.id, 'failed', payment.transaction_id);
+      await Subscription.updateStatus(payment.subscription_id, 'cancelled');
+      
+      const updatedPayment = await Payment.findById(payment.id);
+      return res.json({
+        success: true,
+        message: 'Payment verified as FAILED/CANCELLED',
+        data: { payment: updatedPayment }
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Payment status is ${transaction_status}`,
+      data: { payment }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getPending,
   getAll,
@@ -866,6 +1203,10 @@ module.exports = {
   getXenditPaymentStatus,
   verifyXenditPayment,
   xenditWebhook,
-  simulateXenditPayment
+  simulateXenditPayment,
+  createMidtransPayment,
+  midtransWebhook,
+  cancelPayment,
+  verifyMidtransPayment
 };
 

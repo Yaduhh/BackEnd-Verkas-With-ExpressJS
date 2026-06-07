@@ -9,15 +9,20 @@ const authenticate = async (req, res, next) => {
     // Note: React Native fetch may convert headers to lowercase
     // So we check both 'authorization' and 'Authorization'
     const authHeader = req.headers.authorization || req.headers.Authorization;
+    let token = null;
 
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7);
+    } else if (req.query.token) {
+      token = req.query.token;
+    }
+
+    if (!token) {
       return res.status(401).json({
         success: false,
         message: 'No token provided'
       });
     }
-
-    const token = authHeader.substring(7); // Remove 'Bearer ' prefix
 
     // Verify token
     const decoded = jwt.verify(token, config.jwtSecret);

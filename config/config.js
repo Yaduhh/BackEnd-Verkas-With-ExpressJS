@@ -29,6 +29,13 @@ module.exports = {
     secretKey: process.env.XENDIT_SECRET_KEY,
     publicKey: process.env.XENDIT_PUBLIC_KEY,
     webhookToken: process.env.XENDIT_WEBHOOK_TOKEN
+  },
+
+  // Midtrans
+  midtrans: {
+    serverKey: process.env.MIDTRANS_SERVER_KEY,
+    clientKey: process.env.MIDTRANS_CLIENT_KEY,
+    isProduction: process.env.MIDTRANS_IS_PRODUCTION === 'true'
   }
 };
 

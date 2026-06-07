@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { decodeId } = require('../utils/obfuscator');
 const {
   getAll,
   getById,
@@ -30,6 +31,18 @@ router.use(authenticate);
 
 // Add branch context (optional, will check in controller)
 router.use(optionalBranchContext);
+
+// Parameter middleware to automatically decode transaction ID if it is obfuscated
+router.param('id', (req, res, next, id) => {
+  if (id && !/^\d+$/.test(id)) {
+    const decoded = decodeId(id);
+    if (isNaN(decoded)) {
+      return res.status(400).json({ message: 'Format ID Transaksi tidak valid' });
+    }
+    req.params.id = decoded.toString();
+  }
+  next();
+});
 
 // Get all transactions
 router.get('/', getAll);

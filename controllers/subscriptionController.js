@@ -130,9 +130,55 @@ const create = async (req, res, next) => {
     // Check if user already has active subscription
     const existing = await Subscription.getActiveSubscription(targetUserId);
     if (existing) {
+      // If it's a renewal/extension of the same plan with the same billing period
+      if (existing.plan_id === plan_id && existing.billing_period === billing_period) {
+        // Check if there is already a pending payment for this subscription
+        const pendingPayment = await require('../config/database').query(
+          "SELECT * FROM payments WHERE subscription_id = ? AND status = 'pending' LIMIT 1",
+          [existing.id]
+        );
+        if (pendingPayment.length > 0) {
+          return res.status(400).json({
+            success: false,
+            message: 'Anda memiliki tagihan perpanjangan yang masih menunggu pembayaran. Silakan selesaikan pembayaran tersebut.'
+          });
+        }
+
+        // Calculate amount
+        const amount = billing_period === 'monthly' ? plan.price_monthly : plan.price_yearly;
+        
+        // Create a new renewal payment for the existing active subscription
+        const now = new Date();
+        const dueDate = new Date(now);
+        dueDate.setDate(dueDate.getDate() + 1); // due in 1 day for renewal
+
+        const payment = await Payment.create({
+          subscriptionId: existing.id,
+          amount: amount,
+          paymentMethod: 'manual',
+          dueDate: dueDate.toISOString().split('T')[0]
+        });
+
+        return res.status(201).json({
+          success: true,
+          message: 'Tagihan perpanjangan berhasil dibuat.',
+          data: {
+            subscription: existing,
+            payment
+          }
+        });
+      }
+
+      // If it's a different plan (upgrade/downgrade), we allow creating a new subscription record
+      // which will immediately replace the active one once paid.
+    }
+
+    // Check if user already has pending subscription
+    const pending = await Subscription.getPendingSubscription(targetUserId);
+    if (pending) {
       return res.status(400).json({
         success: false,
-        message: 'You already have an active subscription'
+        message: 'Anda memiliki pemesanan paket yang masih menunggu pembayaran. Silakan selesaikan atau batalkan pembayaran tersebut terlebih dahulu.'
       });
     }
     
