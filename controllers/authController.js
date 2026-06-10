@@ -31,6 +31,27 @@ const login = async (req, res, next) => {
       });
     }
 
+    // Check maintenance mode in database
+    const { query } = require('../config/database');
+    try {
+      const maintenanceResult = await query("SELECT value FROM system_settings WHERE `key` = 'maintenance_mode'");
+      if (maintenanceResult.length > 0) {
+        const isMaintenance = JSON.parse(maintenanceResult[0].value);
+        const userRole = (user.role || '').toLowerCase().trim();
+        
+        console.log(`[Login Maintenance Check] Email: ${user.email}, Role: ${user.role}, isMaintenance: ${isMaintenance}`);
+        
+        if (isMaintenance && userRole !== 'master') {
+          return res.status(503).json({
+            success: false,
+            message: 'VerKas sedang dalam pemeliharaan sistem terjadwal. Silakan coba beberapa saat lagi.'
+          });
+        }
+      }
+    } catch (dbErr) {
+      console.error('[Login Maintenance Check Error]', dbErr);
+    }
+
     // Verify password
     const isValid = await User.verifyPassword(password, user.password_hash);
     if (!isValid) {
@@ -126,6 +147,23 @@ const getMe = async (req, res, next) => {
 const register = async (req, res, next) => {
   try {
     const { email, password, name, role = 'owner' } = req.body;
+
+    // Check maintenance mode in database
+    const { query } = require('../config/database');
+    try {
+      const maintenanceResult = await query("SELECT value FROM system_settings WHERE \`key\` = 'maintenance_mode'");
+      if (maintenanceResult.length > 0) {
+        const isMaintenance = JSON.parse(maintenanceResult[0].value);
+        if (isMaintenance) {
+          return res.status(503).json({
+            success: false,
+            message: 'VerKas sedang dalam pemeliharaan sistem terjadwal. Silakan coba beberapa saat lagi.'
+          });
+        }
+      }
+    } catch (dbErr) {
+      // Ignore if table/setting doesn't exist yet
+    }
 
     // Validate
     if (!email || !password) {

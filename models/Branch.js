@@ -226,17 +226,17 @@ class Branch {
   }
   
   // Create branch (owner only)
-  static async create({ name, address, phone, ownerId, teamId = null, picId = null }) {
+  static async create({ name, address, phone, ownerId, teamId = null, picId = null, requireEditApproval = false, requireDeleteApproval = false, requireAttachment = false }) {
     const result = await query(
-      `INSERT INTO branches (name, address, phone, owner_id, team_id, pic_id, status_active, status_deleted)
-       VALUES (?, ?, ?, ?, ?, ?, true, false)`,
-      [name, address || null, phone || null, ownerId, teamId, picId]
+      `INSERT INTO branches (name, address, phone, owner_id, team_id, pic_id, status_active, status_deleted, require_edit_approval, require_delete_approval, require_attachment)
+       VALUES (?, ?, ?, ?, ?, ?, true, false, ?, ?, ?)`,
+      [name, address || null, phone || null, ownerId, teamId, picId, requireEditApproval, requireDeleteApproval, requireAttachment]
     );
     return await this.findById(result.insertId);
   }
   
   // Update branch (owner only)
-  static async update(id, { name, address, phone, picId, statusActive }) {
+  static async update(id, { name, address, phone, picId, statusActive, requireEditApproval, requireDeleteApproval, requireAttachment }) {
     const updates = [];
     const params = [];
     
@@ -259,6 +259,18 @@ class Branch {
     if (statusActive !== undefined) {
       updates.push('status_active = ?');
       params.push(statusActive);
+    }
+    if (requireEditApproval !== undefined) {
+      updates.push('require_edit_approval = ?');
+      params.push(requireEditApproval);
+    }
+    if (requireDeleteApproval !== undefined) {
+      updates.push('require_delete_approval = ?');
+      params.push(requireDeleteApproval);
+    }
+    if (requireAttachment !== undefined) {
+      updates.push('require_attachment = ?');
+      params.push(requireAttachment);
     }
     
     if (updates.length === 0) return await this.findById(id);

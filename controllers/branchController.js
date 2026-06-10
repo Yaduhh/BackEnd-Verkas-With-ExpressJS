@@ -135,7 +135,7 @@ const create = async (req, res, next) => {
       });
     }
     
-    const { name, address, phone, pic_id, pic_ids, team_id } = req.body;
+    const { name, address, phone, pic_id, pic_ids, team_id, require_edit_approval, require_delete_approval, require_attachment } = req.body;
     
     if (!name) {
       return res.status(400).json({
@@ -201,7 +201,10 @@ const create = async (req, res, next) => {
       phone,
       ownerId: req.userId,
       teamId: finalTeamId,
-      picId: picIds.length > 0 ? picIds[0] : null // For backward compatibility
+      picId: picIds.length > 0 ? picIds[0] : null, // For backward compatibility
+      requireEditApproval: require_edit_approval === true || require_edit_approval === 'true' || require_edit_approval === 1,
+      requireDeleteApproval: require_delete_approval === true || require_delete_approval === 'true' || require_delete_approval === 1,
+      requireAttachment: require_attachment === true || require_attachment === 'true' || require_attachment === 1
     });
     
     // Set multiple PICs if provided
@@ -244,7 +247,7 @@ const update = async (req, res, next) => {
       });
     }
     
-    const { name, address, phone, pic_id, status_active } = req.body;
+    const { name, address, phone, pic_id, status_active, require_edit_approval, require_delete_approval, require_attachment } = req.body;
     
     // Verify PIC if provided
     if (pic_id !== undefined && pic_id !== null) {
@@ -262,7 +265,10 @@ const update = async (req, res, next) => {
       address,
       phone,
       picId: pic_id,
-      statusActive: status_active
+      statusActive: status_active,
+      requireEditApproval: require_edit_approval !== undefined ? (require_edit_approval === true || require_edit_approval === 'true' || require_edit_approval === 1) : undefined,
+      requireDeleteApproval: require_delete_approval !== undefined ? (require_delete_approval === true || require_delete_approval === 'true' || require_delete_approval === 1) : undefined,
+      requireAttachment: require_attachment !== undefined ? (require_attachment === true || require_attachment === 'true' || require_attachment === 1) : undefined
     });
     
     res.json({

@@ -5,7 +5,7 @@ module.exports = {
   port: process.env.PORT || 3000,
   env: process.env.NODE_ENV || 'development',
   baseUrl: process.env.BASE_URL || (process.env.NODE_ENV === 'production'
-    ? 'https://verkas.bosgilserver.cloud'
+    ? 'http://10.127.31.2383000'
     : 'http://localhost:3000'),
 
   // JWT

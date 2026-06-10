@@ -551,7 +551,9 @@ const getAllBranches = async (req, res, next) => {
     const includeDeletedBool = includeDeleted === 'true' || includeDeleted === true;
 
     let sql = `SELECT b.*, u.name as owner_name, u.email as owner_email,
-               (SELECT COUNT(*) FROM transactions WHERE branch_id = b.id AND status_deleted = false) as transaction_count
+               (SELECT COUNT(*) FROM transactions WHERE branch_id = b.id AND status_deleted = false) as transaction_count,
+               COALESCE((SELECT SUM(amount) FROM transactions WHERE branch_id = b.id AND type = 'income' AND status_deleted = false), 0) as total_income,
+               COALESCE((SELECT SUM(amount) FROM transactions WHERE branch_id = b.id AND type = 'expense' AND status_deleted = false), 0) as total_expense
                FROM branches b
                LEFT JOIN users u ON b.owner_id = u.id
                WHERE 1=1`;
@@ -648,7 +650,7 @@ const getAllTransactions = async (req, res, next) => {
       SELECT t.*, c.name as category_name,
              b.name as branch_name, u.name as user_name, u.email as user_email
       FROM transactions t
-      JOIN categories c ON t.category_id = c.id
+      LEFT JOIN categories c ON t.category_id = c.id
       LEFT JOIN branches b ON t.branch_id = b.id
       LEFT JOIN users u ON t.user_id = u.id
       WHERE 1=1
@@ -698,7 +700,7 @@ const getAllTransactions = async (req, res, next) => {
     let countSql = `
       SELECT COUNT(*) as count
       FROM transactions t
-      JOIN categories c ON t.category_id = c.id
+      LEFT JOIN categories c ON t.category_id = c.id
       LEFT JOIN branches b ON t.branch_id = b.id
       LEFT JOIN users u ON t.user_id = u.id
       WHERE 1=1
@@ -978,13 +980,14 @@ const getAllPayments = async (req, res, next) => {
     const params = [];
 
     // Default: only show paid payments
-    if (status && status !== 'undefined' && status !== '') {
+    if (status && status !== 'undefined' && status !== '' && status !== 'all') {
       sql += ' AND p.status = ?';
       params.push(status);
-    } else {
+    } else if (!status || status === 'undefined' || status === '') {
       sql += ' AND p.status = ?';
       params.push('paid');
     }
+    // If status === 'all', no filter added → returns all statuses
 
     // Filter by month and year (based on paid_at date)
     if (month && month !== 'undefined' && month !== '') {
@@ -1010,10 +1013,10 @@ const getAllPayments = async (req, res, next) => {
     const countParams = [];
 
     // Default: only show paid payments
-    if (status && status !== 'undefined' && status !== '') {
+    if (status && status !== 'undefined' && status !== '' && status !== 'all') {
       countSql += ' AND p.status = ?';
       countParams.push(status);
-    } else {
+    } else if (!status || status === 'undefined' || status === '') {
       countSql += ' AND p.status = ?';
       countParams.push('paid');
     }
@@ -1045,10 +1048,10 @@ const getAllPayments = async (req, res, next) => {
     const totalAmountParams = [];
 
     // Default: only show paid payments
-    if (status && status !== 'undefined' && status !== '') {
+    if (status && status !== 'undefined' && status !== '' && status !== 'all') {
       totalAmountSql += ' AND p.status = ?';
       totalAmountParams.push(status);
-    } else {
+    } else if (!status || status === 'undefined' || status === '') {
       totalAmountSql += ' AND p.status = ?';
       totalAmountParams.push('paid');
     }
@@ -1355,10 +1358,10 @@ const approvePayment = async (req, res, next) => {
       });
     }
 
-    if (payment.status !== 'pending') {
+    if (payment.status === 'paid') {
       return res.status(400).json({
         success: false,
-        message: `Payment is already ${payment.status}. Only pending payments can be approved.`
+        message: 'Payment is already paid.'
       });
     }
 
@@ -1488,6 +1491,82 @@ const broadcastNotification = async (req, res, next) => {
   }
 };
 
+// Get system settings
+const getSystemSettings = async (req, res, next) => {
+  try {
+    // Ensure table exists
+    await query(`
+      CREATE TABLE IF NOT EXISTS system_settings (
+        \`key\` VARCHAR(255) PRIMARY KEY,
+        \`value\` TEXT,
+        \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+
+    const results = await query('SELECT * FROM system_settings');
+    const settings = {};
+    results.forEach(row => {
+      try {
+        settings[row.key] = JSON.parse(row.value);
+      } catch (e) {
+        settings[row.key] = row.value;
+      }
+    });
+
+    // Default values if not in DB
+    const defaultSettings = {
+      maintenance_mode: false,
+      allow_registration: true,
+      payment_sandbox: true,
+      default_branch_limit: 3,
+      min_password_length: 6,
+      smtp_host: 'smtp.verkas.id',
+      smtp_user: 'noreply@verkas.id'
+    };
+
+    res.json({
+      success: true,
+      data: {
+        ...defaultSettings,
+        ...settings
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Update system settings
+const updateSystemSettings = async (req, res, next) => {
+  try {
+    const settings = req.body;
+
+    // Ensure table exists
+    await query(`
+      CREATE TABLE IF NOT EXISTS system_settings (
+        \`key\` VARCHAR(255) PRIMARY KEY,
+        \`value\` TEXT,
+        \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+
+    for (const [key, value] of Object.entries(settings)) {
+      const stringValue = JSON.stringify(value);
+      await query(
+        'INSERT INTO system_settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = ?',
+        [key, stringValue, stringValue]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'System settings updated successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getOverview,
   getAllUsers,
@@ -1510,5 +1589,7 @@ module.exports = {
   deletePlan,
   approvePayment,
   getActiveDeviceTokens,
-  broadcastNotification
+  broadcastNotification,
+  getSystemSettings,
+  updateSystemSettings
 };

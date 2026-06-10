@@ -22,7 +22,9 @@ const {
   deletePlan,
   approvePayment,
   getActiveDeviceTokens,
-  broadcastNotification
+  broadcastNotification,
+  getSystemSettings,
+  updateSystemSettings
 } = require('../controllers/masterController');
 const { authenticate, authorize } = require('../middleware/auth');
 
@@ -56,6 +58,10 @@ router.get('/categories', getAllCategories);
 // Logs
 router.get('/activity-logs', getAllActivityLogs);
 router.get('/system-logs', getAllSystemLogs);
+
+// System Settings
+router.get('/settings', getSystemSettings);
+router.post('/settings', updateSystemSettings);
 
 // Payments & Subscriptions
 router.get('/payments', getAllPayments);

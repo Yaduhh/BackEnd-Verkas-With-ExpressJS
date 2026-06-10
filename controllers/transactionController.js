@@ -285,6 +285,26 @@ const create = async (req, res, next) => {
       });
     }
 
+    const branchData = await Branch.findById(branchId);
+    if (!branchData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Branch not found'
+      });
+    }
+
+    // Check if attachment is required
+    const isLampiranEmpty = !lampiran || 
+      (Array.isArray(lampiran) && lampiran.length === 0) || 
+      (typeof lampiran === 'string' && (lampiran.trim() === '' || lampiran === '[]'));
+      
+    if (branchData.require_attachment === 1 && isLampiranEmpty) {
+      return res.status(400).json({
+        success: false,
+        message: 'Bukti transaksi (lampiran) wajib diunggah untuk cabang ini.'
+      });
+    }
+
     // Check if the period is locked
     const transactionDateObj = new Date(date);
     const txMonth = transactionDateObj.getMonth() + 1;
@@ -468,6 +488,37 @@ const update = async (req, res, next) => {
       return res.status(403).json({
         success: false,
         message: 'Access denied'
+      });
+    }
+
+    const branchData = await Branch.findById(existing.branch_id);
+    if (!branchData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Branch not found'
+      });
+    }
+
+    // 1. Approval requirement for Admin
+    if (req.user.role === 'admin' && branchData.require_edit_approval === 1) {
+      if (existing.edit_accepted !== 2) {
+        return res.status(403).json({
+          success: false,
+          message: 'Akses Ditolak: Perubahan transaksi ini memerlukan persetujuan Owner terlebih dahulu.'
+        });
+      }
+    }
+
+    // 2. Attachment requirement
+    const finalLampiran = lampiran !== undefined ? lampiran : existing.lampiran;
+    const isLampiranEmpty = !finalLampiran || 
+      (Array.isArray(finalLampiran) && finalLampiran.length === 0) || 
+      (typeof finalLampiran === 'string' && (finalLampiran.trim() === '' || finalLampiran === '[]'));
+      
+    if (branchData.require_attachment === 1 && isLampiranEmpty) {
+      return res.status(400).json({
+        success: false,
+        message: 'Bukti transaksi (lampiran) wajib diunggah untuk cabang ini.'
       });
     }
 
@@ -751,6 +802,24 @@ const softDelete = async (req, res, next) => {
       });
     }
 
+    const branchData = await Branch.findById(existing.branch_id);
+    if (!branchData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Branch not found'
+      });
+    }
+
+    // Check if delete approval is required for Admin role
+    if (req.user.role === 'admin' && branchData.require_delete_approval === 1) {
+      if (existing.delete_accepted !== 2) {
+        return res.status(403).json({
+          success: false,
+          message: 'Akses Ditolak: Penghapusan transaksi ini memerlukan persetujuan Owner terlebih dahulu.'
+        });
+      }
+    }
+
     // Check if existing transaction's period is locked
     const txDateObj = new Date(existing.transaction_date);
     const txMonth = txDateObj.getMonth() + 1;
@@ -968,7 +1037,7 @@ const requestEdit = async (req, res, next) => {
         lampiran: existing.lampiran
       },
       newData: null, // Data baru belum diinput
-      status: 'approved'
+      status: 'pending'
     });
 
     // Send notification to branch owner + team owners (if branch belongs to a team) - NON-BLOCKING
@@ -1689,6 +1758,305 @@ const deleteRepayment = async (req, res, next) => {
   }
 };
 
+// Request delete (admin only)
+const requestDelete = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Hanya admin yang dapat mengajukan permintaan hapus'
+      });
+    }
+
+    if (!reason || reason.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Alasan hapus wajib diisi'
+      });
+    }
+
+    const existing = await Transaction.findById(id);
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Transaction not found'
+      });
+    }
+
+    const Branch = require('../models/Branch');
+    const hasAccess = await Branch.userHasAccess(req.userId, existing.branch_id, req.user.role);
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    if (existing.delete_requested_by && existing.delete_requested_by === req.userId && existing.delete_accepted === 1) {
+      return res.status(400).json({
+        success: false,
+        message: 'Anda sudah memiliki permintaan hapus yang sedang menunggu persetujuan'
+      });
+    }
+
+    const transaction = await Transaction.requestDelete(id, req.userId, reason.trim());
+
+    // Log delete request to history
+    await TransactionEdit.create({
+      transactionId: id,
+      requesterId: req.userId,
+      reason: reason.trim(),
+      oldData: {
+        amount: existing.amount,
+        category: existing.category_name,
+        note: existing.note,
+        date: existing.transaction_date,
+        lampiran: existing.lampiran
+      },
+      newData: { action: 'delete' },
+      status: 'pending'
+    });
+
+    // Send notification to branch owner + team owners - NON-BLOCKING
+    setImmediate(async () => {
+      try {
+        const notificationQueue = require('../services/notificationQueue');
+        const branch = await Branch.findById(existing.branch_id);
+        const User = require('../models/User');
+        const admin = await User.findById(req.userId);
+
+        const targetUserIds = new Set();
+        if (branch?.team_id) {
+          const OwnerTeam = require('../models/OwnerTeam');
+          const members = await OwnerTeam.getMembers(branch.team_id);
+          members
+            .filter((m) => m.role === 'owner' && m.status === 'active')
+            .forEach((m) => targetUserIds.add(m.user_id));
+        } else if (branch?.owner_id) {
+          targetUserIds.add(branch.owner_id);
+        }
+
+        if (targetUserIds.size > 0) {
+          const amount = new Intl.NumberFormat('id-ID', {
+            style: 'currency',
+            currency: 'IDR',
+            minimumFractionDigits: 0
+          }).format(existing.amount);
+
+          notificationQueue.enqueue({
+            userId: [...targetUserIds],
+            title: 'Delete Request',
+            body: `Admin ${admin?.name || admin?.email || 'Admin'} meminta izin untuk menghapus transaksi ${amount}`,
+            data: {
+              screen: 'requests',
+              transactionId: parseInt(id),
+              branchId: existing.branch_id,
+              type: 'delete_request',
+            },
+          });
+        }
+      } catch (notifError) {
+        console.error('❌ Error queuing delete notification:', notifError);
+      }
+    });
+
+    const formattedTransaction = {
+      ...transaction,
+      lampiran: formatLampiran(transaction.lampiran, req)
+    };
+
+    res.json({
+      success: true,
+      message: 'Permintaan hapus berhasil diajukan. Menunggu persetujuan owner.',
+      data: { transaction: formattedTransaction }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Approve delete request (owner and co-owner only)
+const approveDelete = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
+      return res.status(403).json({
+        success: false,
+        message: 'Hanya owner dan co-owner yang dapat menyetujui permintaan hapus'
+      });
+    }
+
+    const existing = await Transaction.findById(id);
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Transaction not found'
+      });
+    }
+
+    const Branch = require('../models/Branch');
+    const hasAccess = await Branch.userHasAccess(req.userId, existing.branch_id, req.user.role);
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    if (!existing.delete_requested_by || existing.delete_accepted !== 1) {
+      return res.status(400).json({
+        success: false,
+        message: 'Tidak ada permintaan hapus yang menunggu persetujuan'
+      });
+    }
+
+    // Approve request
+    await Transaction.approveDelete(id);
+
+    // Update history status
+    await TransactionEdit.updateStatus(id, 'approved', req.userId);
+
+    // Call softDelete logic directly to perform the actual deletion
+    const result = await Transaction.softDelete(id);
+
+    // Log activity
+    LogService.logActivity({
+      userId: req.userId,
+      action: 'approve_delete_transaction',
+      entityType: 'transaction',
+      entityId: existing.id,
+      branchId: existing.branch_id,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+      requestMethod: req.method,
+      requestPath: req.path,
+    });
+
+    // Send notification to admin who requested delete - NON-BLOCKING
+    if (existing.delete_requested_by) {
+      setImmediate(async () => {
+        try {
+          const notificationQueue = require('../services/notificationQueue');
+          const amount = new Intl.NumberFormat('id-ID', {
+            style: 'currency',
+            currency: 'IDR',
+            minimumFractionDigits: 0
+          }).format(existing.amount);
+
+          notificationQueue.enqueue({
+            userId: existing.delete_requested_by,
+            title: 'Delete Request Disetujui',
+            body: `Permintaan hapus untuk transaksi ${amount} telah disetujui`,
+            data: {
+              screen: 'dashboard',
+              branchId: existing.branch_id,
+              type: 'delete_approved',
+            },
+          });
+        } catch (notifError) {
+          console.error('Error queuing delete approved notification:', notifError);
+        }
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Permintaan hapus berhasil disetujui dan transaksi telah dihapus',
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Reject delete request (owner and co-owner only)
+const rejectDelete = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
+      return res.status(403).json({
+        success: false,
+        message: 'Hanya owner dan co-owner yang dapat menolak permintaan hapus'
+      });
+    }
+
+    const existing = await Transaction.findById(id);
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Transaction not found'
+      });
+    }
+
+    const Branch = require('../models/Branch');
+    const hasAccess = await Branch.userHasAccess(req.userId, existing.branch_id, req.user.role);
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    if (!existing.delete_requested_by || existing.delete_accepted !== 1) {
+      return res.status(400).json({
+        success: false,
+        message: 'Tidak ada permintaan hapus yang menunggu persetujuan'
+      });
+    }
+
+    const transaction = await Transaction.rejectDelete(id);
+
+    // Update history status
+    await TransactionEdit.updateStatus(id, 'rejected', req.userId);
+
+    // Send notification to admin who requested delete - NON-BLOCKING
+    if (existing.delete_requested_by) {
+      setImmediate(async () => {
+        try {
+          const notificationQueue = require('../services/notificationQueue');
+          const amount = new Intl.NumberFormat('id-ID', {
+            style: 'currency',
+            currency: 'IDR',
+            minimumFractionDigits: 0
+          }).format(existing.amount);
+
+          notificationQueue.enqueue({
+            userId: existing.delete_requested_by,
+            title: 'Delete Request Ditolak',
+            body: `Permintaan hapus untuk transaksi ${amount} telah ditolak`,
+            data: {
+              screen: 'transaction_detail',
+              transactionId: parseInt(id),
+              branchId: existing.branch_id,
+              type: 'delete_rejected',
+            },
+          });
+        } catch (notifError) {
+          console.error('Error queuing delete rejected notification:', notifError);
+        }
+      });
+    }
+
+    const formattedTransaction = {
+      ...transaction,
+      lampiran: formatLampiran(transaction.lampiran, req)
+    };
+
+    res.json({
+      success: true,
+      message: 'Permintaan hapus ditolak',
+      data: { transaction: formattedTransaction }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAll,
   getSummary,
@@ -1701,6 +2069,9 @@ module.exports = {
   requestEdit,
   approveEdit,
   rejectEdit,
+  requestDelete,
+  approveDelete,
+  rejectDelete,
   getEditRequests,
   getHistory,
   createRepayment,

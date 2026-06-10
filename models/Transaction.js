@@ -615,7 +615,7 @@ class Transaction {
   static async requestEdit(id, userId, reason) {
     await query(
       `UPDATE transactions 
-       SET edit_reason = ?, edit_requested_by = ?, edit_accepted = 2 
+       SET edit_reason = ?, edit_requested_by = ?, edit_accepted = 1 
        WHERE id = ? AND status_deleted = false`,
       [reason, userId, id]
     );
@@ -649,6 +649,50 @@ class Transaction {
     await query(
       `UPDATE transactions 
        SET edit_accepted = 0, edit_reason = NULL, edit_requested_by = NULL 
+       WHERE id = ? AND status_deleted = false`,
+      [id]
+    );
+    return await this.findById(id);
+  }
+
+  // Request delete (admin only) - set delete_reason and delete_requested_by, delete_accepted = 1 (pengajuan)
+  static async requestDelete(id, userId, reason) {
+    await query(
+      `UPDATE transactions 
+       SET delete_reason = ?, delete_requested_by = ?, delete_accepted = 1 
+       WHERE id = ? AND status_deleted = false`,
+      [reason, userId, id]
+    );
+    return await this.findById(id);
+  }
+
+  // Approve delete request (owner only) - set delete_accepted = 2 (disetujui)
+  static async approveDelete(id) {
+    await query(
+      `UPDATE transactions 
+       SET delete_accepted = 2 
+       WHERE id = ? AND status_deleted = false`,
+      [id]
+    );
+    return await this.findById(id);
+  }
+
+  // Reject delete request (owner only) - set delete_accepted = 3 (ditolak)
+  static async rejectDelete(id) {
+    await query(
+      `UPDATE transactions 
+       SET delete_accepted = 3 
+       WHERE id = ? AND status_deleted = false`,
+      [id]
+    );
+    return await this.findById(id);
+  }
+
+  // Clear delete request
+  static async clearDeleteRequest(id) {
+    await query(
+      `UPDATE transactions 
+       SET delete_accepted = 0, delete_reason = NULL, delete_requested_by = NULL 
        WHERE id = ? AND status_deleted = false`,
       [id]
     );
@@ -748,12 +792,14 @@ class Transaction {
   static async getEditRequests({ userId, branchId, userRole, status }) {
     let sql = `
       SELECT t.*, c.name as category_name,
-             u.name as requester_name, u.email as requester_email
+             COALESCE(ue.name, ud.name) as requester_name, 
+             COALESCE(ue.email, ud.email) as requester_email
       FROM transactions t
-      JOIN categories c ON t.category_id = c.id
-      LEFT JOIN users u ON t.edit_requested_by = u.id
+      LEFT JOIN categories c ON t.category_id = c.id
+      LEFT JOIN users ue ON t.edit_requested_by = ue.id
+      LEFT JOIN users ud ON t.delete_requested_by = ud.id
       WHERE t.status_deleted = false
-      AND t.edit_requested_by IS NOT NULL
+      AND (t.edit_requested_by IS NOT NULL OR t.delete_requested_by IS NOT NULL)
     `;
     const params = [];
 
@@ -762,45 +808,44 @@ class Transaction {
       sql += ' AND t.branch_id = ?';
       params.push(branchId);
     } else {
-      // If no branchId, filter by user's accessible branches
-      if (userRole === 'owner') {
-        // Owner: get all branches they own
-        sql += ` AND t.branch_id IN (
-          SELECT id FROM branches WHERE owner_id = ? AND status_deleted = false
-        )`;
-        params.push(userId);
-      } else if (userRole === 'admin') {
-        // Admin: get branches where they are PIC
-        sql += ` AND t.branch_id IN (
-          SELECT id FROM branches WHERE pic_id = ? AND status_deleted = false
-        )`;
-        params.push(userId);
+      // Retrieve all branches this user has access to (works for owner, co-owner, and admin)
+      const Branch = require('./Branch');
+      const accessibleBranches = await Branch.findByUserAccess(userId, userRole);
+      if (accessibleBranches.length > 0) {
+        const branchIds = accessibleBranches.map(b => b.id);
+        sql += ` AND t.branch_id IN (${branchIds.map(() => '?').join(',')})`;
+        params.push(...branchIds);
+      } else {
+        // No accessible branches, force empty result
+        sql += ' AND 1=0';
       }
     }
 
     // Filter by status
     // 0 = default, 1 = pengajuan (pending), 2 = disetujui (approved), 3 = ditolak (rejected)
     if (status === 'pending') {
-      sql += ' AND t.edit_accepted = 1';
+      sql += ' AND (t.edit_accepted = 1 OR t.delete_accepted = 1)';
     } else if (status === 'approved') {
-      sql += ' AND t.edit_accepted = 2';
+      sql += ' AND (t.edit_accepted = 2 OR t.delete_accepted = 2)';
     } else if (status === 'rejected') {
-      sql += ' AND t.edit_accepted = 3';
+      sql += ' AND (t.edit_accepted = 3 OR t.delete_accepted = 3)';
     }
 
     // Role-based filtering
     if (userRole === 'admin') {
       // Admin: only see their own requests
-      sql += ' AND t.edit_requested_by = ?';
-      params.push(userId);
-    } else if (userRole === 'owner') {
-      // Owner: see all requests for their branches (already filtered by branch above)
+      sql += ' AND (t.edit_requested_by = ? OR t.delete_requested_by = ?)';
+      params.push(userId, userId);
+    } else if (userRole === 'owner' || userRole === 'co-owner') {
+      // Owner and Co-owner: see all requests for their branches (already filtered by branch above)
     }
 
     // Sort by request date (newest first)
     sql += ' ORDER BY t.updated_at DESC, t.created_at DESC';
 
-    return await query(sql, params);
+    const results = await query(sql, params);
+
+    return results;
   }
 
   // Get summary for date range

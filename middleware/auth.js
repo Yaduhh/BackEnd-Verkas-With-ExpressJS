@@ -36,6 +36,27 @@ const authenticate = async (req, res, next) => {
       });
     }
 
+    // Check maintenance mode in database
+    const { query } = require('../config/database');
+    try {
+      const maintenanceResult = await query("SELECT value FROM system_settings WHERE `key` = 'maintenance_mode'");
+      if (maintenanceResult.length > 0) {
+        const isMaintenance = JSON.parse(maintenanceResult[0].value);
+        const userRole = (user.role || '').toLowerCase().trim();
+        
+        console.log(`[Maintenance Check] Email: ${user.email}, Role: ${user.role}, isMaintenance: ${isMaintenance}`);
+        
+        if (isMaintenance && userRole !== 'master') {
+          return res.status(503).json({
+            success: false,
+            message: 'VerKas sedang dalam pemeliharaan sistem terjadwal. Silakan coba beberapa saat lagi.'
+          });
+        }
+      }
+    } catch (dbErr) {
+      console.error('[Maintenance Check Error]', dbErr);
+    }
+
     // Single-device policy for Web: Check if the token's webSessionToken matches the database
     if (decoded.webSessionToken && user.web_session_token && decoded.webSessionToken !== user.web_session_token) {
       return res.status(401).json({

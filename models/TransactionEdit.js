@@ -23,7 +23,7 @@ class TransactionEdit {
 
   static async getHistory(transactionId) {
     return await query(
-      `SELECT te.*, r.name as requester_name, a.name as approver_name
+      `SELECT te.*, r.name as requester_name, r.role as requester_role, a.name as approver_name, a.role as approver_role
        FROM transaction_edits te
        JOIN users r ON te.requester_id = r.id
        LEFT JOIN users a ON te.approver_id = a.id

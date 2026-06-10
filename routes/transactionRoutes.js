@@ -12,6 +12,9 @@ const {
   requestEdit,
   approveEdit,
   rejectEdit,
+  requestDelete,
+  approveDelete,
+  rejectDelete,
   getEditRequests,
   getSummary,
   getHistory,
@@ -82,6 +85,15 @@ router.post('/:id/approve-edit', approveEdit);
 
 // Reject edit request (owner and co-owner only)
 router.post('/:id/reject-edit', rejectEdit);
+
+// Request delete (admin only)
+router.post('/:id/request-delete', requestDelete);
+
+// Approve delete request (owner and co-owner only)
+router.post('/:id/approve-delete', approveDelete);
+
+// Reject delete request (owner and co-owner only)
+router.post('/:id/reject-delete', rejectDelete);
 
 // Repayment
 router.post('/:id/repayment', createRepayment);
