@@ -77,10 +77,25 @@ const getById = async (req, res, next) => {
         message: 'Access denied'
       });
     }
+
+    // Fetch payment settings
+    const { query } = require('../config/database');
+    let paymentSandbox = true;
+    try {
+      const settingsResult = await query("SELECT value FROM system_settings WHERE `key` = 'payment_sandbox'");
+      if (settingsResult && settingsResult.length > 0) {
+        paymentSandbox = JSON.parse(settingsResult[0].value);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch payment_sandbox setting, default to true:', e.message);
+    }
     
     res.json({
       success: true,
-      data: { payment }
+      data: { 
+        payment,
+        payment_sandbox: paymentSandbox
+      }
     });
   } catch (error) {
     next(error);

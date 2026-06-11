@@ -1237,7 +1237,7 @@ const getAllPlans = async (req, res, next) => {
 
 const createPlan = async (req, res, next) => {
   try {
-    const { name, description, max_branches, price_monthly, price_yearly, features, is_active } = req.body;
+    const { name, description, max_branches, max_admin, price_monthly, price_yearly, features, is_active } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({
@@ -1250,6 +1250,7 @@ const createPlan = async (req, res, next) => {
       name: name.trim(),
       description: description?.trim() || null,
       maxBranches: max_branches ? parseInt(max_branches) : null,
+      maxAdmin: max_admin !== undefined && max_admin !== null && max_admin !== '' ? parseInt(max_admin) : null,
       priceMonthly: price_monthly ? parseFloat(price_monthly) : null,
       priceYearly: price_yearly ? parseFloat(price_yearly) : null,
       features: features || []
@@ -1282,7 +1283,7 @@ const createPlan = async (req, res, next) => {
 const updatePlan = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, description, max_branches, price_monthly, price_yearly, features, is_active } = req.body;
+    const { name, description, max_branches, max_admin, price_monthly, price_yearly, features, is_active } = req.body;
 
     const plan = await SubscriptionPlan.findById(toSafeInt(id), true); // Include inactive
     if (!plan) {
@@ -1296,6 +1297,7 @@ const updatePlan = async (req, res, next) => {
     if (name !== undefined) updateData.name = name.trim();
     if (description !== undefined) updateData.description = description?.trim() || null;
     if (max_branches !== undefined) updateData.maxBranches = max_branches ? parseInt(max_branches) : null;
+    if (max_admin !== undefined) updateData.maxAdmin = max_admin !== null && max_admin !== '' ? parseInt(max_admin) : null;
     if (price_monthly !== undefined) updateData.priceMonthly = price_monthly ? parseFloat(price_monthly) : null;
     if (price_yearly !== undefined) updateData.priceYearly = price_yearly ? parseFloat(price_yearly) : null;
     if (features !== undefined) updateData.features = features || [];
@@ -1519,6 +1521,7 @@ const getSystemSettings = async (req, res, next) => {
       allow_registration: true,
       payment_sandbox: true,
       default_branch_limit: 3,
+      default_admin_limit: 2,
       min_password_length: 6,
       smtp_host: 'smtp.verkas.id',
       smtp_user: 'noreply@verkas.id'

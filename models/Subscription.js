@@ -4,7 +4,7 @@ class Subscription {
   // Find by ID
   static async findById(id) {
     const results = await query(
-      `SELECT s.*, p.name as plan_name, p.max_branches, p.price_monthly, p.price_yearly
+      `SELECT s.*, p.name as plan_name, p.max_branches, p.max_admin, p.price_monthly, p.price_yearly
        FROM subscriptions s
        JOIN subscription_plans p ON s.plan_id = p.id
        WHERE s.id = ?`,
@@ -16,7 +16,7 @@ class Subscription {
   // Find by user ID
   static async findByUserId(userId) {
     const results = await query(
-      `SELECT s.*, p.name as plan_name, p.max_branches, p.price_monthly, p.price_yearly
+      `SELECT s.*, p.name as plan_name, p.max_branches, p.max_admin, p.price_monthly, p.price_yearly
        FROM subscriptions s
        JOIN subscription_plans p ON s.plan_id = p.id
        WHERE s.user_id = ?
@@ -30,7 +30,7 @@ class Subscription {
   static async getActiveSubscription(userId) {
     const today = new Date().toISOString().split('T')[0];
     const results = await query(
-      `SELECT s.*, p.name as plan_name, p.max_branches, p.price_monthly, p.price_yearly
+      `SELECT s.*, p.name as plan_name, p.max_branches, p.max_admin, p.price_monthly, p.price_yearly
        FROM subscriptions s
        JOIN subscription_plans p ON s.plan_id = p.id
        WHERE s.user_id = ? AND s.status = 'active' AND s.end_date >= ?
@@ -44,7 +44,7 @@ class Subscription {
   // Get pending subscription for user
   static async getPendingSubscription(userId) {
     const results = await query(
-      `SELECT s.*, p.name as plan_name, p.max_branches, p.price_monthly, p.price_yearly
+      `SELECT s.*, p.name as plan_name, p.max_branches, p.max_admin, p.price_monthly, p.price_yearly
        FROM subscriptions s
        JOIN subscription_plans p ON s.plan_id = p.id
        WHERE s.user_id = ? AND s.status = 'pending'

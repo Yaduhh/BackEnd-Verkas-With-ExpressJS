@@ -6,6 +6,67 @@ const getAll = async (req, res, next) => {
   try {
     const branches = await Branch.findByUserAccess(req.userId, req.user.role);
     
+    // Determine the branch limit
+    if (req.user.role === 'owner' || req.user.role === 'co-owner') {
+      let targetUserId = req.userId;
+      if (req.user.role === 'co-owner' && req.user.created_by) {
+        targetUserId = req.user.created_by;
+      }
+      
+      const Subscription = require('../models/Subscription');
+      const subscription = await Subscription.getActiveSubscription(targetUserId);
+      
+      let maxBranches = 1;
+      if (subscription) {
+        const SubscriptionPlan = require('../models/SubscriptionPlan');
+        const plan = await SubscriptionPlan.findById(subscription.plan_id);
+        maxBranches = plan?.max_branches || 1;
+      } else {
+        const { query } = require('../config/database');
+        try {
+          const settingsResult = await query("SELECT value FROM system_settings WHERE `key` = 'default_branch_limit'");
+          if (settingsResult && settingsResult.length > 0) {
+            maxBranches = parseInt(JSON.parse(settingsResult[0].value)) || 1;
+          }
+        } catch (e) {
+          console.warn('Failed to fetch default_branch_limit setting:', e.message);
+        }
+      }
+      
+      if (maxBranches !== null) {
+        // Find branches owned by this owner
+        let ownerBranches = branches.filter(b => b.owner_id === targetUserId);
+        
+        // Sort owner branches by created_at ASC (oldest first)
+        ownerBranches.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        
+        // Map of branch ID to lock status
+        const lockedBranchIds = new Set();
+        ownerBranches.forEach((branch, index) => {
+          if (index >= maxBranches) {
+            lockedBranchIds.add(branch.id);
+          }
+        });
+        
+        // Attach is_locked property to branches
+        branches.forEach(branch => {
+          if (lockedBranchIds.has(branch.id)) {
+            branch.is_locked = true;
+          } else {
+            branch.is_locked = false;
+          }
+        });
+      } else {
+        branches.forEach(branch => {
+          branch.is_locked = false;
+        });
+      }
+    } else {
+      branches.forEach(branch => {
+        branch.is_locked = false;
+      });
+    }
+
     res.json({
       success: true,
       data: { branches }
@@ -35,6 +96,49 @@ const getById = async (req, res, next) => {
         success: false,
         message: 'No access to this branch'
       });
+    }
+
+    // Check if the branch is locked due to subscription limit
+    if (req.user.role === 'owner' || req.user.role === 'co-owner') {
+      let targetUserId = req.userId;
+      if (req.user.role === 'co-owner' && req.user.created_by) {
+        targetUserId = req.user.created_by;
+      }
+      
+      // Get all owner branches to determine lock status
+      const allBranches = await Branch.findByOwner(targetUserId);
+      allBranches.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      
+      const Subscription = require('../models/Subscription');
+      const subscription = await Subscription.getActiveSubscription(targetUserId);
+      
+      let maxBranches = 1;
+      if (subscription) {
+        const SubscriptionPlan = require('../models/SubscriptionPlan');
+        const plan = await SubscriptionPlan.findById(subscription.plan_id);
+        maxBranches = plan?.max_branches || 1;
+      } else {
+        const { query } = require('../config/database');
+        try {
+          const settingsResult = await query("SELECT value FROM system_settings WHERE `key` = 'default_branch_limit'");
+          if (settingsResult && settingsResult.length > 0) {
+            maxBranches = parseInt(JSON.parse(settingsResult[0].value)) || 1;
+          }
+        } catch (e) {
+          console.warn('Failed to fetch default_branch_limit setting:', e.message);
+        }
+      }
+      
+      if (maxBranches !== null) {
+        const branchIndex = allBranches.findIndex(b => b.id === parseInt(id));
+        if (branchIndex >= maxBranches) {
+          return res.status(403).json({
+            success: false,
+            message: 'Buku kas ini terkunci karena batas limit cabang aktif terlampaui. Silakan upgrade paket langganan Anda.',
+            code: 'BRANCH_LOCKED'
+          });
+        }
+      }
     }
     
     res.json({
@@ -75,7 +179,7 @@ const getCurrent = async (req, res, next) => {
           });
         }
       }
-      
+
       // Return first branch from user access
       const branches = await Branch.findByUserAccess(req.userId, req.user.role);
       if (branches.length > 0) {
@@ -84,13 +188,13 @@ const getCurrent = async (req, res, next) => {
           data: { branch: branches[0] }
         });
       }
-      
+
       return res.status(404).json({
         success: false,
         message: 'No branches found'
       });
     }
-    
+
     return res.status(404).json({
       success: false,
       message: 'No branches found'
@@ -109,21 +213,31 @@ const create = async (req, res, next) => {
         message: 'Only owners and co-owners can create branches'
       });
     }
-    
+
     // Check if user can create more branches
     const canCreate = await Branch.canCreateBranch(req.userId, req.user.role);
     if (!canCreate) {
       const count = await Branch.countUserBranches(req.userId, req.user.role);
       const Subscription = require('../models/Subscription');
       const subscription = await Subscription.getActiveSubscription(req.userId);
-      
-      let maxBranches = 1; // Free plan default
+
+      let maxBranches = 1;
       if (subscription) {
         const SubscriptionPlan = require('../models/SubscriptionPlan');
         const plan = await SubscriptionPlan.findById(subscription.plan_id);
         maxBranches = plan?.max_branches || 1;
+      } else {
+        const { query } = require('../config/database');
+        try {
+          const settingsResult = await query("SELECT value FROM system_settings WHERE `key` = 'default_branch_limit'");
+          if (settingsResult && settingsResult.length > 0) {
+            maxBranches = parseInt(JSON.parse(settingsResult[0].value)) || 1;
+          }
+        } catch (e) {
+          console.warn('Failed to fetch default_branch_limit setting:', e.message);
+        }
       }
-      
+
       return res.status(403).json({
         success: false,
         message: 'Branch limit reached. Please upgrade your subscription.',
@@ -134,19 +248,19 @@ const create = async (req, res, next) => {
         }
       });
     }
-    
+
     const { name, address, phone, pic_id, pic_ids, team_id, require_edit_approval, require_delete_approval, require_attachment } = req.body;
-    
+
     if (!name) {
       return res.status(400).json({
         success: false,
         message: 'Branch name is required'
       });
     }
-    
+
     // Support both pic_id (single, backward compatibility) and pic_ids (array)
     const picIds = pic_ids || (pic_id ? [pic_id] : []);
-    
+
     // Verify all PICs if provided
     if (picIds.length > 0) {
       for (const pid of picIds) {
@@ -159,15 +273,15 @@ const create = async (req, res, next) => {
         }
       }
     }
-    
+
     // Auto-determine team_id if not provided
     let finalTeamId = team_id || null;
     if (!finalTeamId) {
       const OwnerTeam = require('../models/OwnerTeam');
-      
+
       // Get current user to check created_by
       const currentUser = await User.findById(req.userId);
-      
+
       if (req.user.role === 'co-owner' && currentUser && currentUser.created_by) {
         // Co-owner: always use team from the owner who created them
         const creatorTeams = await OwnerTeam.findByUserId(currentUser.created_by);
@@ -194,7 +308,7 @@ const create = async (req, res, next) => {
         }
       }
     }
-    
+
     const branch = await Branch.create({
       name,
       address,
@@ -206,7 +320,7 @@ const create = async (req, res, next) => {
       requireDeleteApproval: require_delete_approval === true || require_delete_approval === 'true' || require_delete_approval === 1,
       requireAttachment: require_attachment === true || require_attachment === 'true' || require_attachment === 1
     });
-    
+
     // Set multiple PICs if provided
     if (picIds.length > 0) {
       await Branch.setPICs(branch.id, picIds);
@@ -214,7 +328,7 @@ const create = async (req, res, next) => {
       const updatedBranch = await Branch.findById(branch.id);
       branch.pics = updatedBranch.pics;
     }
-    
+
     res.status(201).json({
       success: true,
       message: 'Branch created successfully',
@@ -230,14 +344,14 @@ const update = async (req, res, next) => {
   try {
     const { id } = req.params;
     const branch = await Branch.findById(id);
-    
+
     if (!branch) {
       return res.status(404).json({
         success: false,
         message: 'Branch not found'
       });
     }
-    
+
     // Check access (owner and co-owner)
     const hasAccess = await Branch.userHasAccess(req.userId, parseInt(id), req.user.role);
     if (!hasAccess) {
@@ -246,9 +360,9 @@ const update = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     const { name, address, phone, pic_id, status_active, require_edit_approval, require_delete_approval, require_attachment } = req.body;
-    
+
     // Verify PIC if provided
     if (pic_id !== undefined && pic_id !== null) {
       const pic = await User.findById(pic_id);
@@ -259,7 +373,7 @@ const update = async (req, res, next) => {
         });
       }
     }
-    
+
     const updatedBranch = await Branch.update(id, {
       name,
       address,
@@ -270,7 +384,7 @@ const update = async (req, res, next) => {
       requireDeleteApproval: require_delete_approval !== undefined ? (require_delete_approval === true || require_delete_approval === 'true' || require_delete_approval === 1) : undefined,
       requireAttachment: require_attachment !== undefined ? (require_attachment === true || require_attachment === 'true' || require_attachment === 1) : undefined
     });
-    
+
     res.json({
       success: true,
       message: 'Branch updated successfully',
@@ -286,14 +400,14 @@ const assignPIC = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { pic_id } = req.body;
-    
+
     if (!pic_id) {
       return res.status(400).json({
         success: false,
         message: 'PIC ID is required'
       });
     }
-    
+
     const branch = await Branch.findById(id);
     if (!branch) {
       return res.status(404).json({
@@ -301,7 +415,7 @@ const assignPIC = async (req, res, next) => {
         message: 'Branch not found'
       });
     }
-    
+
     // Check access (owner and co-owner)
     const hasAccess = await Branch.userHasAccess(req.userId, parseInt(id), req.user.role);
     if (!hasAccess) {
@@ -310,9 +424,9 @@ const assignPIC = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     const updatedBranch = await Branch.assignPIC(id, pic_id);
-    
+
     res.json({
       success: true,
       message: 'PIC assigned successfully',
@@ -334,7 +448,7 @@ const removePIC = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { pic_id } = req.body; // Optional: remove specific PIC, if not provided remove all
-    
+
     const branch = await Branch.findById(id);
     if (!branch) {
       return res.status(404).json({
@@ -342,7 +456,7 @@ const removePIC = async (req, res, next) => {
         message: 'Branch not found'
       });
     }
-    
+
     // Check access (owner and co-owner)
     const hasAccess = await Branch.userHasAccess(req.userId, parseInt(id), req.user.role);
     if (!hasAccess) {
@@ -351,9 +465,9 @@ const removePIC = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     const updatedBranch = await Branch.removePIC(id, pic_id || null);
-    
+
     res.json({
       success: true,
       message: pic_id ? 'PIC removed successfully' : 'All PICs removed successfully',
@@ -369,14 +483,14 @@ const setPICs = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { pic_ids } = req.body; // Array of PIC IDs
-    
+
     if (!Array.isArray(pic_ids)) {
       return res.status(400).json({
         success: false,
         message: 'pic_ids must be an array'
       });
     }
-    
+
     const branch = await Branch.findById(id);
     if (!branch) {
       return res.status(404).json({
@@ -384,7 +498,7 @@ const setPICs = async (req, res, next) => {
         message: 'Branch not found'
       });
     }
-    
+
     // Check access (owner and co-owner)
     const hasAccess = await Branch.userHasAccess(req.userId, parseInt(id), req.user.role);
     if (!hasAccess) {
@@ -393,9 +507,9 @@ const setPICs = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     const updatedBranch = await Branch.setPICs(id, pic_ids);
-    
+
     res.json({
       success: true,
       message: 'PICs updated successfully',
@@ -416,7 +530,7 @@ const setPICs = async (req, res, next) => {
 const softDelete = async (req, res, next) => {
   try {
     const { id } = req.params;
-    
+
     const branch = await Branch.findById(id);
     if (!branch) {
       return res.status(404).json({
@@ -424,7 +538,7 @@ const softDelete = async (req, res, next) => {
         message: 'Branch not found'
       });
     }
-    
+
     // Check access (owner and co-owner)
     const hasAccess = await Branch.userHasAccess(req.userId, parseInt(id), req.user.role);
     if (!hasAccess) {
@@ -433,9 +547,9 @@ const softDelete = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     const result = await Branch.softDelete(id);
-    
+
     res.json({
       success: true,
       message: 'Branch deleted successfully',
@@ -450,7 +564,7 @@ const softDelete = async (req, res, next) => {
 const restore = async (req, res, next) => {
   try {
     const { id } = req.params;
-    
+
     const branch = await Branch.findById(id);
     if (!branch) {
       return res.status(404).json({
@@ -458,7 +572,7 @@ const restore = async (req, res, next) => {
         message: 'Branch not found'
       });
     }
-    
+
     // Check access (owner and co-owner)
     const hasAccess = await Branch.userHasAccess(req.userId, parseInt(id), req.user.role);
     if (!hasAccess) {
@@ -467,9 +581,9 @@ const restore = async (req, res, next) => {
         message: 'Access denied'
       });
     }
-    
+
     const restoredBranch = await Branch.restore(id);
-    
+
     res.json({
       success: true,
       message: 'Branch restored successfully',
@@ -492,26 +606,36 @@ const checkLimit = async (req, res, next) => {
         }
       });
     }
-    
+
     // For co-owner, use subscription from the owner who created them
     let targetUserId = req.userId;
     if (req.user.role === 'co-owner' && req.user.created_by) {
       targetUserId = req.user.created_by;
     }
-    
+
     const canCreate = await Branch.canCreateBranch(targetUserId, req.user.role);
     const count = await Branch.countUserBranches(req.userId, req.user.role);
-    
+
     const Subscription = require('../models/Subscription');
     const subscription = await Subscription.getActiveSubscription(targetUserId);
-    
-    let maxBranches = 1; // Free plan default
+
+    let maxBranches = 1;
     if (subscription) {
       const SubscriptionPlan = require('../models/SubscriptionPlan');
       const plan = await SubscriptionPlan.findById(subscription.plan_id);
       maxBranches = plan?.max_branches || 1;
+    } else {
+      const { query } = require('../config/database');
+      try {
+        const settingsResult = await query("SELECT value FROM system_settings WHERE `key` = 'default_branch_limit'");
+        if (settingsResult && settingsResult.length > 0) {
+          maxBranches = parseInt(JSON.parse(settingsResult[0].value)) || 1;
+        }
+      } catch (e) {
+        console.warn('Failed to fetch default_branch_limit setting:', e.message);
+      }
     }
-    
+
     res.json({
       success: true,
       data: {

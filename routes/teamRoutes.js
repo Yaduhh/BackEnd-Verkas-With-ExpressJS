@@ -8,12 +8,16 @@ const {
   removeMember,
   getBranches,
   update,
-  deleteTeam
+  deleteTeam,
+  checkAdminLimit
 } = require('../controllers/teamController');
 const { authenticate, authorize } = require('../middleware/auth');
 
 // All routes require authentication
 router.use(authenticate);
+
+// Check admin limit (owner and co-owner)
+router.get('/check-limit', authorize('owner', 'co-owner'), checkAdminLimit);
 
 // Get all teams user is member of (owner and co-owner)
 router.get('/', authorize('owner', 'co-owner'), getAll);

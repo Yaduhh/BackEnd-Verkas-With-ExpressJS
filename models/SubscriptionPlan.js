@@ -51,17 +51,17 @@ class SubscriptionPlan {
   }
   
   // Create plan (admin only, usually via seed)
-  static async create({ name, description, maxBranches, priceMonthly, priceYearly, features }) {
+  static async create({ name, description, maxBranches, maxAdmin, priceMonthly, priceYearly, features }) {
     const result = await query(
-      `INSERT INTO subscription_plans (name, description, max_branches, price_monthly, price_yearly, features, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, true)`,
-      [name, description || null, maxBranches, priceMonthly || null, priceYearly || null, JSON.stringify(features || [])]
+      `INSERT INTO subscription_plans (name, description, max_branches, max_admin, price_monthly, price_yearly, features, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, true)`,
+      [name, description || null, maxBranches, maxAdmin !== undefined ? maxAdmin : null, priceMonthly || null, priceYearly || null, JSON.stringify(features || [])]
     );
     return await this.findById(result.insertId);
   }
   
   // Update plan
-  static async update(id, { name, description, maxBranches, priceMonthly, priceYearly, features, isActive }) {
+  static async update(id, { name, description, maxBranches, maxAdmin, priceMonthly, priceYearly, features, isActive }) {
     const updates = [];
     const params = [];
     
@@ -76,6 +76,10 @@ class SubscriptionPlan {
     if (maxBranches !== undefined) {
       updates.push('max_branches = ?');
       params.push(maxBranches);
+    }
+    if (maxAdmin !== undefined) {
+      updates.push('max_admin = ?');
+      params.push(maxAdmin);
     }
     if (priceMonthly !== undefined) {
       updates.push('price_monthly = ?');

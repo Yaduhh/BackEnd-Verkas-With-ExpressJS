@@ -1,6 +1,66 @@
 const OwnerTeam = require('../models/OwnerTeam');
 const User = require('../models/User');
 const Branch = require('../models/Branch');
+const { query } = require('../config/database');
+
+// Check admin user limits based on subscription plan or system settings
+const checkAdminLimit = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
+      return res.json({
+        success: true,
+        data: {
+          can_create: false,
+          reason: 'Only owners and co-owners can create admins'
+        }
+      });
+    }
+
+    let ownerId = req.userId;
+    if (req.user.role === 'co-owner' && req.user.created_by) {
+      ownerId = req.user.created_by;
+    }
+
+    const Subscription = require('../models/Subscription');
+    const subscription = await Subscription.getActiveSubscription(ownerId);
+    
+    let maxAdmin = 2; // Default fallback
+    if (subscription) {
+      const SubscriptionPlan = require('../models/SubscriptionPlan');
+      const plan = await SubscriptionPlan.findById(subscription.plan_id);
+      maxAdmin = plan && plan.max_admin !== undefined ? plan.max_admin : null;
+    } else {
+      try {
+        const settingsResult = await query("SELECT value FROM system_settings WHERE `key` = 'default_admin_limit'");
+        if (settingsResult && settingsResult.length > 0) {
+          maxAdmin = parseInt(JSON.parse(settingsResult[0].value)) || 2;
+        }
+      } catch (e) {
+        console.warn('Failed to fetch default_admin_limit setting:', e.message);
+      }
+    }
+
+    // Count active admins created by this owner
+    const adminCountResult = await query(
+      "SELECT COUNT(*) as count FROM users WHERE role = 'admin' AND created_by = ? AND status_deleted = false",
+      [ownerId]
+    );
+    const currentAdmins = adminCountResult[0]?.count || 0;
+
+    res.json({
+      success: true,
+      data: {
+        can_create: maxAdmin === null ? true : currentAdmins < maxAdmin,
+        current_admins: currentAdmins,
+        max_admins: maxAdmin,
+        is_unlimited: maxAdmin === null
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 
 // Get all teams user is member of
 const getAll = async (req, res, next) => {
@@ -192,6 +252,40 @@ const addMember = async (req, res, next) => {
           success: false,
           message: 'Email already registered'
         });
+      }
+      
+      // Enforce max_admin limit if role is admin
+      if (userRole === 'admin') {
+        let ownerId = req.userId;
+        if (req.user.role === 'co-owner' && req.user.created_by) {
+          ownerId = req.user.created_by;
+        }
+
+        const Subscription = require('../models/Subscription');
+        const subscription = await Subscription.getActiveSubscription(ownerId);
+        
+        let maxAdmin = 1; // Default for Free/No subscription
+        if (subscription) {
+          const SubscriptionPlan = require('../models/SubscriptionPlan');
+          const plan = await SubscriptionPlan.findById(subscription.plan_id);
+          maxAdmin = plan && plan.max_admin !== undefined ? plan.max_admin : null;
+        }
+
+        if (maxAdmin !== null) {
+          // Count active admins created by this owner
+          const adminCountResult = await query(
+            "SELECT COUNT(*) as count FROM users WHERE role = 'admin' AND created_by = ? AND status_deleted = false",
+            [ownerId]
+          );
+          const currentAdmins = adminCountResult[0]?.count || 0;
+          if (currentAdmins >= maxAdmin) {
+            return res.status(403).json({
+              success: false,
+              message: `Batas maksimal admin (${maxAdmin}) untuk paket langganan Anda telah tercapai. Silakan upgrade paket langganan Anda.`,
+              code: 'ADMIN_LIMIT_EXCEEDED'
+            });
+          }
+        }
       }
       
       // Create user (admin or owner) - track who created it
@@ -455,6 +549,7 @@ module.exports = {
   removeMember,
   getBranches,
   update,
-  deleteTeam
+  deleteTeam,
+  checkAdminLimit
 };
 
