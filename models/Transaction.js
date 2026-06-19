@@ -866,9 +866,6 @@ class Transaction {
       const startOfMonth = `${parts[0]}-${parts[1]}-01 00:00:00`;
       selectParams.push(startOfMonth);
       selectParams.push(startOfMonth);
-    } else {
-      selectParams.push(null);
-      selectParams.push(null);
     }
 
     if (categoryId) {
