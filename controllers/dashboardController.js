@@ -20,9 +20,14 @@ function formatSection(date, items, transactions, req) {
     .filter(t => t.type === 'income')
     .reduce((sum, t) => {
       let val = parseFloat(t.amount);
-      // Debt logic: for main transaction (has category), only count initial paid amount
-      if ((t.is_debt_payment === true || t.is_debt_payment === 1 || t.is_debt_payment === '1') && t.category_id) {
-        val = parseFloat(t.paid_amount || 0) - parseFloat(t.total_repayment || 0);
+      // Debt logic: for main transaction (has category), count full amount (accrual basis)
+      // For repayment notification (no category), don't count it to avoid double counting
+      if ((t.is_debt_payment === true || t.is_debt_payment === 1 || t.is_debt_payment === '1')) {
+        if (t.category_id) {
+          val = parseFloat(t.amount);
+        } else {
+          val = 0;
+        }
       }
       
       // If this is for PB1 dashboard, header income is the PB1 tax, not gross income
@@ -92,14 +97,13 @@ function formatSection(date, items, transactions, req) {
 
       let displayAmount = item.type === 'expense' ? -parseFloat(item.amount) : parseFloat(item.amount);
       
-      // Handle debt payment cash flow logic for dashboard list
+      // Handle debt payment logic for dashboard list (Accrual Basis)
       if (item.type === 'income' && (item.is_debt_payment === true || item.is_debt_payment === 1 || item.is_debt_payment === '1')) {
         if (item.category_id) {
-          // Piutang Utama: Ambil hanya pembayaran awal (Initial Cash Received)
-          // t.paid_amount (total paid so far) - total_repayment (sum of later payments)
-          displayAmount = parseFloat(item.paid_amount || 0) - parseFloat(item.total_repayment || 0);
+          // Piutang Utama: Tampilkan Full Amount (Omzet Utuh)
+          displayAmount = parseFloat(item.amount);
         } else {
-          // Notifikasi Pelunasan: Gunakan nominal pelunasannya (sudah benar di item.amount)
+          // Notifikasi Pelunasan: Tetap tampilkan nominal pelunasan agar terlihat di daftar
           displayAmount = parseFloat(item.amount);
         }
       }
@@ -116,6 +120,7 @@ function formatSection(date, items, transactions, req) {
         is_debt_payment: item.is_debt_payment === true || item.is_debt_payment === 1 || item.is_debt_payment === '1', // Pembayaran hutang
         paid_amount: item.paid_amount !== undefined && item.paid_amount !== null ? parseFloat(item.paid_amount) : null,
         parent_transaction_id: item.parent_transaction_id || null,
+        parent_transaction_date: item.parent_transaction_date || null,
         created_at: item.created_at || item.updated_at || item.createdAt || null,
         transaction_date: item.transaction_date,
         is_pb1_payment: item.is_pb1_payment === true || item.is_pb1_payment === 1 || item.is_pb1_payment === '1',

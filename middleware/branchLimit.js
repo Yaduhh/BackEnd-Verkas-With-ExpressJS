@@ -19,9 +19,7 @@ const checkBranchLimit = async (req, res, next) => {
 
       let maxBranches = 1;
       if (subscription) {
-        const SubscriptionPlan = require('../models/SubscriptionPlan');
-        const plan = await SubscriptionPlan.findById(subscription.plan_id);
-        maxBranches = plan?.max_branches || 1;
+        maxBranches = subscription.max_branches;
       } else {
         const { query } = require('../config/database');
         try {

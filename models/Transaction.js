@@ -105,6 +105,7 @@ class Transaction {
       SELECT t.*, c.name as category_name, COALESCE(u.name, u.email) as user_name,
              mp.nama as mitra_piutang_nama,
              tr_notif.transaction_id as parent_transaction_id,
+             t_parent.transaction_date as parent_transaction_date,
              COALESCE(tr_sum.total_repayment, 0) as total_repayment,
              /* Standardized dynamic PB1 calculation (10/110) - Using ROUND to match Report logic */
              CASE 
@@ -144,6 +145,7 @@ class Transaction {
       LEFT JOIN users u ON t.user_id = u.id
       LEFT JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
       LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id
+      LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
       LEFT JOIN (
         SELECT transaction_id, SUM(amount) as total_repayment 
         FROM transaction_repayments 
@@ -858,6 +860,17 @@ class Transaction {
     let categoryConditionForIncome = `FALSE`;
     let categoryConditionForExpense = `TRUE`;
 
+    const selectParams = [];
+    if (startDate && typeof startDate === 'string' && startDate.includes('-')) {
+      const parts = startDate.split('-');
+      const startOfMonth = `${parts[0]}-${parts[1]}-01 00:00:00`;
+      selectParams.push(startOfMonth);
+      selectParams.push(startOfMonth);
+    } else {
+      selectParams.push(null);
+      selectParams.push(null);
+    }
+
     if (categoryId) {
       joinDetails = `
         LEFT JOIN (
@@ -876,13 +889,16 @@ class Transaction {
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' THEN 
             CASE 
-              /* Jika Piutang Utama (ada kategori): Ambil hanya pembayaran AWAL (DP) */
-              /* Caranya: Total paid_amount saat ini dikurangi total semua cicilan yang pernah ada */
-              WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NOT NULL THEN 
-                (COALESCE(t.paid_amount, 0) - COALESCE(tr_sum.total_repayment, 0))
+              /* Jika Piutang Utama (ada kategori): Ambil PAID AMOUNT (Nominal terbayar di awal) untuk Omzet Rill */
+              WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NOT NULL THEN COALESCE(t.paid_amount, 0)
               
-              /* Jika Notifikasi Pelunasan (tanpa kategori): Ambil nominal cicilannya */
-              WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL THEN t.amount
+              /* Jika Notifikasi Pelunasan (tanpa kategori): */
+              /* Masukkan ke pemasukan HANYA jika pelunasan piutang periode lalu (menambah kas riil periode berjalan) */
+              WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL THEN
+                CASE 
+                  WHEN ${startDate ? 't_parent.transaction_date < ?' : 'FALSE'} THEN t.amount
+                  ELSE 0
+                END
               
               /* Transaksi Normal: Ambil amount penuh */
               ELSE t.amount 
@@ -891,6 +907,10 @@ class Transaction {
           ${categoryId ? 'WHEN t.type = \'expense\' AND t.is_umum = true THEN COALESCE(tsd_active.amount, t.amount)' : ''}
           ELSE 0 
         END), 0) as pemasukan,
+        COALESCE(SUM(CASE 
+          WHEN t.type = 'income' AND (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL AND ${startDate ? 't_parent.transaction_date < ?' : 'FALSE'} THEN t.amount
+          ELSE 0
+        END), 0) as pelunasan_piutang_lalu,
         COALESCE(SUM(CASE 
           WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryConditionForExpense}) THEN t.amount
           ELSE 0 
@@ -920,6 +940,8 @@ class Transaction {
         FROM transaction_repayments 
         GROUP BY transaction_id
       ) tr_sum ON t.id = tr_sum.transaction_id
+      LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id
+      LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
       ${joinDetails}
       WHERE 1=1
     `;
@@ -970,13 +992,14 @@ class Transaction {
       sql += ' AND t.is_umum = false';
     }
 
-    const results = await query(sql, params);
-    const { pemasukan, pengeluaran, total_pb1, total_pb1_paid } = results[0];
+    const results = await query(sql, [...selectParams, ...params]);
+    const { pemasukan, pelunasan_piutang_lalu, pengeluaran, total_pb1, total_pb1_paid } = results[0];
     const saldo = pemasukan - pengeluaran;
     const saldo_pb1 = (total_pb1 || 0) - (total_pb1_paid || 0);
 
     return { 
       pemasukan: Number(pemasukan), 
+      pelunasan_piutang_lalu: Number(pelunasan_piutang_lalu),
       pengeluaran: Number(pengeluaran), 
       saldo: Number(saldo), 
       total_pb1: Number(total_pb1), 
