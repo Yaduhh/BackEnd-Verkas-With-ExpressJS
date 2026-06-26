@@ -78,17 +78,17 @@ class Category {
   }
 
   // Create category
-  static async create({ name, type = 'both', userId = null, branchId = null, isDefault = false, isFolder = false, parentId = null }) {
+  static async create({ name, type = 'both', userId = null, branchId = null, isDefault = false, isFolder = false, parentId = null, minAttachment = 0 }) {
     const result = await query(
-      `INSERT INTO categories (name, type, user_id, branch_id, is_default, is_folder, parent_id, status_deleted)
-       VALUES (?, ?, ?, ?, ?, ?, ?, false)`,
-      [name, type, userId, branchId, isDefault, isFolder, parentId]
+      `INSERT INTO categories (name, type, user_id, branch_id, is_default, is_folder, parent_id, min_attachment, status_deleted)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, false)`,
+      [name, type, userId, branchId, isDefault, isFolder, parentId, minAttachment]
     );
     return await this.findById(result.insertId);
   }
 
   // Update category
-  static async update(id, { name, type, is_folder, parent_id }) {
+  static async update(id, { name, type, is_folder, parent_id, min_attachment }) {
     const updates = [];
     const params = [];
 
@@ -107,6 +107,10 @@ class Category {
     if (parent_id !== undefined) {
       updates.push('parent_id = ?');
       params.push(parent_id);
+    }
+    if (min_attachment !== undefined) {
+      updates.push('min_attachment = ?');
+      params.push(min_attachment);
     }
 
     if (updates.length === 0) return await this.findById(id);

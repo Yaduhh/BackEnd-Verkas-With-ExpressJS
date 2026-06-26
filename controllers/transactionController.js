@@ -263,7 +263,7 @@ const getById = async (req, res, next) => {
 
 const create = async (req, res, next) => {
   try {
-    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, mitra_details, savings_details, income_details, is_pb1_payment } = req.body;
+    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_savings, mitra_details, savings_details, income_details, is_pb1_payment } = req.body;
 
     // Get branch_id from header or middleware
     const branchId = req.branchId || req.headers['x-branch-id'];
@@ -396,9 +396,11 @@ const create = async (req, res, next) => {
       lampiran: lampiranValue,
       isUmum,
       isDebtPayment,
+      isSavings: is_savings === true || is_savings === 'true' || is_savings === 1,
       paidAmount,
       remainingDebt,
       mitraPiutangId,
+      bankAccountId: bank_account_id ? parseInt(bank_account_id) : null,
       mitraDetails: mitra_details || [],
       savingsDetails: savings_details || [],
       incomeDetails: income_details || [],
@@ -470,7 +472,7 @@ const create = async (req, res, next) => {
 const update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, mitra_details, savings_details, income_details, is_pb1_payment } = req.body;
+    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, mitra_details, savings_details, income_details, is_pb1_payment } = req.body;
 
     // Check if transaction exists and belongs to user
     const existing = await Transaction.findById(id);
@@ -627,6 +629,10 @@ const update = async (req, res, next) => {
     }
     if (mitra_piutang_id !== undefined) {
       updateData.mitraPiutangId = (mitra_piutang_id === null || mitra_piutang_id === '') ? null : parseInt(mitra_piutang_id);
+    }
+
+    if (bank_account_id !== undefined) {
+      updateData.bankAccountId = (bank_account_id === null || bank_account_id === '') ? null : parseInt(bank_account_id);
     }
 
     if (is_pb1_payment !== undefined) {

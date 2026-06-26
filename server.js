@@ -20,6 +20,7 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const logRoutes = require('./routes/logRoutes');
 const masterRoutes = require('./routes/masterRoutes');
 const paymentMethodRoutes = require('./routes/paymentMethodRoutes');
+const bankAccountRoutes = require('./routes/bankAccountRoutes');
 const branchReportRoutes = require('./routes/branchReportRoutes');
 const appConfigRoutes = require('./routes/appConfigRoutes');
 
@@ -41,8 +42,8 @@ const allowedOrigins = [
   'http://127.0.0.1:19006', // iOS Simulator Expo web
   'http://localhost:3000', // Backend (for testing)
   'http://127.0.0.1:3000', // Backend (for iOS simulator)
-  'http://172.20.10.9:8081', // Physical device Metro
-  'http://192.168.1.56:19006', // Physical device Expo web
+  'http://192.168.1.22:8081', // Physical device Metro
+  'http://192.168.1.20:19006', // Physical device Expo web
   'http://10.127.31.2383000', // Physical device Backend
   /^http:\/\/192\.168\.\d+\.\d+:8081$/, // Physical device Metro
   /^http:\/\/192\.168\.\d+\.\d+:19006$/, // Physical device Expo web
@@ -309,6 +310,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/logs', logRoutes);
 app.use('/api/master', masterRoutes);
 app.use('/api/payment-methods', paymentMethodRoutes);
+app.use('/api/bank-accounts', bankAccountRoutes);
 app.use('/api/branch-reports', branchReportRoutes);
 app.use('/api/app-config', appConfigRoutes);
 

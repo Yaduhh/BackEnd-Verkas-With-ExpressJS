@@ -8,12 +8,16 @@ const {
   delete: deleteMitraPiutang,
   restore
 } = require('../controllers/mitraPiutangController');
+const { getMitraPiutangReport } = require('../controllers/mitraPiutangReportController');
 const { authenticate } = require('../middleware/auth');
 const { getCurrentBranch } = require('../middleware/branch');
 
 // All routes require authentication
 router.use(authenticate);
 router.use(getCurrentBranch);
+
+// Get report
+router.get('/report', getMitraPiutangReport);
 
 // Get all mitra piutang
 router.get('/', getAll);

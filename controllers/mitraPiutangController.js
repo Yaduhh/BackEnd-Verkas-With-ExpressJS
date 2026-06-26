@@ -5,7 +5,7 @@ const Branch = require('../models/Branch');
 // Get all mitra piutang
 const getAll = async (req, res, next) => {
   try {
-    const { include_deleted = false } = req.query;
+    const { include_deleted = false, startDate, endDate } = req.query;
     const branchId = req.branchId || req.headers['x-branch-id'];
 
     if (!branchId) {
@@ -26,7 +26,9 @@ const getAll = async (req, res, next) => {
 
     const mitraPiutang = await MitraPiutang.findAll({
       branchId: parseInt(branchId),
-      includeDeleted: include_deleted === 'true'
+      includeDeleted: include_deleted === 'true',
+      startDate,
+      endDate
     });
 
     res.json({

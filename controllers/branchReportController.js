@@ -681,6 +681,60 @@ const exportPdf = async (req, res, next) => {
             });
         });
 
+        // Calculate attachment stats for PDF
+        const txsForStats = await query(
+            `SELECT t.id, t.lampiran, c.min_attachment as category_min_attachment
+             FROM transactions t
+             LEFT JOIN categories c ON t.category_id = c.id
+             WHERE t.branch_id = ?
+               AND t.transaction_date BETWEEN ? AND ?
+               AND t.status_deleted = false
+               AND t.is_umum = true
+               AND NOT EXISTS (SELECT 1 FROM transaction_repayments tr WHERE tr.income_transaction_id = t.id)`,
+            [branchId, startDate, endDate]
+        );
+
+        let statTotal = 0;
+        let statMerah = 0;
+        let statKuning = 0;
+        let statHijau = 0;
+        let statAbu = 0;
+        let statNormal = 0;
+
+        const parseLampiranArray = (lampiranVal) => {
+            if (!lampiranVal) return [];
+            try {
+                const parsed = JSON.parse(lampiranVal);
+                if (Array.isArray(parsed)) return parsed;
+                return [parsed];
+            } catch (e) {
+                return [lampiranVal];
+            }
+        };
+
+        txsForStats.forEach(it => {
+            statTotal++;
+            const reqCount = it.category_min_attachment || 0;
+            const parsedFiles = parseLampiranArray(it.lampiran);
+            const filesCount = parsedFiles ? parsedFiles.length : 0;
+
+            if (reqCount > 0) {
+                if (filesCount === 0) {
+                    statMerah++;
+                } else if (filesCount < reqCount) {
+                    statKuning++;
+                } else {
+                    statHijau++;
+                }
+            } else {
+                if (filesCount > 0) {
+                    statAbu++;
+                } else {
+                    statNormal++;
+                }
+            }
+        });
+
         const dataForPdf = {
             ...report,
             omzet_total: finalOmzetTotal,
@@ -689,7 +743,15 @@ const exportPdf = async (req, res, next) => {
             pelunasan_piutang_bulan_lalu: pelunasanPiutangBulanLalu,
             prev_month_label: prevMonthName,
             income_breakdown: incomeBreakdown,
-            expense_breakdown: processedExpenseBreakdown
+            expense_breakdown: processedExpenseBreakdown,
+            attachment_stats: {
+                total: statTotal,
+                merah: statMerah,
+                kuning: statKuning,
+                hijau: statHijau,
+                abu: statAbu,
+                normal: statNormal
+            }
         };
 
         const { exportFinancialReportToPDF, generateFilename, getMimeType } = require('../utils/exportHelper');
@@ -697,7 +759,8 @@ const exportPdf = async (req, res, next) => {
         const selectedMonthDate = new Date(year, month - 1, 1);
 
         try {
-            const filepath = await exportFinancialReportToPDF(dataForPdf, filename, branch.name, selectedMonthDate, report.working_days || workingDays);
+            const userName = req.user.name || req.user.email;
+            const filepath = await exportFinancialReportToPDF(dataForPdf, filename, branch.name, selectedMonthDate, report.working_days || workingDays, { printedBy: userName });
 
             const fs = require('fs');
             if (!fs.existsSync(filepath)) {

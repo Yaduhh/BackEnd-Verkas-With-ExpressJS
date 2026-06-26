@@ -7,7 +7,9 @@ const {
   update,
   softDelete,
   restore,
-  hardDelete
+  hardDelete,
+  getAllocations,
+  updateAllocations
 } = require('../controllers/categoryController');
 const { authenticate, authorize } = require('../middleware/auth');
 const {
@@ -29,6 +31,12 @@ router.post('/', validateCreateCategory, create);
 
 // Update category
 router.put('/:id', validateUpdateCategory, update);
+
+// Get savings account allocations
+router.get('/:id/allocations', getAllocations);
+
+// Update savings account allocations
+router.put('/:id/allocations', updateAllocations);
 
 // Soft delete category
 router.delete('/:id', softDelete);

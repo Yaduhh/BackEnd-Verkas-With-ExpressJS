@@ -482,7 +482,46 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     doc.text('JUMLAH HARI KERJA', margin, y);
     doc.text(':', margin + 180, y);
     doc.text(`${workingDays} HARI`, margin + 200, y);
-    y += 30;
+    y += 15;
+
+    // Draw minimalist inline attachment stats with a separator if available
+    if (data.attachment_stats && data.attachment_stats.total > 0) {
+        const stats = data.attachment_stats;
+        
+        // Solid black divider line matching the one below
+        doc.strokeColor('#000000').lineWidth(1.5).moveTo(margin, y).lineTo(margin + contentWidth, y).stroke();
+        y += 10;
+
+        doc.fontSize(9).font(fontBold).text('TOTAL TRANSAKSI', margin, y);
+        doc.text(':', margin + 180, y);
+        doc.font(fontRegular).text(`${stats.total} TRANSAKSI`, margin + 200, y);
+        y += 15;
+
+        doc.font(fontBold).text('STATUS LAMPIRAN', margin, y);
+        doc.text(':', margin + 180, y);
+        
+        let startX = margin + 200;
+        const parts = [];
+        if (stats.merah > 0) parts.push({ text: `${stats.merah} Kosong`, color: '#e11d48' });
+        if (stats.kuning > 0) parts.push({ text: `${stats.kuning} Kurang`, color: '#d97706' });
+        if (stats.hijau > 0) parts.push({ text: `${stats.hijau} Lengkap`, color: '#059669' });
+        if (stats.abu > 0) parts.push({ text: `${stats.abu} Opsional`, color: '#4b5563' });
+        if (stats.normal > 0) parts.push({ text: `${stats.normal} Tanpa Syarat`, color: '#9ca3af' });
+
+        parts.forEach((p, idx) => {
+            doc.fillColor(p.color).font(fontBold).text(p.text, startX, y, { lineBreak: false });
+            startX += doc.widthOfString(p.text) + 2;
+            if (idx < parts.length - 1) {
+                doc.fillColor('#000000').font(fontRegular).text(', ', startX, y, { lineBreak: false });
+                startX += doc.widthOfString(', ');
+            }
+        });
+        
+        doc.fillColor('#000000').font(fontRegular); // Reset color
+        y += 20;
+    } else {
+        y += 15;
+    }
 
     doc.strokeColor('#000000').lineWidth(1.5).moveTo(margin, y).lineTo(margin + contentWidth, y).stroke();
     y += 10;
@@ -637,6 +676,27 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     doc.text('Akhir', margin + 40, y);
     doc.text('Rp', margin + 360, y);
     doc.text(formatCurrencyForPDF(data.stok_akhir), margin + 380, y, { align: 'right', width: 85 });
+    y += 15;
+
+    // Footer
+    y += 30;
+    const now = new Date();
+    const formattedDate = now.toLocaleDateString('id-ID', {
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric'
+    });
+    const formattedTime = now.toLocaleTimeString('id-ID', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+    }).replace('.', ':');
+    
+    const printedByText = options.printedBy ? ` oleh ${options.printedBy}` : '';
+    const footerText = `Laporan ini dicetak pada ${formattedDate} pukul ${formattedTime}${printedByText}`;
+    
+    doc.fontSize(8).font(fontRegular).fillColor('#9ca3af').text(footerText, margin, y, { align: 'center', width: contentWidth });
 
     doc.end();
 

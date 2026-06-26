@@ -27,9 +27,20 @@ class MitraPiutang {
   }
 
   // Find all (with branch isolation and debt stats)
-  static async findAll({ branchId, includeDeleted = false }) {
+  static async findAll({ branchId, includeDeleted = false, startDate, endDate }) {
     if (!branchId) {
       throw new Error('Branch ID is required for MitraPiutang.findAll');
+    }
+
+    const subParams = [];
+    let dateFilterSql = '';
+    if (startDate) {
+      dateFilterSql += ' AND t.transaction_date >= ?';
+      subParams.push(startDate + ' 00:00:00');
+    }
+    if (endDate) {
+      dateFilterSql += ' AND t.transaction_date <= ?';
+      subParams.push(endDate + ' 23:59:59');
     }
 
     let sql = `
@@ -41,17 +52,19 @@ class MitraPiutang {
                WHERE t.mitra_piutang_id = mp.id 
                AND t.status_deleted = false
                AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
+               ${dateFilterSql}
              ) + (
                SELECT COALESCE(SUM(tmd.remaining_debt), 0)
                FROM transaction_mitra_details tmd
                JOIN transactions t ON tmd.transaction_id = t.id
                WHERE tmd.mitra_piutang_id = mp.id AND t.status_deleted = false
+               ${dateFilterSql}
              ) as total_piutang
       FROM mitra_piutang mp
       LEFT JOIN users u ON mp.created_by = u.id
       WHERE mp.branch_id = ?
     `;
-    const params = [branchId];
+    const params = [...subParams, ...subParams, branchId];
 
     if (!includeDeleted) {
       sql += ' AND mp.deleted_at IS NULL';

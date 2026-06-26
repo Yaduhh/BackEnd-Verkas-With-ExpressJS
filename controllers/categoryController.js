@@ -1,8 +1,8 @@
 const Category = require('../models/Category');
 const Branch = require('../models/Branch');
 const LogService = require('../services/logService');
+const SavingsAllocation = require('../models/SavingsAllocation');
 
-// Get all categories
 const getAll = async (req, res, next) => {
   try {
     const {
@@ -62,7 +62,7 @@ const getById = async (req, res, next) => {
 // Create category
 const create = async (req, res, next) => {
   try {
-    const { name, type = 'both', is_folder, parent_id } = req.body;
+    const { name, type = 'both', is_folder, parent_id, min_attachment } = req.body;
 
     // Get branchId from header or middleware (optional for categories)
     const branchId = req.branchId || req.headers['x-branch-id'] || null;
@@ -89,7 +89,8 @@ const create = async (req, res, next) => {
       branchId: branchId ? parseInt(branchId) : null,
       isDefault: false,
       isFolder: is_folder === 1 || is_folder === true,
-      parentId: parent_id ? parseInt(parent_id) : null
+      parentId: parent_id ? parseInt(parent_id) : null,
+      minAttachment: min_attachment !== undefined ? parseInt(min_attachment) : 0
     });
 
     // Log activity (only if branchId exists, because activity logs require branchId)
@@ -105,6 +106,7 @@ const create = async (req, res, next) => {
           name: category.name,
           is_folder: category.is_folder,
           parent_id: category.parent_id,
+          min_attachment: category.min_attachment,
         },
         ipAddress: req.ip,
         userAgent: req.get('user-agent'),
@@ -133,7 +135,7 @@ const create = async (req, res, next) => {
 const update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, type, is_folder, parent_id } = req.body;
+    const { name, type, is_folder, parent_id, min_attachment } = req.body;
 
     const existing = await Category.findById(id);
     if (!existing) {
@@ -160,7 +162,8 @@ const update = async (req, res, next) => {
       name,
       type,
       is_folder: is_folder !== undefined ? (is_folder === 1 || is_folder === true) : undefined,
-      parent_id: parent_id !== undefined ? (parent_id ? parseInt(parent_id) : null) : undefined
+      parent_id: parent_id !== undefined ? (parent_id ? parseInt(parent_id) : null) : undefined,
+      min_attachment: min_attachment !== undefined ? parseInt(min_attachment) : undefined
     });
 
     // Calculate changes
@@ -173,6 +176,9 @@ const update = async (req, res, next) => {
     }
     if (parent_id !== undefined && existing.parent_id !== parent_id) {
       changes.parent_id = { old: existing.parent_id, new: parent_id };
+    }
+    if (min_attachment !== undefined && existing.min_attachment !== min_attachment) {
+      changes.min_attachment = { old: existing.min_attachment, new: min_attachment };
     }
 
     // Log activity (only if branchId exists)
@@ -187,11 +193,13 @@ const update = async (req, res, next) => {
         oldValues: {
           name: existing.name,
           is_folder: existing.is_folder,
+          min_attachment: existing.min_attachment,
         },
         newValues: {
           name: category.name,
           is_folder: category.is_folder,
           parent_id: category.parent_id,
+          min_attachment: category.min_attachment,
         },
         changes: Object.keys(changes).length > 0 ? changes : null,
         ipAddress: req.ip,
@@ -338,6 +346,63 @@ const hardDelete = async (req, res, next) => {
   }
 };
 
+// Get savings account allocations
+const getAllocations = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const branchId = req.branchId || req.headers['x-branch-id'] || null;
+
+    const category = await Category.findById(id);
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: 'Category not found'
+      });
+    }
+
+    const allocations = await SavingsAllocation.findAllByCategoryId(id, branchId ? parseInt(branchId) : null);
+
+    res.json({
+      success: true,
+      data: allocations
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Update savings account allocations
+const updateAllocations = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { allocations } = req.body;
+
+    if (!Array.isArray(allocations)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Allocations must be an array'
+      });
+    }
+
+    const category = await Category.findById(id);
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: 'Category not found'
+      });
+    }
+
+    await SavingsAllocation.updateAllocations(id, allocations);
+
+    res.json({
+      success: true,
+      message: 'Allocations updated successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAll,
   getById,
@@ -345,6 +410,8 @@ module.exports = {
   update,
   softDelete,
   restore,
-  hardDelete
+  hardDelete,
+  getAllocations,
+  updateAllocations
 };
 

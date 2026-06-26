@@ -124,7 +124,8 @@ function formatSection(date, items, transactions, req) {
         created_at: item.created_at || item.updated_at || item.createdAt || null,
         transaction_date: item.transaction_date,
         is_pb1_payment: item.is_pb1_payment === true || item.is_pb1_payment === 1 || item.is_pb1_payment === '1',
-        category_id: item.category_id || null
+        category_id: item.category_id || null,
+        category_min_attachment: item.category_min_attachment !== undefined && item.category_min_attachment !== null ? parseInt(item.category_min_attachment) : 0
       };
     })
   };

@@ -4,12 +4,13 @@ class Transaction {
   // Find by ID
   static async findById(id, includeDeleted = false) {
     const results = await query(
-      `SELECT t.*, c.name as category_name, COALESCE(u.name, u.email) as user_name,
-              mp.nama as mitra_piutang_nama
+      `SELECT t.*, c.name as category_name, c.min_attachment as category_min_attachment, COALESCE(u.name, u.email) as user_name,
+              mp.nama as mitra_piutang_nama, ba.name as bank_account_name
        FROM transactions t
        LEFT JOIN categories c ON t.category_id = c.id
        LEFT JOIN users u ON t.user_id = u.id
        LEFT JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
+       LEFT JOIN bank_accounts ba ON t.bank_account_id = ba.id
        WHERE t.id = ? ${includeDeleted ? '' : 'AND t.status_deleted = false'}`,
       [id]
     );
@@ -102,7 +103,7 @@ class Transaction {
     includeIncomeDetails = false
   } = {}) {
     let selectFields = `
-      SELECT t.*, c.name as category_name, COALESCE(u.name, u.email) as user_name,
+      SELECT t.*, c.name as category_name, c.min_attachment as category_min_attachment, COALESCE(u.name, u.email) as user_name,
              mp.nama as mitra_piutang_nama,
              tr_notif.transaction_id as parent_transaction_id,
              t_parent.transaction_date as parent_transaction_date,
@@ -133,7 +134,7 @@ class Transaction {
                WHEN tsd.amount IS NOT NULL THEN tsd.amount 
                ELSE t.amount 
              END as amount`;
-      
+
       joinDetails += ` LEFT JOIN transaction_savings_details tsd ON t.id = tsd.transaction_id AND EXISTS (SELECT 1 FROM categories c2 WHERE c2.id = tsd.category_id AND c2.name = ?)`;
       params.push(categoryName);
     }
@@ -304,7 +305,7 @@ class Transaction {
         WHERE tid.transaction_id IN (${placeholders})
       `;
       const allIncomeDetails = await query(incomeSql, transactionIds);
-      
+
       transactions.forEach(t => {
         t.income_details = allIncomeDetails.filter(d => d.transaction_id === t.id);
       });
@@ -434,17 +435,20 @@ class Transaction {
     return results[0].total;
   }
 
-  // Create transaction
-  // Create transaction
-  static async create({ userId, branchId, type, categoryId, amount, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, mitraDetails = [], savingsDetails = [], incomeDetails = [], isPb1Payment = false }) {
+  static async create({ userId, branchId, type, categoryId, amount, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, isSavings = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, bankAccountId = null, mitraDetails = [], savingsDetails = [], incomeDetails = [], isPb1Payment = false }) {
     const transactionId = await dbTransaction(async (conn) => {
       const [result] = await conn.execute(
-        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, status_deleted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
-        [userId, branchId, type, categoryId, amount, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, (savingsDetails && savingsDetails.length > 0) || false, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment]
+        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, bank_account_id, status_deleted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
+        [userId, branchId, type, categoryId, amount, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, isSavings || (savingsDetails && savingsDetails.length > 0) || false, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment, bankAccountId]
       );
 
       const newId = result.insertId;
+
+      // Automatically adjust savings allocations if this is a savings transaction with a bank account
+      if ((isSavings || (savingsDetails && savingsDetails.length > 0)) && bankAccountId) {
+        await this.adjustSavingsAllocation(conn, categoryId, bankAccountId, type, amount, 1);
+      }
 
       // Insert multi-mitra details
       if ((isDebtPayment === true || isDebtPayment === 1) && mitraDetails && mitraDetails.length > 0) {
@@ -487,8 +491,19 @@ class Transaction {
   }
 
   // Update transaction
-  static async update(id, { type, categoryId, amount, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, mitraDetails, savingsDetails, incomeDetails, isPb1Payment }) {
+  static async update(id, { type, categoryId, amount, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, incomeDetails, isPb1Payment }) {
     await dbTransaction(async (conn) => {
+      // Get old transaction data first to reverse allocation
+      const [oldRows] = await conn.execute(
+        'SELECT category_id, bank_account_id, type, amount, is_savings FROM transactions WHERE id = ?',
+        [id]
+      );
+      const oldTx = oldRows[0];
+
+      if (oldTx && oldTx.is_savings && oldTx.bank_account_id) {
+        await this.adjustSavingsAllocation(conn, oldTx.category_id, oldTx.bank_account_id, oldTx.type, oldTx.amount, -1);
+      }
+
       const updates = [];
       const params = [];
 
@@ -522,11 +537,11 @@ class Transaction {
       }
       if (isUmum !== undefined) {
         updates.push('is_umum = ?');
-        params.push(isUmum);
+        params.push(isUmum === true || isUmum === 'true' || isUmum === 1);
       }
       if (isDebtPayment !== undefined) {
         updates.push('is_debt_payment = ?');
-        params.push(isDebtPayment);
+        params.push(isDebtPayment === true || isDebtPayment === 'true' || isDebtPayment === 1);
       }
       if (paidAmount !== undefined) {
         updates.push('paid_amount = ?');
@@ -539,6 +554,10 @@ class Transaction {
       if (mitraPiutangId !== undefined) {
         updates.push('mitra_piutang_id = ?');
         params.push(mitraPiutangId);
+      }
+      if (bankAccountId !== undefined) {
+        updates.push('bank_account_id = ?');
+        params.push(bankAccountId);
       }
       if (savingsDetails !== undefined) {
         updates.push('is_savings = ?');
@@ -555,6 +574,16 @@ class Transaction {
           `UPDATE transactions SET ${updates.join(', ')} WHERE id = ? AND status_deleted = false`,
           params
         );
+      }
+
+      // Re-apply savings allocation with updated data
+      const [newRows] = await conn.execute(
+        'SELECT category_id, bank_account_id, type, amount, is_savings FROM transactions WHERE id = ?',
+        [id]
+      );
+      const newTx = newRows[0];
+      if (newTx && newTx.is_savings && newTx.bank_account_id) {
+        await this.adjustSavingsAllocation(conn, newTx.category_id, newTx.bank_account_id, newTx.type, newTx.amount, 1);
       }
 
       // Handle multi-mitra details
@@ -705,6 +734,16 @@ class Transaction {
   static async softDelete(id) {
     const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
     return await dbTransaction(async (conn) => {
+      // Get transaction data to reverse allocation
+      const [rows] = await conn.execute(
+        'SELECT category_id, bank_account_id, type, amount, is_savings FROM transactions WHERE id = ?',
+        [id]
+      );
+      const tx = rows[0];
+      if (tx && tx.is_savings && tx.bank_account_id) {
+        await this.adjustSavingsAllocation(conn, tx.category_id, tx.bank_account_id, tx.type, tx.amount, -1);
+      }
+
       // 1. Get related income transaction IDs from repayments
       const [repayments] = await conn.execute(
         'SELECT income_transaction_id FROM transaction_repayments WHERE transaction_id = ? AND income_transaction_id IS NOT NULL',
@@ -737,6 +776,16 @@ class Transaction {
   // Restore
   static async restore(id) {
     return await dbTransaction(async (conn) => {
+      // Get transaction data to re-apply allocation
+      const [rows] = await conn.execute(
+        'SELECT category_id, bank_account_id, type, amount, is_savings FROM transactions WHERE id = ?',
+        [id]
+      );
+      const tx = rows[0];
+      if (tx && tx.is_savings && tx.bank_account_id) {
+        await this.adjustSavingsAllocation(conn, tx.category_id, tx.bank_account_id, tx.type, tx.amount, 1);
+      }
+
       // 1. Get related income transaction IDs from repayments
       const [repayments] = await conn.execute(
         'SELECT income_transaction_id FROM transaction_repayments WHERE transaction_id = ? AND income_transaction_id IS NOT NULL',
@@ -767,6 +816,16 @@ class Transaction {
   // Hard delete (permanent)
   static async hardDelete(id) {
     return await dbTransaction(async (conn) => {
+      // Get transaction data to reverse allocation
+      const [rows] = await conn.execute(
+        'SELECT category_id, bank_account_id, type, amount, is_savings FROM transactions WHERE id = ?',
+        [id]
+      );
+      const tx = rows[0];
+      if (tx && tx.is_savings && tx.bank_account_id) {
+        await this.adjustSavingsAllocation(conn, tx.category_id, tx.bank_account_id, tx.type, tx.amount, -1);
+      }
+
       // 1. Get related income transaction IDs from repayments
       const [repayments] = await conn.execute(
         'SELECT income_transaction_id FROM transaction_repayments WHERE transaction_id = ? AND income_transaction_id IS NOT NULL',
@@ -853,7 +912,7 @@ class Transaction {
   // Get summary for date range
   static async getSummary({ userId, branchId, categoryId, subCategoryId, startDate, endDate, includeDeleted = false, excludeFolders = false, onlyFolders = false, isUmum = undefined }) {
     const params = [];
-    
+
     // Conditionally build portions of the query
     let joinDetails = '';
     let pengeluaranCase = `t.amount`;
@@ -994,15 +1053,46 @@ class Transaction {
     const saldo = pemasukan - pengeluaran;
     const saldo_pb1 = (total_pb1 || 0) - (total_pb1_paid || 0);
 
-    return { 
-      pemasukan: Number(pemasukan), 
+    return {
+      pemasukan: Number(pemasukan),
       pelunasan_piutang_lalu: Number(pelunasan_piutang_lalu),
-      pengeluaran: Number(pengeluaran), 
-      saldo: Number(saldo), 
-      total_pb1: Number(total_pb1), 
+      pengeluaran: Number(pengeluaran),
+      saldo: Number(saldo),
+      total_pb1: Number(total_pb1),
       total_pb1_paid: Number(total_pb1_paid),
       saldo_pb1: Number(saldo_pb1)
     };
+  }
+
+  static async adjustSavingsAllocation(conn, categoryId, bankAccountId, type, amount, multiplier = 1) {
+    if (!bankAccountId || !categoryId) return;
+
+    // Calculate the amount to adjust
+    // multiplier = 1 for adding a transaction, -1 for removing/reversing it
+    const change = parseFloat(amount) * multiplier;
+    if (isNaN(change) || change === 0) return;
+
+    // For expense: decreases allocation
+    // For income: increases allocation
+    const adjustValue = type === 'expense' ? -change : change;
+
+    // Check if allocation exists
+    const [existing] = await conn.execute(
+      'SELECT id, allocated_amount FROM savings_account_allocations WHERE category_id = ? AND bank_account_id = ?',
+      [categoryId, bankAccountId]
+    );
+
+    if (existing.length > 0) {
+      await conn.execute(
+        'UPDATE savings_account_allocations SET allocated_amount = allocated_amount + ? WHERE id = ?',
+        [adjustValue, existing[0].id]
+      );
+    } else {
+      await conn.execute(
+        'INSERT INTO savings_account_allocations (category_id, bank_account_id, allocated_amount) VALUES (?, ?, ?)',
+        [categoryId, bankAccountId, adjustValue]
+      );
+    }
   }
 }
 
