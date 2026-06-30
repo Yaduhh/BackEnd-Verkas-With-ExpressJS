@@ -588,18 +588,74 @@ class Transaction {
 
       // Handle multi-mitra details
       if (mitraDetails !== undefined) {
+        // 1. Get old details to check if partner has changed or to align old/new rows
+        const [oldMitraRows] = await conn.execute(
+          `SELECT id, mitra_piutang_id FROM transaction_mitra_details WHERE transaction_id = ? ORDER BY id ASC`,
+          [id]
+        );
+
+        // 2. Map old partner IDs to new partner IDs if they have changed
+        if (oldMitraRows.length > 0 && mitraDetails && mitraDetails.length > 0) {
+          if (oldMitraRows.length === 1 && mitraDetails.length === 1) {
+            const oldPartnerId = oldMitraRows[0].mitra_piutang_id;
+            const newPartnerId = mitraDetails[0].mitra_piutang_id;
+            if (oldPartnerId !== newPartnerId && oldPartnerId && newPartnerId) {
+              await conn.execute(
+                `UPDATE transaction_repayments SET mitra_piutang_id = ? WHERE transaction_id = ? AND mitra_piutang_id = ?`,
+                [newPartnerId, id, oldPartnerId]
+              );
+            }
+          } else {
+            // Match by index for multi-mitra
+            const minLen = Math.min(oldMitraRows.length, mitraDetails.length);
+            for (let i = 0; i < minLen; i++) {
+              const oldPartnerId = oldMitraRows[i].mitra_piutang_id;
+              const newPartnerId = mitraDetails[i].mitra_piutang_id;
+              if (oldPartnerId !== newPartnerId && oldPartnerId && newPartnerId) {
+                await conn.execute(
+                  `UPDATE transaction_repayments SET mitra_piutang_id = ? WHERE transaction_id = ? AND mitra_piutang_id = ?`,
+                  [newPartnerId, id, oldPartnerId]
+                );
+              }
+            }
+          }
+        }
+
         // Delete old details
         await conn.execute(`DELETE FROM transaction_mitra_details WHERE transaction_id = ?`, [id]);
 
         // Insert new details if isDebtPayment is true
         if ((isDebtPayment === true || isDebtPayment === 1) && mitraDetails && mitraDetails.length > 0) {
+          let updatedPaidAmount = 0;
+          let updatedRemainingDebt = 0;
+
           for (const detail of mitraDetails) {
+            // Recalculate based on actual repayments for this (possibly new) partner
+            const [repaymentSumRows] = await conn.execute(
+              `SELECT SUM(amount) as total_repayment FROM transaction_repayments WHERE transaction_id = ? AND mitra_piutang_id = ?`,
+              [id, detail.mitra_piutang_id]
+            );
+            const totalRepayment = parseFloat(repaymentSumRows[0].total_repayment || 0);
+
+            // The paid amount must be at least the sum of repayments already made
+            const paid = Math.max(detail.paid_amount || 0, totalRepayment);
+            const remaining = Math.max(0, detail.amount - paid);
+
+            updatedPaidAmount += paid;
+            updatedRemainingDebt += remaining;
+
             await conn.execute(
               `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
                VALUES (?, ?, ?, ?, ?)`,
-              [id, detail.mitra_piutang_id, detail.amount, detail.paid_amount || 0, detail.remaining_debt || 0]
+              [id, detail.mitra_piutang_id, detail.amount, paid, remaining]
             );
           }
+
+          // Also update the main transactions table columns to remain in sync with the sum of all portions
+          await conn.execute(
+            `UPDATE transactions SET paid_amount = ?, remaining_debt = ? WHERE id = ?`,
+            [updatedPaidAmount, updatedRemainingDebt, id]
+          );
         }
       }
 
