@@ -1,5 +1,6 @@
 const Transaction = require('../models/Transaction');
 const { getMonthRange } = require('../utils/dateHelper');
+const axios = require('axios');
 
 /**
  * Chat Assistant Controller - Using native fetch to avoid dependencies
@@ -110,29 +111,22 @@ Aturan Penting:
       parts: [{ text: `${systemPrompt}\n\nPertanyaan Pengguna: "${message}"` }]
     });
 
-    // 5. Call Gemini API via fetch
+    // 5. Call Gemini API via axios
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
     
-    const response = await fetch(url, {
-      method: 'POST',
+    const response = await axios.post(url, {
+      contents: contents,
+      generationConfig: {
+        maxOutputTokens: 1000,
+        temperature: 0.7,
+      }
+    }, {
       headers: {
         'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        contents: contents,
-        generationConfig: {
-          maxOutputTokens: 1000,
-          temperature: 0.7,
-        }
-      })
+      }
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      console.error('Gemini API Error:', data);
-      throw new Error(data.error?.message || 'Gagal memanggil Gemini API');
-    }
+    const data = response.data;
 
     const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || 'Maaf, saya tidak dapat memahami permintaan tersebut.';
 
