@@ -1,6 +1,6 @@
 const Transaction = require('../models/Transaction');
 const { getMonthRange } = require('../utils/dateHelper');
-const axios = require('axios');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 /**
  * Chat Assistant Controller - Using native fetch to avoid dependencies
@@ -94,8 +94,7 @@ Aturan Penting:
 
     // 4. Construct Gemini API Payload
     const contents = [];
-    
-    // Format history for Gemini API
+
     if (chatHistory && Array.isArray(chatHistory)) {
       chatHistory.forEach(h => {
         contents.push({
@@ -111,25 +110,21 @@ Aturan Penting:
       parts: [{ text: `${systemPrompt}\n\nPertanyaan Pengguna: "${message}"` }]
     });
 
-    // 5. Call Gemini API via axios
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-    
-    const response = await axios.post(url, {
-      contents: contents,
+    // 5. Call Gemini API via Official SDK
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const genModel = genAI.getGenerativeModel({ 
+      model: "gemini-2.5-flash",
       generationConfig: {
         maxOutputTokens: 1000,
         temperature: 0.7,
       }
-    }, {
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey
-      }
     });
 
-    const data = response.data;
+    const result = await genModel.generateContent({
+      contents: contents
+    });
 
-    const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || 'Maaf, saya tidak dapat memahami permintaan tersebut.';
+    const responseText = result.response.text() || 'Maaf, saya tidak dapat memahami permintaan tersebut.';
 
     return res.status(200).json({
       success: true,
