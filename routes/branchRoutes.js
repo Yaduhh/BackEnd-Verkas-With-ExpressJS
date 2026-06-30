@@ -34,23 +34,23 @@ router.get('/:id', getById);
 // Create branch (owner only)
 router.post('/', authorize('owner'), create);
 
-// Update branch (owner only)
-router.put('/:id', authorize('owner'), update);
+// Update branch (owner and co-owner)
+router.put('/:id', authorize('owner', 'co-owner'), update);
 
-// Assign PIC to branch (owner only) - adds to existing PICs
-router.post('/:id/assign-pic', authorize('owner'), assignPIC);
+// Assign PIC to branch (owner and co-owner) - adds to existing PICs
+router.post('/:id/assign-pic', authorize('owner', 'co-owner'), assignPIC);
 
-// Remove PIC from branch (owner only) - can remove specific PIC or all
-router.post('/:id/remove-pic', authorize('owner'), removePIC);
+// Remove PIC from branch (owner and co-owner) - can remove specific PIC or all
+router.post('/:id/remove-pic', authorize('owner', 'co-owner'), removePIC);
 
-// Set multiple PICs at once (replaces existing) (owner only)
-router.put('/:id/pics', authorize('owner'), setPICs);
+// Set multiple PICs at once (replaces existing) (owner and co-owner)
+router.put('/:id/pics', authorize('owner', 'co-owner'), setPICs);
 
-// Soft delete branch (owner only)
-router.delete('/:id', authorize('owner'), softDelete);
+// Soft delete branch (owner and co-owner)
+router.delete('/:id', authorize('owner', 'co-owner'), softDelete);
 
-// Restore branch (owner only)
-router.post('/:id/restore', authorize('owner'), restore);
+// Restore branch (owner and co-owner)
+router.post('/:id/restore', authorize('owner', 'co-owner'), restore);
 
 // Get locked periods for a branch (requires auth, any role can read)
 router.get('/:id/locked-periods', getLockedPeriods);
