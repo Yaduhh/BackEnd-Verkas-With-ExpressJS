@@ -23,6 +23,7 @@ const paymentMethodRoutes = require('./routes/paymentMethodRoutes');
 const bankAccountRoutes = require('./routes/bankAccountRoutes');
 const branchReportRoutes = require('./routes/branchReportRoutes');
 const appConfigRoutes = require('./routes/appConfigRoutes');
+const assistantRoutes = require('./routes/assistantRoutes');
 
 // Initialize app
 const app = express();
@@ -313,6 +314,7 @@ app.use('/api/payment-methods', paymentMethodRoutes);
 app.use('/api/bank-accounts', bankAccountRoutes);
 app.use('/api/branch-reports', branchReportRoutes);
 app.use('/api/app-config', appConfigRoutes);
+app.use('/api/assistant', assistantRoutes);
 
 // 404 handler
 app.use(notFound);

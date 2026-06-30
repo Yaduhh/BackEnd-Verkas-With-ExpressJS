@@ -1524,7 +1524,8 @@ const getSystemSettings = async (req, res, next) => {
       default_admin_limit: 2,
       min_password_length: 6,
       smtp_host: 'smtp.verkas.id',
-      smtp_user: 'noreply@verkas.id'
+      smtp_user: 'noreply@verkas.id',
+      enable_ai_assistant: false
     };
 
     res.json({
