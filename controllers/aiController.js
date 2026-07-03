@@ -1320,9 +1320,9 @@ Berikut adalah baseline ringkasan keuangan bulanan Buku Kas "${branchName || 'Ka
       });
     }
 
-    if (picTeam && picTeam.length > 0) {
+    if (teamMembers && teamMembers.length > 0) {
       systemPrompt += `\n### TIM PIC / ADMIN YANG BERTANGGUNG JAWAB DI CABANG INI:\n`;
-      picTeam.forEach(t => {
+      teamMembers.forEach(t => {
         systemPrompt += `- Tim/Admin "${t.name}" (${t.email}) - Peran: ${t.role === 'owner' ? 'Owner' : 'Co-Owner'}\n`;
       });
     }
