@@ -1,3 +1,5 @@
+const { chatWithAI } = require('./aiController');
+
 const chatWithAssistant = async (req, res, next) => {
   try {
     req.setTimeout(180000); // 3 minutes timeout to allow slow CPU-based Gemma 4 inference
@@ -26,32 +28,14 @@ const chatWithAssistant = async (req, res, next) => {
       });
     }
 
-    const aiServiceUrl = process.env.AI_SERVICE_URL || 'http://localhost:5005';
-    console.log(`[Backend-Main] Forwarding request to AI Service: ${aiServiceUrl}/api/ai/chat`);
+    // Set branchId on req.body so chatWithAI can extract it
+    req.body.branchId = branchId;
 
-    const response = await fetch(`${aiServiceUrl}/api/ai/chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        message,
-        chatHistory,
-        branchId,
-        branchName
-      })
-    });
-
-    const data = await response.json();
-    
-    if (!response.ok) {
-      throw new Error(data.message || 'Gagal terhubung ke AI Service');
-    }
-
-    return res.status(200).json(data);
+    console.log(`[Backend-Main] Calling local integrated AI Service directly...`);
+    return await chatWithAI(req, res);
 
   } catch (error) {
-    console.error('Error forwarding to AI Service:', error);
+    console.error('Error in integrated AI Service:', error);
     return res.status(500).json({
       success: false,
       message: 'Gagal memproses pesan dengan AI',

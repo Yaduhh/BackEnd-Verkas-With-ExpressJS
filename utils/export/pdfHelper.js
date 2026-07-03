@@ -642,19 +642,22 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
             // Render Sub Items if they exist
             if (bh.subItems && bh.subItems.length > 0) {
-                bh.subItems.forEach(sh => {
-                    checkNewPage(16);
-                    doc.font(fontRegular).fontSize(8.5).fillColor('#444444').text(`— ${sh.title}`, margin + 55, y);
+                const activeSubItems = bh.subItems.filter(sh => sh.is_active === undefined || sh.is_active === true || sh.is_active === 'true' || sh.is_active === 1 || sh.is_active === '1');
+                if (activeSubItems.length > 0) {
+                    activeSubItems.forEach(sh => {
+                        checkNewPage(16);
+                        doc.font(fontRegular).fontSize(8.5).fillColor('#444444').text(`— ${sh.title}`, margin + 55, y);
 
-                    if (sh.percentage !== undefined && sh.percentage !== '') {
-                        doc.text(`${sh.percentage}%`, margin + 470, y, { align: 'right', width: 45 });
-                    }
+                        if (sh.percentage !== undefined && sh.percentage !== '') {
+                            doc.text(`${sh.percentage}%`, margin + 470, y, { align: 'right', width: 45 });
+                        }
 
-                    doc.text('Rp', margin + 360, y);
-                    doc.text(formatCurrencyForPDF(sh.amount), margin + 380, y, { align: 'right', width: 85 });
-                    y += 15;
-                });
-                y += 5; // Extra spacing after a group of sub-items
+                        doc.text('Rp', margin + 360, y);
+                        doc.text(formatCurrencyForPDF(sh.amount), margin + 380, y, { align: 'right', width: 85 });
+                        y += 15;
+                    });
+                    y += 5; // Extra spacing after a group of sub-items
+                }
             }
         });
         doc.strokeColor('#000000').lineWidth(1).moveTo(margin + 360, y).lineTo(pageWidth - margin, y).stroke();
@@ -767,14 +770,17 @@ async function exportBagiHasilToPDF(report, filename, branchName, selectedMonthD
 
         // Sub items
         if (bh.subItems && bh.subItems.length > 0) {
-            bh.subItems.forEach(sh => {
-                if (y > doc.page.height - 40) { doc.addPage(); y = 50; }
-                doc.fillColor('#4b5563').fontSize(9).font(fontRegular).text(`— ${sh.title}`, margin + 25, y);
-                if (sh.percentage) doc.text(`${sh.percentage}%`, margin + 300, y, { width: 50, align: 'right' });
-                doc.text(`Rp ${formatCurrency(sh.amount).replace('Rp', '').trim()}`, margin + 380, y, { width: 100, align: 'right' });
-                y += 15;
-            });
-            y += 5;
+            const activeSubItems = bh.subItems.filter(sh => sh.is_active === undefined || sh.is_active === true || sh.is_active === 'true' || sh.is_active === 1 || sh.is_active === '1');
+            if (activeSubItems.length > 0) {
+                activeSubItems.forEach(sh => {
+                    if (y > doc.page.height - 40) { doc.addPage(); y = 50; }
+                    doc.fillColor('#4b5563').fontSize(9).font(fontRegular).text(`— ${sh.title}`, margin + 25, y);
+                    if (sh.percentage) doc.text(`${sh.percentage}%`, margin + 300, y, { width: 50, align: 'right' });
+                    doc.text(`Rp ${formatCurrency(sh.amount).replace('Rp', '').trim()}`, margin + 380, y, { width: 100, align: 'right' });
+                    y += 15;
+                });
+                y += 5;
+            }
         }
 
         doc.strokeColor('#f3f4f6').lineWidth(0.5).moveTo(margin + 10, y).lineTo(pageWidth - margin, y).stroke();

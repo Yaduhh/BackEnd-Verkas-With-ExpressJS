@@ -1,0 +1,68 @@
+# PANDUAN PENGGUNAAN & PENGETAHUAN SISTEM VERKAS (VERSI 4.0.7)
+
+## 1. PENDAHULUAN & KONSEP UTAMA
+VerKas adalah aplikasi pencatatan keuangan bisnis terintegrasi untuk mengelola kas operasional harian, tabungan/simpanan, piutang multi-mitra, dan laporan keuangan multi-cabang.
+Aplikasi ini tersedia dalam dua platform yang terintegrasi:
+- Web App (Vite Framework): Digunakan untuk dashboard pemantauan global, analisis mendalam, ekspor laporan (PDF/Excel), dan konfigurasi tim/cabang oleh Owner.
+- Mobile App (Expo): Digunakan untuk input transaksi harian di lapangan secara instan oleh Admin/Kasir atau pemantauan cepat oleh Owner.
+
+---
+
+## 2. STRUKTUR HALAMAN & SCREEN APLIKASI
+### A. Web App (Vite Framework)
+1. Dashboard Harian, Bulanan & Tahunan:
+   - Menampilkan kartu ringkasan keuangan: Total Omzet, Pengeluaran, Pemasukan Lain-Lain, Pelunasan Piutang Periode Lalu, Pajak PB1, dan Total Saldo Bersih.
+   - Dilengkapi grafik tren laba rugi serta status kelengkapan berkas/lampiran transaksi.
+2. Halaman Transaksi:
+   - Daftar tabel seluruh transaksi berjalan di cabang terpilih.
+   - Menyediakan fitur pencarian catatan, filter berdasarkan tipe (pemasukan/pengeluaran), kategori, lampiran berkas, dan pengurutan data.
+3. Halaman Kelola Cabang (Buku Kas):
+   - Tempat bagi Owner untuk membuat cabang baru (Tambah Cabang) dan mengunci periode transaksi (Kunci Periode).
+4. Halaman Kelola Tim:
+   - Digunakan Owner untuk mengundang tim, menyetujui pendaftaran, menetapkan peran (Co-Owner, Admin), dan menentukan cabang yang boleh diakses (PIC Cabang).
+5. Halaman Laba Rugi & Rekening:
+   - Visualisasi mendalam alokasi pengeluaran per kategori dan mutasi saldo berjalan di setiap rekening bank.
+
+### B. Mobile App (Expo)
+1. Home Screen:
+   - Dashboard ringkas saldo kas hari ini, info cabang aktif, tombol shortcut Tambah Transaksi, dan daftar transaksi terbaru.
+2. Form Input Transaksi:
+   - Layar khusus untuk memasukkan transaksi baru secara cepat.
+3. Daftar Piutang & Mitra:
+   - Menampilkan sisa piutang per mitra bisnis dan daftar transaksi piutang yang belum lunas.
+4. AI Assistant Chat Screen:
+   - Layar obrolan interaktif dengan Asisten AI Verkas untuk menganalisis keuangan toko secara instan.
+
+---
+
+## 3. ALUR DAN PANDUAN CARA INPUT DATA
+### A. Cara Membuat Transaksi Baru (Pemasukan / Pengeluaran)
+1. Klik tombol "Tambah Transaksi" (Web: tombol hijau di kanan atas halaman Transaksi; Mobile: tombol bulat "+" di Home Screen).
+2. Isi kolom formulir transaksi yang tersedia:
+   - Tipe Transaksi: Pilih "Pemasukan" atau "Pengeluaran".
+   - Kategori: Pilih kategori yang sesuai (misal: Bahan Baku, Operasional, Gaji Karyawan, Omzet Penjualan, dll).
+   - Nominal (Amount): Masukkan nominal angka rupiah (tanpa titik/koma secara manual).
+   - Metode Pembayaran: Pilih metode pembayaran (Cash, Transfer Bank Mandiri/BCA, E-Wallet, dll).
+   - Catatan (Note): Tulis deskripsi singkat mengenai tujuan transaksi tersebut.
+   - Pajak PB1: Centang jika transaksi tersebut dikenakan Pajak PB1 (jika metode pembayaran yang digunakan bertipe taxable).
+3. Klik "Simpan Transaksi".
+
+### B. Cara Memasukkan Lampiran Berkas (Upload Bukti Transaksi)
+1. Di dalam formulir "Tambah Transaksi" atau saat mengedit transaksi, terdapat area "Lampiran / Attachment" (ikon kamera atau file uploader).
+2. Klik tombol uploader tersebut:
+   - Di Web: Pilih file gambar (.jpg, .png) atau dokumen (.pdf) dari komputer Anda.
+   - Di Mobile: Anda bisa langsung mengambil foto nota/kuitansi menggunakan Kamera HP atau memilih file dari Galeri Foto.
+3. Setelah file terpilih dan muncul pratonton (preview), file tersebut akan otomatis diunggah ke cloud storage saat transaksi disimpan.
+4. Transaksi yang belum memiliki lampiran akan ditandai dengan warna merah/kuning di dashboard sebagai peringatan kelengkapan berkas.
+
+### C. Alokasi Piutang & Pelunasan Multi-Mitra
+1. Membuat Piutang Baru:
+   - Centang checkbox "Transaksi Piutang" (is_debt_payment) pada formulir pemasukan/omzet.
+   - Pilih satu atau beberapa Mitra Bisnis (Multi-Mitra) yang bertanggung jawab atas piutang tersebut.
+   - Tentukan alokasi nominal piutang untuk masing-masing mitra (misal: total piutang Rp 10.000.000 dialokasikan Rp 6.000.000 ke Mitra A dan Rp 4.000.000 ke Mitra B).
+   - Isi "Uang Muka / Terbayar Di Awal" (paid_amount) jika mitra langsung membayar sebagian nominal di awal.
+2. Melakukan Pelunasan/Cicilan (Repayments):
+   - Masuk ke Detail Transaksi Piutang yang ingin dicicil.
+   - Gulir ke bawah ke bagian "Riwayat Pembayaran" dan klik "Catat Pembayaran Cicilan".
+   - Masukkan nominal cicilan yang dibayarkan oleh mitra dan pilih metode rekening penerimanya.
+   - Sistem secara otomatis akan memotong sisa utang mitra tersebut (remaining_debt) di database secara real-time.
