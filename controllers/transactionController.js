@@ -1478,7 +1478,7 @@ const createRepayment = async (req, res, next) => {
   const { transaction: dbTransaction, query } = require('../config/database');
   try {
     const { id } = req.params; // ID Transaksi Piutang Induk
-    const { mitra_piutang_id, amount, date, note, lampiran } = req.body;
+    const { mitra_piutang_id, transaction_mitra_detail_id, amount, date, note, lampiran } = req.body;
 
     if (!mitra_piutang_id || !amount || !date) {
       return res.status(400).json({
@@ -1507,7 +1507,13 @@ const createRepayment = async (req, res, next) => {
     const mitraId = parseInt(mitra_piutang_id);
 
     // Get specific mitra detail
-    const mitraDetail = transaction.mitra_details.find(m => m.mitra_piutang_id === mitraId);
+    let mitraDetail;
+    if (transaction_mitra_detail_id) {
+      mitraDetail = transaction.mitra_details.find(m => m.id === parseInt(transaction_mitra_detail_id));
+    } else {
+      mitraDetail = transaction.mitra_details.find(m => m.mitra_piutang_id === mitraId);
+    }
+
     if (!mitraDetail) {
       return res.status(404).json({ success: false, message: 'Data mitra tidak ditemukan di transaksi ini' });
     }
@@ -1535,12 +1541,21 @@ const createRepayment = async (req, res, next) => {
       const newMitraPaid = parseFloat(mitraDetail.paid_amount) + repaymentAmount;
       const newMitraRemaining = parseFloat(mitraDetail.remaining_debt) - repaymentAmount;
 
-      await conn.execute(
-        `UPDATE transaction_mitra_details 
-         SET paid_amount = ?, remaining_debt = ? 
-         WHERE transaction_id = ? AND mitra_piutang_id = ?`,
-        [newMitraPaid, newMitraRemaining, id, mitraId]
-      );
+      if (transaction_mitra_detail_id) {
+        await conn.execute(
+          `UPDATE transaction_mitra_details 
+           SET paid_amount = ?, remaining_debt = ? 
+           WHERE id = ?`,
+          [newMitraPaid, newMitraRemaining, parseInt(transaction_mitra_detail_id)]
+        );
+      } else {
+        await conn.execute(
+          `UPDATE transaction_mitra_details 
+           SET paid_amount = ?, remaining_debt = ? 
+           WHERE transaction_id = ? AND mitra_piutang_id = ?`,
+          [newMitraPaid, newMitraRemaining, id, mitraId]
+        );
+      }
 
       // 2. Update main transactions record
       await conn.execute(
@@ -1565,9 +1580,9 @@ const createRepayment = async (req, res, next) => {
 
       // 4. Insert into transaction_repayments
       await conn.execute(
-        `INSERT INTO transaction_repayments (transaction_id, mitra_piutang_id, user_id, amount, payment_date, note, lampiran, income_transaction_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, mitraId, req.userId, repaymentAmount, date, note || null, lampiranValue, incomeTransactionId]
+        `INSERT INTO transaction_repayments (transaction_id, mitra_piutang_id, transaction_mitra_detail_id, user_id, amount, payment_date, note, lampiran, income_transaction_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, mitraId, transaction_mitra_detail_id ? parseInt(transaction_mitra_detail_id) : null, req.userId, repaymentAmount, date, note || null, lampiranValue, incomeTransactionId]
       );
     });
 
@@ -1601,6 +1616,7 @@ const createRepayment = async (req, res, next) => {
       message: 'Pelunasan berhasil dicatat'
     });
   } catch (error) {
+    console.error('=== CREATE REPAYMENT ERROR ===', error);
     next(error);
   }
 };
@@ -1617,7 +1633,12 @@ const updateRepayment = async (req, res, next) => {
     }
 
     const transaction = await Transaction.findById(id);
-    const mitraDetail = transaction.mitra_details.find(m => m.mitra_piutang_id === repayment.mitra_piutang_id);
+    let mitraDetail;
+    if (repayment.transaction_mitra_detail_id) {
+      mitraDetail = transaction.mitra_details.find(m => m.id === repayment.transaction_mitra_detail_id);
+    } else {
+      mitraDetail = transaction.mitra_details.find(m => m.mitra_piutang_id === repayment.mitra_piutang_id);
+    }
 
     const oldAmount = parseFloat(repayment.amount);
     const newAmount = parseFloat(amount);
@@ -1636,12 +1657,21 @@ const updateRepayment = async (req, res, next) => {
 
     await dbTransaction(async (conn) => {
       // 1. Update mitra detail
-      await conn.execute(
-        `UPDATE transaction_mitra_details 
-         SET paid_amount = paid_amount + ?, remaining_debt = remaining_debt - ? 
-         WHERE transaction_id = ? AND mitra_piutang_id = ?`,
-        [diff, diff, id, repayment.mitra_piutang_id]
-      );
+      if (repayment.transaction_mitra_detail_id) {
+        await conn.execute(
+          `UPDATE transaction_mitra_details 
+           SET paid_amount = paid_amount + ?, remaining_debt = remaining_debt - ? 
+           WHERE id = ?`,
+          [diff, diff, repayment.transaction_mitra_detail_id]
+        );
+      } else {
+        await conn.execute(
+          `UPDATE transaction_mitra_details 
+           SET paid_amount = paid_amount + ?, remaining_debt = remaining_debt - ? 
+           WHERE transaction_id = ? AND mitra_piutang_id = ?`,
+          [diff, diff, id, repayment.mitra_piutang_id]
+        );
+      }
 
       // 2. Update main transaction
       await conn.execute(
@@ -1714,16 +1744,31 @@ const deleteRepayment = async (req, res, next) => {
 
     const transaction = await Transaction.findById(id);
     const amount = parseFloat(repayment.amount);
-    const mitraDetail = transaction.mitra_details.find(m => m.mitra_piutang_id === repayment.mitra_piutang_id);
+    
+    let mitraDetail;
+    if (repayment.transaction_mitra_detail_id) {
+      mitraDetail = transaction.mitra_details.find(m => m.id === repayment.transaction_mitra_detail_id);
+    } else {
+      mitraDetail = transaction.mitra_details.find(m => m.mitra_piutang_id === repayment.mitra_piutang_id);
+    }
 
     await dbTransaction(async (conn) => {
       // 1. Revert balances
-      await conn.execute(
-        `UPDATE transaction_mitra_details 
-         SET paid_amount = paid_amount - ?, remaining_debt = remaining_debt + ? 
-         WHERE transaction_id = ? AND mitra_piutang_id = ?`,
-        [amount, amount, id, repayment.mitra_piutang_id]
-      );
+      if (repayment.transaction_mitra_detail_id) {
+        await conn.execute(
+          `UPDATE transaction_mitra_details 
+           SET paid_amount = paid_amount - ?, remaining_debt = remaining_debt + ? 
+           WHERE id = ?`,
+          [amount, amount, repayment.transaction_mitra_detail_id]
+        );
+      } else {
+        await conn.execute(
+          `UPDATE transaction_mitra_details 
+           SET paid_amount = paid_amount - ?, remaining_debt = remaining_debt + ? 
+           WHERE transaction_id = ? AND mitra_piutang_id = ?`,
+          [amount, amount, id, repayment.mitra_piutang_id]
+        );
+      }
 
       await conn.execute(
         `UPDATE transactions SET paid_amount = paid_amount - ?, remaining_debt = remaining_debt + ? WHERE id = ?`,
@@ -1736,7 +1781,7 @@ const deleteRepayment = async (req, res, next) => {
       }
 
       // 3. Delete repayment record
-      await TransactionRepayment.delete(repaymentId);
+      await conn.execute(`DELETE FROM transaction_repayments WHERE id = ?`, [repaymentId]);
     });
 
     await LogService.logActivity({
