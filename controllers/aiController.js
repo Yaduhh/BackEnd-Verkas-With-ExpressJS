@@ -1,654 +1,24 @@
 const path = require('path');
-const os = require('os');
 const { query } = require('../config/database');
 const { DB_SCHEMA } = require('../config/dbSchema');
+const Transaction = require('../models/Transaction');
+
+// Import modular utilities
+const { logResourceUsage, callOpenRouter } = require('./ai/aiClient');
+const { formatIDR, formatIDRClean, formatDatesToLocal, getMonthRange, formatMonthIndo } = require('./ai/aiFormatter');
+const { sanitizeAndSandboxSQL } = require('./ai/aiSqlSandbox');
+const {
+  isGeneralMonthlyQuery,
+  tryResolveSubscriptionQueryDirectly,
+  tryResolveExtremeTransactionQueryDirectly,
+  tryResolveSavingsBalanceQueryDirectly,
+  tryResolvePICQueryDirectly,
+  tryResolveMonthlyQueryDirectly,
+  tryResolvePiutangQueryDirectly
+} = require('./ai/aiDirectResolver');
 
 // Server-side active branch tracker to clear chat history on branch switch
 const lastActiveBranch = new Map();
-
-// Log resource utilization (RAM and CPU Cores)
-function logResourceUsage(label = 'Resource Usage') {
-  const memory = process.memoryUsage();
-  const rss = (memory.rss / 1024 / 1024).toFixed(1);
-  const heapUsed = (memory.heapUsed / 1024 / 1024).toFixed(1);
-  const totalSystemRam = (os.totalmem() / 1024 / 1024 / 1024).toFixed(1);
-  const freeSystemRam = (os.freemem() / 1024 / 1024 / 1024).toFixed(1);
-  const cpuCount = os.cpus().length;
-
-  console.log(`[AI-Service] [${label}]`);
-  console.log(`  * CPU Cores Available  : ${cpuCount}`);
-  console.log(`  * Total System RAM     : ${totalSystemRam} GB (Free: ${freeSystemRam} GB)`);
-  console.log(`  * Process RSS Memory   : ${rss} MB`);
-  console.log(`  * JS Heap Used Memory  : ${heapUsed} MB`);
-}
-
-// AI API helper client (supports OpenRouter and Local AI like Ollama)
-async function callOpenRouter(messages) {
-  const provider = process.env.AI_PROVIDER || 'openrouter';
-
-  let url;
-  let headers = {
-    'Content-Type': 'application/json'
-  };
-  let body = {
-    messages: messages,
-    temperature: 0.1 // Low temperature for factual consistency
-  };
-
-  if (provider === 'local') {
-    const localUrl = process.env.LOCAL_AI_URL || 'http://localhost:11434/v1/chat/completions';
-    const localModel = process.env.LOCAL_AI_MODEL || 'gemma4:12b';
-    url = localUrl;
-    body.model = localModel;
-  } else {
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    const modelName = process.env.OPENROUTER_MODEL || 'google/gemma-2-9b-it';
-
-    if (!apiKey) {
-      throw new Error('OPENROUTER_API_KEY is not defined in env.');
-    }
-    url = 'https://openrouter.ai/api/v1/chat/completions';
-    headers['Authorization'] = `Bearer ${apiKey}`;
-    headers['HTTP-Referer'] = 'https://verkas.co';
-    headers['X-Title'] = 'Verkas AI Service';
-    body.model = modelName;
-  }
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: headers,
-    body: JSON.stringify(body)
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`AI API error (${provider}): ${response.status} ${response.statusText} - ${errorText}`);
-  }
-
-  const data = await response.json();
-  if (!data.choices || data.choices.length === 0) {
-    throw new Error(`AI API (${provider}) returned empty choices`);
-  }
-
-  return data.choices[0].message.content;
-}
-
-// Helper to replace a table name in SQL with a sandboxed subquery
-function replaceTableWithSandbox(sql, tableName, subquery) {
-  const regex = new RegExp(`\\b${tableName}\\b(?!\\s*\\.)(?:\\s+(?:AS\\s+)?([a-z0-9_]+))?`, 'gi');
-
-  return sql.replace(regex, (match, alias) => {
-    const keywords = ['JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'CROSS', 'WHERE', 'ON', 'GROUP', 'ORDER', 'LIMIT', 'UNION', 'AND', 'OR', 'USING', 'SET', 'VALUES', 'AS', 'FROM'];
-    if (alias && !keywords.includes(alias.toUpperCase())) {
-      return `${subquery} AS ${alias}`;
-    }
-
-    const suffix = alias ? match.slice(match.toLowerCase().lastIndexOf(alias.toLowerCase())) : '';
-    return `${subquery} AS ${tableName} ${suffix}`;
-  });
-}
-
-// Sanitize and sandbox query
-function sanitizeAndSandboxSQL(sql, branchId) {
-  let cleanSql = sql.replace(/`/g, '').trim();
-  cleanSql = cleanSql.replace(/^SELECTDISTINCT\b/i, 'SELECT DISTINCT');
-  cleanSql = cleanSql.replace(/^SELECT\s*DISTINCT/i, 'SELECT DISTINCT');
-  const upper = cleanSql.toUpperCase();
-
-  if (!upper.startsWith('SELECT')) {
-    throw new Error('Kueri tidak diizinkan: Hanya SELECT kueri yang diperbolehkan.');
-  }
-
-  const forbiddenKeywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE', 'RENAME', 'REPLACE', 'TRUNCATE', 'GRANT', 'REVOKE', 'LOAD_FILE', 'OUTFILE'];
-  for (const keyword of forbiddenKeywords) {
-    const regex = new RegExp(`\\b${keyword}\\b`, 'i');
-    if (regex.test(cleanSql)) {
-      throw new Error(`Kueri tidak diizinkan: Mengandung keyword terlarang ${keyword}.`);
-    }
-  }
-
-  // Securing branch data isolation
-  cleanSql = replaceTableWithSandbox(cleanSql, 'transactions',
-    `(SELECT * FROM transactions WHERE branch_id = ${branchId} AND status_deleted = 0)`
-  );
-
-  cleanSql = replaceTableWithSandbox(cleanSql, 'categories',
-    `(SELECT * FROM categories WHERE (branch_id = ${branchId} OR branch_id IS NULL) AND status_deleted = 0)`
-  );
-
-  cleanSql = replaceTableWithSandbox(cleanSql, 'mitra_piutang',
-    `(SELECT * FROM mitra_piutang WHERE branch_id = ${branchId} AND deleted_at IS NULL)`
-  );
-
-  cleanSql = replaceTableWithSandbox(cleanSql, 'transaction_mitra_details',
-    `(SELECT tmd.* FROM transaction_mitra_details tmd JOIN transactions t ON tmd.transaction_id = t.id WHERE t.branch_id = ${branchId} AND t.status_deleted = 0)`
-  );
-
-  cleanSql = replaceTableWithSandbox(cleanSql, 'transaction_income_details',
-    `(SELECT tid.* FROM transaction_income_details tid JOIN transactions t ON tid.transaction_id = t.id WHERE t.branch_id = ${branchId} AND t.status_deleted = 0)`
-  );
-
-  cleanSql = replaceTableWithSandbox(cleanSql, 'payment_methods',
-    `(SELECT * FROM payment_methods WHERE (branch_id = ${branchId} OR branch_id IS NULL))`
-  );
-
-  cleanSql = replaceTableWithSandbox(cleanSql, 'bank_accounts',
-    `(SELECT * FROM bank_accounts WHERE branch_id = ${branchId} AND is_active = 1)`
-  );
-
-  cleanSql = replaceTableWithSandbox(cleanSql, 'savings_account_allocations',
-    `(SELECT saa.* FROM savings_account_allocations saa JOIN bank_accounts ba ON saa.bank_account_id = ba.id WHERE ba.branch_id = ${branchId})`
-  );
-
-  cleanSql = replaceTableWithSandbox(cleanSql, 'branch_reports',
-    `(SELECT * FROM branch_reports WHERE branch_id = ${branchId})`
-  );
-
-  cleanSql = replaceTableWithSandbox(cleanSql, 'subscriptions',
-    `(SELECT * FROM subscriptions WHERE user_id = (SELECT owner_id FROM branches WHERE id = ${branchId} LIMIT 1))`
-  );
-
-  return cleanSql;
-}
-
-// Helpers for date and formats
-function getMonthRange(year, month) {
-  const start = `${year}-${String(month).padStart(2, '0')}-01`;
-  const end = new Date(year, month, 0).getDate();
-  const endDate = `${year}-${String(month).padStart(2, '0')}-${String(end).padStart(2, '0')}`;
-  return { start, end: endDate };
-}
-
-const formatIDR = (num) => {
-  return new Intl.NumberFormat('id-ID', {
-    style: 'currency',
-    currency: 'IDR',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2
-  }).format(num);
-};
-
-const formatIDRClean = (num) => {
-  const val = parseFloat(num);
-  if (isNaN(val)) return num;
-  return new Intl.NumberFormat('id-ID', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  }).format(val);
-};
-
-const formatMonthIndo = (monthStr) => {
-  if (!monthStr) return '';
-  const [y, m] = monthStr.split('-');
-  const d = new Date(parseInt(y), parseInt(m) - 1, 1);
-  return d.toLocaleString('id-ID', { month: 'long', year: 'numeric' });
-};
-
-// Traverses query results and formats Date/Numeric objects to clean values
-function formatDatesToLocal(obj, parentKey = '') {
-  if (obj === null || obj === undefined) return obj;
-  if (obj instanceof Date) {
-    const pad = (n) => String(n).padStart(2, '0');
-    const year = obj.getFullYear();
-    const month = pad(obj.getMonth() + 1);
-    const date = pad(obj.getDate());
-    const hours = pad(obj.getHours());
-    const minutes = pad(obj.getMinutes());
-    const seconds = pad(obj.getSeconds());
-    return `${year}-${month}-${date} ${hours}:${minutes}:${seconds}`;
-  }
-
-  // Handle primitives (string / number)
-  let isNumeric = false;
-  let numVal = obj;
-  if (typeof obj === 'string' && /^-?\d+(\.\d+)?$/.test(obj)) {
-    numVal = parseFloat(obj);
-    isNumeric = true;
-  } else if (typeof obj === 'number') {
-    isNumeric = true;
-  }
-
-  if (isNumeric && !isNaN(numVal)) {
-    const lowerKey = String(parentKey).toLowerCase();
-    // Exclude IDs, counts, codes, dates, etc. from currency formatting
-    if (lowerKey.endsWith('id') || lowerKey === 'id' || lowerKey.includes('code') || lowerKey.includes('year') || lowerKey.includes('month') || lowerKey.includes('day') || lowerKey.includes('count') || lowerKey.includes('transaction') || lowerKey.includes('status') || lowerKey.includes('working_days')) {
-      return numVal;
-    }
-    // Format as proper Indonesian Rupiah currency string
-    return new Intl.NumberFormat('id-ID', {
-      style: 'currency',
-      currency: 'IDR',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 2
-    }).format(numVal);
-  }
-
-  if (Array.isArray(obj)) {
-    return obj.map(item => formatDatesToLocal(item, parentKey));
-  }
-  if (typeof obj === 'object') {
-    const newObj = {};
-    for (const key of Object.keys(obj)) {
-      newObj[key] = formatDatesToLocal(obj[key], key);
-    }
-    return newObj;
-  }
-  return obj;
-}
-
-function isGeneralMonthlyQuery(message) {
-  const msg = message.toLowerCase();
-
-  // Keywords indicating a monthly or current period query
-  const months = ['januari', 'februari', 'maret', 'april', 'mei', 'juni', 'juli', 'agustus', 'september', 'oktober', 'november', 'desember', 'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'agu', 'sep', 'okt', 'nov', 'des'];
-
-  const hasMonth = months.some(m => msg.includes(m));
-  const hasThisMonth = msg.includes('bulan ini') || msg.includes('hari ini') || msg.includes('sekarang');
-
-  if (!hasMonth && !hasThisMonth) return false;
-
-  // General summary indicators
-  const generalKeywords = [
-    'laporan', 'ringkasan', 'keuangan',
-    'omzet', 'omset',
-    'pemasukan', 'pengeluaran', 'belanja',
-    'saldo', 'laba bersih', 'laba', 'keuntungan', 'netto',
-    'pb1', 'pajak',
-    'kas berjalan', 'total kas',
-    'pemasukan lain-lain', 'pemasukan lain', 'pemasukan lainnya'
-  ];
-
-  const hasGeneralKeyword = generalKeywords.some(kw => msg.includes(kw));
-
-  // Exclude specific category/repayment queries that require dynamic SQL
-  const specificExclusions = [
-    'biaya lain', 'pendapatan lain', 'bahan baku', 'operasional', 'gaji', 'marketplace', 'grab', 'go food', 'shopee', 'tokopedia', 'lazada', 'toko', 'sewa', 'gathering'
-  ];
-  const isSpecific = specificExclusions.some(ex => msg.includes(ex));
-
-  // Exclude detailed/sorting/extreme queries that need SQL query execution
-  const hasDetailedOrSorted = ['besar', 'banyak', 'kecil', 'detail', 'apa saja', 'daftar', 'list', 'nama', 'kategori', 'terbesar', 'terbanyak', 'terkecil', 'paling'].some(w => msg.includes(w));
-  if (hasDetailedOrSorted) return false;
-
-  return hasGeneralKeyword && !isSpecific;
-}
-
-// Direct resolver for Verkas packages / subscriptions
-function tryResolveSubscriptionQueryDirectly(message, subscriptionPlans, activeSubscription) {
-  const msg = message.toLowerCase();
-  const msgClean = msg.replace(/\s+/g, '');
-  const isSubQuery = ['paket', 'langganan', 'subscription', 'hargaverkas', 'biayaverkas', 'layananverkas', 'bayarverkas'].some(kw => msgClean.includes(kw)) ||
-    (msg.includes('paket') || msg.includes('langganan') || msg.includes('subscription')) ||
-    ((msg.includes('biaya') || msg.includes('harga') || msg.includes('layanan') || msg.includes('tarif')) && msg.includes('verkas'));
-
-  if (!isSubQuery) return null;
-
-  // Check if they are asking about their own active subscription
-  const isPersonalQuery = ['saya', 'gua', 'aktif', 'kapan', 'habis', 'expired', 'punya', 'milik'].some(w => msg.includes(w));
-  if (isPersonalQuery) {
-    if (activeSubscription) {
-      const endDate = new Date(activeSubscription.end_date).toLocaleDateString('id-ID', { year: 'numeric', month: 'long', day: 'numeric' });
-      return `Paket langganan aktif Anda saat ini adalah Paket "${activeSubscription.plan_name}" (Status: ${activeSubscription.status}). Paket ini aktif sampai tanggal ${endDate}.`;
-    } else {
-      return `Anda saat ini tidak memiliki paket langganan aktif yang terdaftar di sistem.`;
-    }
-  }
-
-  if (subscriptionPlans && subscriptionPlans.length > 0) {
-    let reply = `Daftar paket langganan Verkas yang tersedia:\n`;
-    subscriptionPlans.forEach(p => {
-      const priceM = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(p.price_monthly);
-      const priceY = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(p.price_yearly);
-      const branchesLimit = p.max_branches === null ? 'Tanpa Batas' : `${p.max_branches} Cabang`;
-      const adminLimit = p.max_admin === null ? 'Tanpa Batas' : `${p.max_admin} Staf`;
-
-      reply += `- Paket ${p.name}: ${p.description || ''} (Maks: ${branchesLimit}, ${adminLimit}) - Bulanan: ${priceM}, Tahunan: ${priceY}\n`;
-    });
-    return reply;
-  }
-  return null;
-}
-
-async function tryResolveSavingsBalanceQueryDirectly(message, branchId, chatHistory) {
-  const msg = message.toLowerCase();
-  
-  const hasSavingsKeyword = ['simpanan', 'simpaan', 'tabungan', 'cadangan'].some(kw => msg.includes(kw));
-  
-  let isSavingsBalanceQuery = hasSavingsKeyword && 
-    (msg.includes('saldo') || msg.includes('uang') || msg.includes('isi') || msg.includes('nominal') || msg.includes('berapa') || msg.includes('detail') || msg.includes('tampilkan') || msg.includes('list') || msg.includes('daftar') || msg.includes('terbesar') || msg.includes('terkecil') || msg.includes('mana') || msg.includes('dimana') || msg.includes('paling'));
-
-  // Conversational follow-up detection from chat history
-  if (!isSavingsBalanceQuery && chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0) {
-    const lastUserMsgs = chatHistory.filter(h => h.role === 'user').slice(-2);
-    const historyWasSavings = lastUserMsgs.some(m => {
-      const contentLower = m.content.toLowerCase();
-      return (contentLower.includes('saldo') || contentLower.includes('uang') || contentLower.includes('isi') || contentLower.includes('nominal') || contentLower.includes('berapa') || contentLower.includes('terbesar') || contentLower.includes('terkecil') || contentLower.includes('mana') || contentLower.includes('dimana') || contentLower.includes('paling')) &&
-        ['simpanan', 'simpaan', 'tabungan', 'cadangan'].some(kw => contentLower.includes(kw));
-    });
-
-    if (historyWasSavings) {
-      const followUpKeywords = ['kalau', 'lalu', 'bagaimana', 'gimana', 'dan', 'yg', 'yang', 'untuk', 'sisa'];
-      const isFollowUp = followUpKeywords.some(kw => msg.includes(kw)) || msg.split(/\s+/).length <= 4 || hasSavingsKeyword;
-      if (isFollowUp) {
-        isSavingsBalanceQuery = true;
-      }
-    }
-  }
-
-  if (!isSavingsBalanceQuery) return null;
-
-  try {
-    const rawSql = `
-      SELECT cat.name, SUM(CASE WHEN t.type = 'income' OR (t.is_umum = 1 AND t.type = 'expense') THEN amount_val ELSE -amount_val END) as saldo 
-      FROM (
-        SELECT id, type, is_umum, amount as amount_val, category_id, transaction_date 
-        FROM transactions 
-        WHERE branch_id = ? AND status_deleted = 0 
-        UNION ALL 
-        SELECT t.id, t.type, t.is_umum, tsd.amount as amount_val, tsd.category_id, t.transaction_date 
-        FROM transaction_savings_details tsd 
-        JOIN transactions t ON tsd.transaction_id = t.id 
-        WHERE t.branch_id = ? AND t.status_deleted = 0
-      ) as t 
-      JOIN categories cat ON t.category_id = cat.id 
-      WHERE (cat.branch_id = ? OR cat.branch_id IS NULL) 
-        AND cat.status_deleted = 0 
-        AND cat.parent_id IS NOT NULL 
-        AND (cat.name LIKE '%Simpanan%' OR cat.name = 'Packaging') 
-      GROUP BY cat.id, cat.name
-      ORDER BY cat.name ASC
-    `;
-    const results = await query(rawSql, [branchId, branchId, branchId]);
-    if (!results || results.length === 0) {
-      return 'Belum ada data saldo untuk masing-masing kas simpanan Anda.';
-    }
-
-    // Check if user is asking for a specific savings account
-    const matchedResults = results.filter(r => {
-      const cleanCatName = r.name.toLowerCase().replace(/kas\s+simpanan\s*/g, '').trim();
-      return msg.includes(cleanCatName) || msg.includes(r.name.toLowerCase());
-    });
-
-    let filteredResults = results;
-    let isSpecific = false;
-    if (matchedResults.length > 0) {
-      filteredResults = matchedResults;
-      isSpecific = true;
-    }
-
-    const formatRupiah = (num) => {
-      return 'Rp ' + new Intl.NumberFormat('id-ID', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2
-      }).format(num);
-    };
-
-    // Check if asking for extreme values (largest / smallest)
-    const wantsLargest = msg.includes('terbesar') || msg.includes('terbanyak') || (msg.includes('paling') && (msg.includes('besar') || msg.includes('banyak')));
-    const wantsSmallest = msg.includes('terkecil') || msg.includes('tersedikit') || (msg.includes('paling') && (msg.includes('kecil') || msg.includes('sedikit')));
-
-    if (wantsLargest) {
-      const sorted = [...results].sort((a, b) => (parseFloat(b.saldo) || 0) - (parseFloat(a.saldo) || 0));
-      if (sorted.length > 0) {
-        const top = sorted[0];
-        return `Kas Simpanan terbesar Anda saat ini adalah ${top.name} dengan saldo ${formatRupiah(parseFloat(top.saldo) || 0)}.`;
-      }
-    }
-
-    if (wantsSmallest) {
-      const sorted = [...results].sort((a, b) => (parseFloat(a.saldo) || 0) - (parseFloat(b.saldo) || 0));
-      if (sorted.length > 0) {
-        const bottom = sorted[0];
-        return `Kas Simpanan terkecil Anda saat ini adalah ${bottom.name} dengan saldo ${formatRupiah(parseFloat(bottom.saldo) || 0)}.`;
-      }
-    }
-
-    if (isSpecific && filteredResults.length === 1) {
-      const r = filteredResults[0];
-      const saldoVal = parseFloat(r.saldo) || 0;
-      return `Saldo ${r.name} Anda saat ini adalah ${formatRupiah(saldoVal)}.`;
-    }
-
-    let totalSavings = 0;
-    let reply = isSpecific 
-      ? 'Berikut adalah rincian saldo Kas Simpanan yang Anda cari:\n\n' 
-      : 'Berikut adalah rincian saldo masing-masing Kas Simpanan Anda:\n\n';
-      
-    filteredResults.forEach(r => {
-      const saldoVal = parseFloat(r.saldo) || 0;
-      totalSavings += saldoVal;
-      reply += `- ${r.name}: ${formatRupiah(saldoVal)}\n`;
-    });
-
-    if (filteredResults.length > 1) {
-      reply += `\nTotal Keseluruhan Kas Simpanan: ${formatRupiah(totalSavings)}`;
-    }
-    return reply;
-  } catch (err) {
-    console.error('[AI-Service] tryResolveSavingsBalanceQueryDirectly failed:', err);
-    return null;
-  }
-}
-
-function tryResolvePICQueryDirectly(message, branchPics, teamMembers, branchName) {
-  const msg = message.toLowerCase();
-  
-  // Detect if query is about PIC / admin / team members list of the branch
-  const isPICQuery = ['admin', 'pic', 'tim', 'staff', 'staf', 'owner', 'anggota', 'orang'].some(kw => msg.includes(kw)) &&
-    ['siapa', 'daftar', 'list', 'tunjukan', 'lihat', 'ada'].some(kw => msg.includes(kw));
-
-  if (!isPICQuery) return null;
-
-  if ((!branchPics || branchPics.length === 0) && (!teamMembers || teamMembers.length === 0)) {
-    return `Belum ada tim PIC / Admin / Owner yang terdaftar di Buku Kas "${branchName}".`;
-  }
-
-  let reply = `Berikut adalah daftar Tim yang bertanggung jawab di Buku Kas "${branchName}":\n\n`;
-
-  if (teamMembers && teamMembers.length > 0) {
-    reply += `Owner & Co-Owner (Pengelola Utama):\n`;
-    teamMembers.forEach(t => {
-      const roleStr = t.role === 'owner' ? 'Owner' : (t.role === 'co-owner' ? 'Co-Owner' : t.role);
-      reply += `- ${t.name} (${t.email}) - ${roleStr}\n`;
-    });
-    reply += `\n`;
-  }
-
-  if (branchPics && branchPics.length > 0) {
-    reply += `Person In Charge (PIC) / Admin:\n`;
-    branchPics.forEach(p => {
-      reply += `- ${p.name} (${p.email})\n`;
-    });
-  }
-
-  return reply;
-}
-
-function tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchName) {
-  const msg = message.toLowerCase();
-
-  // Exclude savings/simpanan queries so they are handled dynamically via SQL and LLM
-  const isSavingsQuery = ['simpanan', 'simpaan', 'tabungan', 'cadangan', 'pribadi'].some(w => msg.includes(w));
-  if (isSavingsQuery) return null;
-
-  // 0. Exclude detailed/sorting/extreme queries that need SQL query execution (like biggest, most, list of categories)
-  const isDetailedOrSorted = ['besar', 'banyak', 'kecil', 'detail', 'apa saja', 'daftar', 'list', 'nama', 'kategori', 'terbesar', 'terbanyak', 'terkecil', 'paling'].some(w => msg.includes(w));
-  if (isDetailedOrSorted) return null;
-
-  // 1. Detect if comparing June and July (month-over-month)
-  const comparativeKeywords = ['bandingkan', 'banding', 'perbandingan', 'selisih', 'vs', 'perkembangan', 'tren', 'analisis', 'analisa', 'kenapa', 'mengapa', 'sebab', 'alasan'];
-  const isComparative = comparativeKeywords.some(kw => msg.includes(kw));
-
-  const isComparingJuneJuly = (msg.includes('juni') && msg.includes('juli')) ||
-    (msg.includes('bulan ini') && (msg.includes('bulan kemarin') || msg.includes('bulan lalu')));
-
-  if (isComparingJuneJuly && isComparative) {
-    const formatIDR = (num) => {
-      return new Intl.NumberFormat('id-ID', {
-        style: 'currency',
-        currency: 'IDR',
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2
-      }).format(num);
-    };
-
-    const junBerjalan = monthlySummaries.find(s => s.month_str === '2026-06' && s.is_umum === 1);
-    const julBerjalan = monthlySummaries.find(s => s.month_str === '2026-07' && s.is_umum === 1);
-
-    if (junBerjalan && julBerjalan) {
-      const junOmzet = junBerjalan.raw_omzet - junBerjalan.total_pb1;
-      const julOmzet = julBerjalan.raw_omzet - julBerjalan.total_pb1;
-
-      const junPengeluaran = junBerjalan.pengeluaran;
-      const julPengeluaran = julBerjalan.pengeluaran;
-
-      const junSaldo = (junBerjalan.pemasukan - junBerjalan.total_pb1) - junBerjalan.pengeluaran;
-      const julSaldo = (julBerjalan.pemasukan - julBerjalan.total_pb1) - julBerjalan.pengeluaran;
-
-      // Omzet comparison
-      if (msg.includes('omzet') || msg.includes('omset')) {
-        const diff = julOmzet - junOmzet;
-        const trend = diff > 0 ? 'kenaikan' : 'penurunan';
-        return `Perbandingan Omzet Kas Berjalan:
-- Juni 2026 (Bulan Lalu): ${formatIDR(junOmzet)} (Kotor: ${formatIDR(junBerjalan.raw_omzet)}, PB1: ${formatIDR(junBerjalan.total_pb1)})
-- Juli 2026 (Bulan Ini): ${formatIDR(julOmzet)} (Kotor: ${formatIDR(julBerjalan.raw_omzet)}, PB1: ${formatIDR(julBerjalan.total_pb1)})
-
-Terjadi ${trend} omzet bersih sebesar ${formatIDR(Math.abs(diff))} pada bulan ini (Juli 2026) dibandingkan bulan lalu (Juni 2026).`;
-      }
-
-      // Pengeluaran comparison
-      if (msg.includes('pengeluaran') || msg.includes('belanja') || msg.includes('biaya')) {
-        if (!msg.includes('lain')) {
-          const diff = julPengeluaran - junPengeluaran;
-          const trend = diff > 0 ? 'kenaikan' : 'penurunan';
-          return `Perbandingan Pengeluaran Kas Berjalan:
-- Juni 2026 (Bulan Lalu): ${formatIDR(junPengeluaran)}
-- Juli 2026 (Bulan Ini): ${formatIDR(julPengeluaran)}
-
-Terjadi ${trend} pengeluaran sebesar ${formatIDR(Math.abs(diff))} pada bulan ini (Juli 2026) dibandingkan bulan lalu (Juni 2026).`;
-        }
-      }
-
-      // Saldo / Laba / Keuntungan comparison
-      if (msg.includes('saldo') || msg.includes('laba') || msg.includes('untung') || msg.includes('bersih')) {
-        const diff = julSaldo - junSaldo;
-        const trend = diff > 0 ? 'kenaikan' : 'penurunan';
-        return `Perbandingan Saldo Kas Berjalan (Bersih):
-- Juni 2026 (Bulan Lalu): ${formatIDR(junSaldo)}
-- Juli 2026 (Bulan Ini): ${formatIDR(julSaldo)}
-
-Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada bulan ini (Juli 2026) dibandingkan bulan lalu (Juni 2026).`;
-      }
-    }
-  }
-
-  // Skip direct resolution if it's other complex/comparative query
-  if (isComparative) return null;
-
-  // 1. Detect Month
-  const monthMap = {
-    'januari': 1, 'jan': 1,
-    'februari': 2, 'feb': 2,
-    'maret': 3, 'mar': 3,
-    'april': 4, 'apr': 4,
-    'mei': 5,
-    'juni': 6, 'jun': 6,
-    'juli': 7, 'jul': 7,
-    'agustus': 8, 'agu': 8, 'agt': 8,
-    'september': 9, 'sep': 9,
-    'oktober': 10, 'okt': 10,
-    'november': 11, 'nov': 11,
-    'desember': 12, 'des': 12
-  };
-
-  let targetMonth = null;
-  let targetMonthName = '';
-  for (const [name, num] of Object.entries(monthMap)) {
-    if (msg.includes(name)) {
-      targetMonth = num;
-      targetMonthName = name.charAt(0).toUpperCase() + name.slice(1);
-      break;
-    }
-  }
-
-  // Default to June 2026 if not specified (since July 2026 is still empty)
-  if (!targetMonth) {
-    if (msg.includes('bulan lalu')) {
-      targetMonth = 6;
-      targetMonthName = 'Juni';
-    } else if (msg.includes('bulan ini')) {
-      targetMonth = 7;
-      targetMonthName = 'Juli';
-    } else {
-      targetMonth = 6;
-      targetMonthName = 'Juni';
-    }
-  }
-
-  if (!targetMonth) return null; // Can't resolve month, let LLM handle it
-
-  const year = 2026;
-  const monthStr = `${year}-${String(targetMonth).padStart(2, '0')}`;
-
-  // Find summary for Kas Berjalan (is_umum = 1)
-  const summary = monthlySummaries.find(s => s.month_str === monthStr && s.is_umum === 1);
-  if (!summary) return null;
-
-  const formatIDR = (num) => {
-    return new Intl.NumberFormat('id-ID', {
-      style: 'currency',
-      currency: 'IDR',
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
-    }).format(num);
-  };
-
-  const totalOmzet = summary.raw_omzet - summary.total_pb1;
-  const omzetKotor = summary.raw_omzet;
-  const pengeluaran = summary.pengeluaran;
-  const pemasukanLain = summary.pemasukan - summary.raw_omzet - summary.pelunasan_piutang_lalu;
-  const pemasukanBersih = summary.pemasukan - summary.total_pb1;
-  const saldoNetto = pemasukanBersih - summary.pengeluaran;
-  const pb1 = summary.total_pb1;
-  const pb1Terbayar = summary.total_pb1_paid;
-  const pb1Sisa = pb1 - pb1Terbayar;
-
-  // 2. Detect Topic
-  // Omzet
-  if (msg.includes('omzet') || msg.includes('omset')) {
-    return `Total Omzet (Bersih) pada Kas Berjalan bulan ${targetMonthName} ${year} adalah ${formatIDR(totalOmzet)}.
-Omzet Kotor (sebelum dikurangi Pajak PB1) adalah ${formatIDR(omzetKotor)} (Pajak PB1: ${formatIDR(pb1)}).`;
-  }
-
-  // Pengeluaran / Belanja
-  if (msg.includes('pengeluaran') || msg.includes('belanja') || msg.includes('biaya')) {
-    if (!msg.includes('lain')) { // Avoid overriding specific categories like "biaya lain"
-      return `Total Pengeluaran pada Kas Berjalan bulan ${targetMonthName} ${year} adalah ${formatIDR(pengeluaran)}.`;
-    }
-  }
-
-  // Pemasukan Lain-Lain
-  if (msg.includes('pemasukan lain') || msg.includes('lain-lain')) {
-    return `Pemasukan Lain-Lain pada Kas Berjalan bulan ${targetMonthName} ${year} adalah ${formatIDR(pemasukanLain)}.`;
-  }
-
-  // Pajak PB1
-  if (msg.includes('pb1') || msg.includes('pajak')) {
-    return `Pajak PB1 pada Kas Berjalan bulan ${targetMonthName} ${year} adalah ${formatIDR(pb1)} (Terbayar: ${formatIDR(pb1Terbayar)}, Sisa: ${formatIDR(pb1Sisa)}).`;
-  }
-
-  // Saldo / Laba / Keuntungan / Kas Berjalan
-  if (msg.includes('saldo') || msg.includes('laba') || msg.includes('untung') || msg.includes('bersih') || msg.includes('kas berjalan') || msg.includes('kas harian') || msg.includes('saldo berjalan')) {
-    return `Total Saldo Kas Berjalan (Bersih) pada bulan ${targetMonthName} ${year} adalah ${formatIDR(saldoNetto)}.`;
-  }
-
-  // Pemasukan umum
-  if (msg.includes('pemasukan') && !msg.includes('lain') && !msg.includes('piutang')) {
-    return `Total Pemasukan pada Kas Berjalan bulan ${targetMonthName} ${year} adalah ${formatIDR(summary.pemasukan)}.`;
-  }
-
-  return null; // Let LLM handle other topics
-}
 
 // Main controller handler
 const chatWithAI = async (req, res) => {
@@ -679,6 +49,7 @@ const chatWithAI = async (req, res) => {
         reply: `Halo! Saya Asisten Keuangan Verkas untuk cabang ${branchName || 'Kas Berjalan'}. Ada yang bisa saya bantu menganalisis buku kas Anda hari ini?`
       });
     }
+
     // Programmatic filter for obvious out-of-domain queries
     const outOfDomainKeywords = [
       'presiden', 'menteri', 'resep', 'cuaca', 'bumi', 'matahari', 'planet', 'negara',
@@ -691,8 +62,6 @@ const chatWithAI = async (req, res) => {
         reply: `Maaf, sebagai Asisten Keuangan Verkas, saya hanya dapat membantu Anda menganalisis buku kas, transaksi keuangan, dan operasional aplikasi Verkas.`
       });
     }
-
-
 
     const now = new Date();
     const formattedToday = now.toLocaleDateString('id-ID', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -770,8 +139,20 @@ Contoh Kueri SQL yang benar:
 - Mencari pengeluaran terbesar Kas Berjalan bulan Juni:
   SELECT amount, note, transaction_date FROM transactions WHERE type = 'expense' AND is_umum = 1 AND DATE(transaction_date) BETWEEN '2026-06-01' AND '2026-06-30' ORDER BY amount DESC LIMIT 1
 
-- Mencari sisa piutang aktif mitra tertentu:
-  SELECT mp.nama, tmd.remaining_debt FROM transaction_mitra_details tmd JOIN mitra_piutang mp ON tmd.mitra_piutang_id = mp.id WHERE mp.nama = 'Mitra A' ORDER BY tmd.id DESC LIMIT 1
+- Mencari sisa piutang aktif/berjalan mitra tertentu (menjumlahkan seluruh sisa hutang transaksi mitra tersebut):
+  SELECT mp.nama, (SELECT COALESCE(SUM(t.remaining_debt), 0) FROM transactions t WHERE t.mitra_piutang_id = mp.id AND t.status_deleted = 0 AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)) + (SELECT COALESCE(SUM(tmd.remaining_debt), 0) FROM transaction_mitra_details tmd JOIN transactions t ON tmd.transaction_id = t.id WHERE tmd.mitra_piutang_id = mp.id AND t.status_deleted = 0) as total_piutang FROM mitra_piutang mp WHERE mp.nama = 'Mitra A' AND mp.deleted_at IS NULL
+
+- Mencari sisa piutang aktif/berjalan untuk setiap/semua mitra (akumulasi sisa piutang seluruh mitra):
+  SELECT mp.nama, (SELECT COALESCE(SUM(t.remaining_debt), 0) FROM transactions t WHERE t.mitra_piutang_id = mp.id AND t.status_deleted = 0 AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)) + (SELECT COALESCE(SUM(tmd.remaining_debt), 0) FROM transaction_mitra_details tmd JOIN transactions t ON tmd.transaction_id = t.id WHERE tmd.mitra_piutang_id = mp.id AND t.status_deleted = 0) as total_piutang FROM mitra_piutang mp WHERE mp.deleted_at IS NULL ORDER BY total_piutang DESC
+
+- Mencari total keseluruhan piutang berjalan/aktif toko (jumlah sisa piutang seluruh mitra):
+  SELECT SUM(total_piutang) as total_piutang_berjalan FROM (SELECT (SELECT COALESCE(SUM(t.remaining_debt), 0) FROM transactions t WHERE t.mitra_piutang_id = mp.id AND t.status_deleted = 0 AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)) + (SELECT COALESCE(SUM(tmd.remaining_debt), 0) FROM transaction_mitra_details tmd JOIN transactions t ON tmd.transaction_id = t.id WHERE tmd.mitra_piutang_id = mp.id AND t.status_deleted = 0) as total_piutang FROM mitra_piutang mp WHERE mp.deleted_at IS NULL) as sub
+
+- Mencari total pelunasan piutang (Repayments) yang masuk dari seluruh/semua mitra:
+  SELECT SUM(amount) as total_pelunasan FROM transaction_repayments
+
+- Mencari riwayat pelunasan piutang mitra beserta tanggal pembayarannya:
+  SELECT tr.amount, tr.payment_date, tr.note, mp.nama as mitra_nama FROM transaction_repayments tr JOIN mitra_piutang mp ON tr.mitra_piutang_id = mp.id ORDER BY tr.id DESC
 
 - Mencari daftar kategori transaksi beserta induknya:
   SELECT c.name, p.name as parent_name FROM categories c LEFT JOIN categories p ON c.parent_id = p.id
@@ -791,7 +172,7 @@ Contoh Kueri SQL yang benar:
     console.log(`[AI-Service] Generating SQL query for user prompt: "${message}"`);
 
     let aiSqlResponse = 'SELECT 1';
-    const isGeneral = isGeneralMonthlyQuery(message);
+    const isGeneral = isGeneralMonthlyQuery(message, chatHistory);
     if (isGeneral) {
       console.log(`[AI-Service] Bypassing SQL generator (general monthly report query matched): "${message}"`);
     } else {
@@ -964,7 +345,7 @@ Contoh Kueri SQL yang benar:
       ((['analisa', 'analisis', 'perkembangan', 'laporan'].some(w => msg.includes(w)) || 
         (['perputaran', 'aliran', 'arus', 'cashflow', 'turnover'].some(w => msg.includes(w)) && msg.includes('kas'))) && 
        // Must NOT contain period keywords
-       !['juni', 'juli', 'mei', 'april', 'bulan ini', 'bulan lalu', 'kemarin', 'semua', 'tahunan', 'mingguan', 'harian', 'simpanan', 'simpaan', 'tabungan', 'cadangan'].some(m => msg.includes(m)) &&
+       !['juni', 'juli', 'mei', 'april', 'bulan ini', 'bulan lalu', 'kemarin', 'semua', 'tahunan', 'mingguan', 'harian', 'simpanan', 'simpaan', 'tabungan', 'cadangan', 'terakhir', 'lalu', 'sebelumnya', 'bulan', 'minggu', 'tahun', 'periode'].some(m => msg.includes(m)) &&
        // Must NOT contain PIC/admin/user keywords
        !['admin', 'pic', 'tim', 'siapa', 'orang', 'staff', 'staf', 'owner', 'user', 'pembuat', 'buat'].some(w => msg.includes(w)));
       
@@ -997,6 +378,26 @@ Contoh Kueri SQL yang benar:
       });
     }
 
+    // Direct resolver for extreme transactions (largest/smallest)
+    const extremeTxResolution = await tryResolveExtremeTransactionQueryDirectly(message, branchId);
+    if (extremeTxResolution) {
+      console.log(`[AI-Service] Resolved extreme transaction query directly: "${message}"`);
+      return res.status(200).json({
+        success: true,
+        reply: extremeTxResolution
+      });
+    }
+
+    // Direct resolver for partner piutang balances
+    const piutangResolution = await tryResolvePiutangQueryDirectly(message, branchId, chatHistory);
+    if (piutangResolution) {
+      console.log(`[AI-Service] Resolved piutang query directly: "${message}"`);
+      return res.status(200).json({
+        success: true,
+        reply: piutangResolution
+      });
+    }
+
     // Gather baseline summaries
     const monthlySummaries = [];
     for (let i = 0; i < 4; i++) {
@@ -1008,47 +409,10 @@ Contoh Kueri SQL yang benar:
       const monthRange = getMonthRange(year, month);
       const startOfMonth = `${monthRange.start} 00:00:00`;
 
-      const exactSummaryQuery = `
-        SELECT 
-          COALESCE(SUM(CASE 
-            WHEN t.type = 'income' THEN 
-              CASE 
-                WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NOT NULL THEN COALESCE(t.paid_amount, 0)
-                ELSE t.amount 
-              END
-            ELSE 0 
-          END), 0) as pemasukan,
-          COALESCE(SUM(CASE 
-            WHEN t.type = 'expense' THEN t.amount
-            ELSE 0 
-          END), 0) as pengeluaran,
-          ROUND(COALESCE(SUM(
-            CASE 
-              WHEN t.type = 'income' AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN 
-                COALESCE(
-                  (SELECT SUM(tid.amount_app)
-                   FROM transaction_income_details tid
-                   JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                   WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
-                  t.pb1 * 11, 
-                  0
-                )
-              ELSE 0 
-            END
-          ), 0) * 10 / 110) as total_pb1,
-          COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.is_pb1_payment = true THEN t.amount ELSE 0 END), 0) as total_pb1_paid
-        FROM transactions t
-        LEFT JOIN categories c ON t.category_id = c.id
-        WHERE t.branch_id = ? 
-          AND t.status_deleted = 0 
-          AND DATE(t.transaction_date) BETWEEN ? AND ? 
-          AND t.is_umum = ?
-      `;
-
       const rawOmzetQuery = `
         SELECT COALESCE(SUM(
           CASE 
-            WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NOT NULL THEN COALESCE(t.paid_amount, 0)
+            WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0)
             ELSE t.amount 
           END
         ), 0) as raw_omzet
@@ -1077,11 +441,14 @@ Contoh Kueri SQL yang benar:
       `;
 
       // 1. Fetch Kas Simpanan (is_umum = 0)
-      const [summarySimpanan] = await query(exactSummaryQuery, [
-        branchId, monthRange.start, monthRange.end, 0
-      ]).catch((err) => {
-        console.error('[AI-Service] exactSummaryQuery (is_umum = 0) failed:', err);
-        return [{ pemasukan: 0, pengeluaran: 0, total_pb1: 0, total_pb1_paid: 0 }];
+      const summarySimpanan = await Transaction.getSummary({
+        branchId,
+        startDate: monthRange.start,
+        endDate: monthRange.end,
+        isUmum: false
+      }).catch((err) => {
+        console.error('[AI-Service] Transaction.getSummary (is_umum = 0) failed:', err);
+        return { pemasukan: 0, pelunasan_piutang_lalu: 0, pengeluaran: 0, total_pb1: 0, total_pb1_paid: 0, saldo: 0, saldo_pb1: 0 };
       });
 
       const [pelunasanSimpananRes] = await query(pelunasanQuery, [
@@ -1096,11 +463,14 @@ Contoh Kueri SQL yang benar:
       const [omzetSimpananRes] = await query(rawOmzetQuery, [branchId, monthRange.start, monthRange.end, 0]).catch(() => [{ raw_omzet: 0 }]);
 
       // 2. Fetch Kas Berjalan (is_umum = 1)
-      const [summaryBerjalan] = await query(exactSummaryQuery, [
-        branchId, monthRange.start, monthRange.end, 1
-      ]).catch((err) => {
-        console.error('[AI-Service] exactSummaryQuery (is_umum = 1) failed:', err);
-        return [{ pemasukan: 0, pengeluaran: 0, total_pb1: 0, total_pb1_paid: 0 }];
+      const summaryBerjalan = await Transaction.getSummary({
+        branchId,
+        startDate: monthRange.start,
+        endDate: monthRange.end,
+        isUmum: true
+      }).catch((err) => {
+        console.error('[AI-Service] Transaction.getSummary (is_umum = 1) failed:', err);
+        return { pemasukan: 0, pelunasan_piutang_lalu: 0, pengeluaran: 0, total_pb1: 0, total_pb1_paid: 0, saldo: 0, saldo_pb1: 0 };
       });
 
       // Log query results to sql_debug.log
@@ -1126,7 +496,7 @@ Contoh Kueri SQL yang benar:
         month_str: `${year}-${String(month).padStart(2, '0')}`,
         is_umum: 1,
         pemasukan: summaryBerjalan?.pemasukan || 0,
-        pelunasan_piutang_lalu: pelunasanBerjalanRes?.pelunasan_piutang_lalu || 0,
+        pelunasan_piutang_lalu: summaryBerjalan?.pelunasan_piutang_lalu || 0,
         pengeluaran: summaryBerjalan?.pengeluaran || 0,
         total_pb1: summaryBerjalan?.total_pb1 || 0,
         total_pb1_paid: summaryBerjalan?.total_pb1_paid || 0,
@@ -1138,7 +508,7 @@ Contoh Kueri SQL yang benar:
         month_str: `${year}-${String(month).padStart(2, '0')}`,
         is_umum: 0,
         pemasukan: summarySimpanan?.pemasukan || 0,
-        pelunasan_piutang_lalu: pelunasanSimpananRes?.pelunasan_piutang_lalu || 0,
+        pelunasan_piutang_lalu: summarySimpanan?.pelunasan_piutang_lalu || 0,
         pengeluaran: summarySimpanan?.pengeluaran || 0,
         total_pb1: summarySimpanan?.total_pb1 || 0,
         total_pb1_paid: summarySimpanan?.total_pb1_paid || 0,
@@ -1149,12 +519,42 @@ Contoh Kueri SQL yang benar:
 
     // Fetch Mitra Receivables
     const mitraSummary = await query(
-      `SELECT mp.nama as name, SUM(tmd.amount) as total_piutang, SUM(tmd.paid_amount) as total_terbayar, SUM(tmd.remaining_debt) as sisa_piutang
-       FROM transaction_mitra_details tmd
-       JOIN mitra_piutang mp ON tmd.mitra_piutang_id = mp.id
-       JOIN transactions t ON tmd.transaction_id = t.id
-       WHERE t.branch_id = ? AND t.status_deleted = 0
-       GROUP BY tmd.mitra_piutang_id`,
+      `SELECT mp.nama as name,
+              (
+                SELECT COALESCE(SUM(t.amount), 0)
+                FROM transactions t
+                WHERE t.mitra_piutang_id = mp.id AND t.status_deleted = 0
+                AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
+              ) + (
+                SELECT COALESCE(SUM(tmd.amount), 0)
+                FROM transaction_mitra_details tmd
+                JOIN transactions t ON tmd.transaction_id = t.id
+                WHERE tmd.mitra_piutang_id = mp.id AND t.status_deleted = 0
+              ) as total_piutang,
+              (
+                SELECT COALESCE(SUM(t.paid_amount), 0)
+                FROM transactions t
+                WHERE t.mitra_piutang_id = mp.id AND t.status_deleted = 0
+                AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
+              ) + (
+                SELECT COALESCE(SUM(tmd.paid_amount), 0)
+                FROM transaction_mitra_details tmd
+                JOIN transactions t ON tmd.transaction_id = t.id
+                WHERE tmd.mitra_piutang_id = mp.id AND t.status_deleted = 0
+              ) as total_terbayar,
+              (
+                SELECT COALESCE(SUM(t.remaining_debt), 0)
+                FROM transactions t
+                WHERE t.mitra_piutang_id = mp.id AND t.status_deleted = 0
+                AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
+              ) + (
+                SELECT COALESCE(SUM(tmd.remaining_debt), 0)
+                FROM transaction_mitra_details tmd
+                JOIN transactions t ON tmd.transaction_id = t.id
+                WHERE tmd.mitra_piutang_id = mp.id AND t.status_deleted = 0
+              ) as sisa_piutang
+       FROM mitra_piutang mp
+       WHERE mp.branch_id = ? AND mp.deleted_at IS NULL`,
       [branchId]
     ).catch(() => []);
 
@@ -1190,7 +590,7 @@ Contoh Kueri SQL yang benar:
     }
 
     // Try to resolve general monthly queries directly in JavaScript for 100% precision and zero latency
-    const directResolution = tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchName);
+    const directResolution = tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchName, chatHistory);
     if (directResolution) {
       console.log(`[AI-Service] Resolved query directly via JS helper: "${message}"`);
       const finalReply = directResolution;
@@ -1363,7 +763,7 @@ Berikut adalah baseline ringkasan keuangan bulanan Buku Kas "${branchName || 'Ka
 12. DEFAULT & KETERANGAN KAS BERJALAN: Jika pengguna menanyakan pemasukan, pengeluaran, omzet, atau saldo secara umum (seperti: "pemasukan lain-lain bulan juni", "pengeluaran bulan juni"), kamu WAJIB menggunakan data Kas Berjalan sebagai default jawabanmu. Kamu juga WAJIB menuliskan secara eksplisit keterangan "pada Kas Berjalan" or "di Buku Kas Berjalan" di dalam balasan akhirmu agar pengguna mengetahui dengan jelas sumber buku kas data tersebut (kecuali jika pengguna secara khusus menyebutkan nama kategori transaksi atau Kas Simpanan tertentu).
 13. PERIODE KOSONG (BULAN INI / HARI INI): Jika pengguna menanyakan data keuangan untuk "bulan ini" (Juli 2026) atau "hari ini" namun data pada periode tersebut masih kosong/Rp 0 (karena baru memasuki awal bulan atau hari baru), kamu WAJIB menyajikan data tersebut secara jujur sebagai Rp 0 (contoh: "laba bersih Juli 2026 masih Rp 0 karena belum ada transaksi yang tercatat"). JANGAN PERNAH memetakan nominal kueri dari bulan lalu (seperti Juni 2026) ke dalam deklarasi "bulan ini/Juli 2026" seolah-olah itu adalah data bulan ini! Jika kamu menampilkan data Juni, sebutkan secara eksplisit bahwa data tersebut adalah periode Juni 2026.
 14. PRIORITASKAN HASIL KUERI BARU & KOREKSI DIRI: Jika hasil kueri database dinamis terbaru mengembalikan data riil yang berbeda atau bertentangan dengan jawabanmu di riwayat obrolan sebelumnya (misalnya di riwayat sebelumnya kueri database error dan kamu terpaksa menebak November, lalu sekarang kueri database sukses dijalankan dan menunjukkan bulan Juni), kamu WAJIB memprioritaskan data terbaru dari hasil kueri database dinamis yang sukses tersebut dan mengoreksi jawaban lamamu secara sopan (contoh: "Mohon maaf atas kekeliruan sebelumnya, berdasarkan data transaksi terbaru di database...").
-15. PERUBAHAN CABANG BUKU KAS: Jika di dalam riwayat obrolan (chat history) terdapat data nominal dari Buku Kas/cabang lain (misal: "BOSGIL CONDET"), kamu WAJIB mengabaikan seluruh angka dari riwayat obrolan tersebut. Fokus HANYA pada data Buku Kas aktif saat ini yaitu "${branchName || 'Kas Berjalan'}" yang tertera di baseline summaries terbaru!
+15. PERUBAHAN CABANG BUKU KAS: Jika di dalam riwayat obrolan (chat history) terdapat data nominal dari Buku Kas/cabang lain (misal: "BOSGIL CONDET"), kamu WAJIB mengabaikan seluruh angka dari riwayat obrolan tersebut. Fokus HANYA pada data Buku Kas aktif saat ini yaitu "${branchName || 'Kas Berjalan'}" yang terera di baseline summaries terbaru!
 16. PERBEDAAN OMZET BERSIH & KOTOR:
     - Omzet Bersih: Nilai "Total Omzet" yang tampil di dashboard/baseline summaries (sudah dikurangi Pajak PB1).
     - Omzet Kotor: Jumlah total sebelum dikurangi Pajak PB1 (dihitung dari: Omzet Bersih + Pajak PB1).

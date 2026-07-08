@@ -487,7 +487,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     // Draw minimalist inline attachment stats with a separator if available
     if (data.attachment_stats && data.attachment_stats.total > 0) {
         const stats = data.attachment_stats;
-        
+
         // Solid black divider line matching the one below
         doc.strokeColor('#000000').lineWidth(1.5).moveTo(margin, y).lineTo(margin + contentWidth, y).stroke();
         y += 10;
@@ -499,7 +499,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
         doc.font(fontBold).text('STATUS LAMPIRAN', margin, y);
         doc.text(':', margin + 180, y);
-        
+
         let startX = margin + 200;
         const parts = [];
         if (stats.merah > 0) parts.push({ text: `${stats.merah} Kosong`, color: '#e11d48' });
@@ -516,7 +516,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
                 startX += doc.widthOfString(', ');
             }
         });
-        
+
         doc.fillColor('#000000').font(fontRegular); // Reset color
         y += 20;
     } else {
@@ -627,17 +627,10 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         y += 18;
         data.bagi_hasil.forEach(bh => {
             checkNewPage(40); // Check per item group
-            const nameToDisplay = bh.title || bh.name || 'Partner';
-            doc.font(fontBold).fontSize(10).fillColor('#000000').text(nameToDisplay, margin + 40, y);
-
-            // Display percentage if exists - Aligned with main percentage column
-            if (bh.percentage !== undefined && bh.percentage !== '') {
-                doc.text(`${bh.percentage}%`, margin + 470, y, { align: 'right', width: 45 });
-            }
-
-            // Aligned with main Rp and Amount columns
-            doc.text('Rp', margin + 360, y);
-            doc.text(formatCurrencyForPDF(bh.amount), margin + 380, y, { align: 'right', width: 85 });
+            doc.fillColor('#111827').fontSize(9.5).font(fontBold).text(bh.title || bh.name || 'Partner', margin + 15, y);
+            if (bh.percentage) doc.fillColor('#111827').fontSize(9.5).font(fontBold).text(`${bh.percentage}%`, margin + 470, y, { align: 'right', width: 45 });
+            doc.fillColor('#111827').fontSize(9.5).font(fontBold).text('Rp', margin + 360, y);
+            doc.fillColor('#111827').fontSize(9.5).font(fontBold).text(formatCurrencyForPDF(bh.amount), margin + 380, y, { align: 'right', width: 85 });
             y += 18;
 
             // Render Sub Items if they exist
@@ -646,15 +639,30 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
                 if (activeSubItems.length > 0) {
                     activeSubItems.forEach(sh => {
                         checkNewPage(16);
-                        doc.font(fontRegular).fontSize(8.5).fillColor('#444444').text(`— ${sh.title}`, margin + 55, y);
+                        doc.font(fontRegular).fontSize(9.5).fillColor('#111827').text(`— ${sh.title}`, margin + 55, y);
 
                         if (sh.percentage !== undefined && sh.percentage !== '') {
-                            doc.text(`${sh.percentage}%`, margin + 470, y, { align: 'right', width: 45 });
+                            doc.font(fontRegular).fontSize(9.5).fillColor('#111827').text(`${sh.percentage}%`, margin + 470, y, { align: 'right', width: 45 });
                         }
 
-                        doc.text('Rp', margin + 360, y);
-                        doc.text(formatCurrencyForPDF(sh.amount), margin + 380, y, { align: 'right', width: 85 });
+                        doc.font(fontRegular).fontSize(9.5).fillColor('#111827').text('Rp', margin + 360, y);
+                        doc.font(fontRegular).fontSize(9.5).fillColor('#111827').text(formatCurrencyForPDF(sh.amount), margin + 380, y, { align: 'right', width: 85 });
                         y += 15;
+
+                        const subSubsidiVal = Number(sh.subsidi) || 0;
+                        if (subSubsidiVal > 0) {
+                            checkNewPage(16);
+                            doc.font(fontRegular).fontSize(9.5).fillColor('#111827').text(`    — Sub`, margin + 55, y);
+                            doc.font(fontRegular).fontSize(9.5).fillColor('#111827').text('Rp', margin + 360, y);
+                            doc.font(fontRegular).fontSize(9.5).fillColor('#111827').text(formatCurrencyForPDF(subSubsidiVal), margin + 380, y, { align: 'right', width: 85 });
+                            y += 15;
+
+                            checkNewPage(16);
+                            doc.font(fontBold).fontSize(9.5).fillColor('#111827').text(`    — Total`, margin + 55, y);
+                            doc.font(fontBold).fontSize(9.5).fillColor('#111827').text('Rp', margin + 360, y);
+                            doc.font(fontBold).fontSize(9.5).fillColor('#111827').text(formatCurrencyForPDF(Number(sh.amount) + subSubsidiVal), margin + 380, y, { align: 'right', width: 85 });
+                            y += 15;
+                        }
                     });
                     y += 5; // Extra spacing after a group of sub-items
                 }
@@ -695,10 +703,10 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         minute: '2-digit',
         hour12: false
     }).replace('.', ':');
-    
+
     const printedByText = options.printedBy ? ` oleh ${options.printedBy}` : '';
     const footerText = `Laporan ini dicetak pada ${formattedDate} pukul ${formattedTime}${printedByText}`;
-    
+
     doc.fontSize(8).font(fontRegular).fillColor('#9ca3af').text(footerText, margin, y, { align: 'center', width: contentWidth });
 
     doc.end();
@@ -764,8 +772,8 @@ async function exportBagiHasilToPDF(report, filename, branchName, selectedMonthD
 
         // Parent row
         doc.fillColor('#111827').fontSize(10).font(fontBold).text(bh.title || bh.name || 'Partner', margin + 10, y);
-        if (bh.percentage) doc.text(`${bh.percentage}%`, margin + 300, y, { width: 50, align: 'right' });
-        doc.text(`Rp ${formatCurrency(bh.amount).replace('Rp', '').trim()}`, margin + 380, y, { width: 100, align: 'right' });
+        if (bh.percentage) doc.fillColor('#111827').fontSize(10).font(fontBold).text(`${bh.percentage}%`, margin + 300, y, { width: 50, align: 'right' });
+        doc.fillColor('#111827').fontSize(10).font(fontBold).text(`Rp ${formatCurrency(bh.amount).replace('Rp', '').trim()}`, margin + 380, y, { width: 100, align: 'right' });
         y += 18;
 
         // Sub items
@@ -774,10 +782,23 @@ async function exportBagiHasilToPDF(report, filename, branchName, selectedMonthD
             if (activeSubItems.length > 0) {
                 activeSubItems.forEach(sh => {
                     if (y > doc.page.height - 40) { doc.addPage(); y = 50; }
-                    doc.fillColor('#4b5563').fontSize(9).font(fontRegular).text(`— ${sh.title}`, margin + 25, y);
-                    if (sh.percentage) doc.text(`${sh.percentage}%`, margin + 300, y, { width: 50, align: 'right' });
-                    doc.text(`Rp ${formatCurrency(sh.amount).replace('Rp', '').trim()}`, margin + 380, y, { width: 100, align: 'right' });
+                    doc.fillColor('#111827').fontSize(10).font(fontRegular).text(`— ${sh.title}`, margin + 25, y);
+                    if (sh.percentage) doc.fillColor('#111827').fontSize(10).font(fontRegular).text(`${sh.percentage}%`, margin + 300, y, { width: 50, align: 'right' });
+                    doc.fillColor('#111827').fontSize(10).font(fontRegular).text(`Rp ${formatCurrency(sh.amount).replace('Rp', '').trim()}`, margin + 380, y, { width: 100, align: 'right' });
                     y += 15;
+
+                    const subSubsidiVal = Number(sh.subsidi) || 0;
+                    if (subSubsidiVal > 0) {
+                        if (y > doc.page.height - 40) { doc.addPage(); y = 50; }
+                        doc.fillColor('#111827').fontSize(10).font(fontRegular).text(`    — Sub`, margin + 25, y);
+                        doc.fillColor('#111827').fontSize(10).font(fontRegular).text(`Rp ${formatCurrency(subSubsidiVal).replace('Rp', '').trim()}`, margin + 380, y, { width: 100, align: 'right' });
+                        y += 15;
+
+                        if (y > doc.page.height - 40) { doc.addPage(); y = 50; }
+                        doc.fillColor('#111827').fontSize(10).font(fontBold).text(`    — Total`, margin + 25, y);
+                        doc.fillColor('#111827').fontSize(10).font(fontBold).text(`Rp ${formatCurrency(Number(sh.amount) + subSubsidiVal).replace('Rp', '').trim()}`, margin + 380, y, { width: 100, align: 'right' });
+                        y += 15;
+                    }
                 });
                 y += 5;
             }
