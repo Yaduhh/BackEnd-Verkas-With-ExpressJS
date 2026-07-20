@@ -798,6 +798,372 @@ const exportPdf = async (req, res, next) => {
     }
 };
 
+const exportImage = async (req, res, next) => {
+    try {
+        const { branchId } = req.params;
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+        const workingDays = parseInt(req.query.workingDays) || 25;
+
+        const branch = await Branch.findById(branchId);
+        if (!branch) return res.status(404).json({ success: false, message: 'Branch not found' });
+
+        // Validasi akses
+        const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
+        if (!hasAccess) {
+            return res.status(403).json({ success: false, message: 'Akses ditolak' });
+        }
+
+        // Logic replicate from getReport
+        const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+        const daysInMonth = new Date(year, month, 0).getDate();
+        const endDate = `${year}-${String(month).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
+        const prevMonthDate = new Date(year, month - 2, 1);
+        const prevMonthName = prevMonthDate.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
+
+        const incomeResult = await query(
+            `SELECT 
+                SUM(
+                    CASE 
+                        WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
+                        ELSE t.amount 
+                    END
+                ) as total_gross,
+                SUM(
+                    COALESCE((
+                        SELECT SUM(tid.amount_app)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), 0)
+                ) as taxable_amount
+             FROM transactions t
+             LEFT JOIN categories c ON t.category_id = c.id
+             WHERE t.branch_id = ? 
+               AND t.type = 'income' 
+               AND t.transaction_date BETWEEN ? AND ? 
+               AND t.status_deleted = false 
+               AND t.is_umum = true
+               AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)`,
+            [branchId, startDate, endDate]
+        );
+        const systemOmzetGross = parseFloat(incomeResult[0].total_gross) || 0;
+        const systemTaxable = parseFloat(incomeResult[0].taxable_amount) || 0;
+        const systemOmzet = systemOmzetGross - Math.round((systemTaxable * 10) / 110);
+
+        const expenseBreakdown = await query(
+            `SELECT category_name, SUM(total) as total
+             FROM (
+                /* 1. Pengeluaran Reguler & Retur (Hanya yang BUKAN transaksi simpanan rincian) */
+                SELECT COALESCE(c.name, 'Lain-lain') as category_name, 
+                       (CASE 
+                             WHEN t.type = 'expense' THEN 
+                                 (CASE WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) ELSE t.amount END) + COALESCE(t.pb1, 0)
+                             ELSE 
+                                 -(t.amount + COALESCE(t.pb1, 0))
+                         END) as total 
+                FROM transactions t 
+                LEFT JOIN categories c ON t.category_id = c.id 
+                WHERE t.branch_id = ? 
+                  AND t.transaction_date BETWEEN ? AND ? 
+                  AND t.status_deleted = false
+                  AND t.is_umum = true
+                  AND (t.is_savings = 0 OR t.is_savings IS NULL)
+                  AND (
+                    t.type = 'expense' 
+                    OR (t.type = 'income' AND t.category_id IN (
+                       SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false
+                    ))
+                  )
+
+                UNION ALL
+
+                /* 2. Rincian Simpanan (Diambil dari tabel detail simpanan) */
+                SELECT c.name as category_name,
+                       tsd.amount as total
+                FROM transaction_savings_details tsd
+                JOIN transactions t ON tsd.transaction_id = t.id
+                JOIN categories c ON tsd.category_id = c.id
+                WHERE t.branch_id = ? 
+                  AND t.transaction_date BETWEEN ? AND ? 
+                  AND t.status_deleted = false
+                  AND t.is_umum = true
+                  AND t.type = 'expense'
+                  AND t.is_savings = 1
+             ) as consolidated
+             GROUP BY category_name
+             HAVING SUM(total) != 0`,
+            [branchId, startDate, endDate, branchId, branchId, startDate, endDate]
+        );
+        const folderPengeluaran = expenseBreakdown.reduce((sum, item) => sum + (parseFloat(item.total) || 0), 0);
+
+        const mitraPiutangResult = await query(
+            `SELECT (
+                SELECT COALESCE(SUM(t.remaining_debt), 0)
+                FROM transactions t
+                JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
+                WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
+              ) + (
+                SELECT COALESCE(SUM(tmd.remaining_debt), 0)
+                FROM transaction_mitra_details tmd
+                JOIN transactions t ON tmd.transaction_id = t.id
+                JOIN mitra_piutang mp ON tmd.mitra_piutang_id = mp.id
+                WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+              ) as total_piutang`,
+            [branchId, branchId]
+        );
+        const totalPiutangMitra = parseFloat(mitraPiutangResult[0].total_piutang) || 0;
+        const systemPengeluaran = folderPengeluaran + totalPiutangMitra;
+
+        const debtRepaymentResult = await query(
+            `SELECT SUM(tr.amount) as total FROM transaction_repayments tr JOIN transactions t ON tr.transaction_id = t.id WHERE tr.payment_date BETWEEN ? AND ? AND t.transaction_date < ? AND t.branch_id = ? AND t.status_deleted = false`,
+            [startDate, endDate, startDate, branchId]
+        );
+        const pelunasanPiutangBulanLalu = parseFloat(debtRepaymentResult[0].total) || 0;
+
+        const incomeBreakdownRaw = await query(
+            `SELECT 
+                COALESCE(c.name, 'Lain-lain') as category_name, 
+                SUM(t.amount) as total_gross,
+                SUM(
+                    COALESCE((
+                        SELECT SUM(tid.amount_app)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), 0)
+                ) as taxable_amount,
+                t.is_debt_payment,
+                (SELECT COUNT(*) FROM transactions WHERE category_id = t.category_id AND type = 'expense' AND status_deleted = false) as has_expense
+             FROM transactions t 
+             LEFT JOIN categories c ON t.category_id = c.id 
+             WHERE t.branch_id = ? 
+               AND t.type = 'income' 
+               AND t.transaction_date BETWEEN ? AND ? 
+               AND t.status_deleted = false 
+               AND t.is_umum = true
+               AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
+             GROUP BY category_name, t.is_debt_payment, t.category_id`,
+            [branchId, startDate, endDate]
+        );
+
+        const groupedIncome = {
+            'OMZET PENJUALAN': 0,
+            'Lain-lain': 0
+        };
+
+        incomeBreakdownRaw.forEach(item => {
+            const gross = parseFloat(item.total_gross) || 0;
+            const taxable = parseFloat(item.taxable_amount) || 0;
+            const tax = Math.round((taxable * 10) / 110);
+            const net = gross - tax;
+
+            const nameUpper = item.category_name.toUpperCase();
+            const hasExpense = parseInt(item.has_expense) > 0;
+
+            // Check if it's an Omzet variation
+            const isOmzet = nameUpper.includes('OMZET') || nameUpper.includes('OMSET');
+
+            if (isOmzet) {
+                groupedIncome['OMZET PENJUALAN'] += net;
+            } else {
+                // Original strict logic for Other items:
+                if ((!item.is_debt_payment || item.is_debt_payment == 0) && !hasExpense) {
+                    groupedIncome['Lain-lain'] += net;
+                }
+            }
+        });
+
+        const incomeBreakdown = Object.entries(groupedIncome).map(([name, total]) => ({
+            category_name: name,
+            total: total
+        }));
+
+        // Fetch existing manual report data
+        const reportInDb = await BranchReport.findByBranchAndPeriod(branchId, month, year);
+        const manualSalesTotal = (reportInDb?.sales_channels || []).reduce((sum, sc) => sum + (Number(sc.amount) || 0), 0);
+
+        const finalOmzetTotal = incomeBreakdown.reduce((sum, item) => sum + item.total, 0) + pelunasanPiutangBulanLalu;
+        const finalProfit = finalOmzetTotal - systemPengeluaran;
+
+        const report = await BranchReport.upsert(branchId, month, year, {
+            omzetTotal: finalOmzetTotal,
+            pengeluaranTotal: systemPengeluaran
+        });
+
+        // APPLY EXPENSE ADJUSTMENTS AND SORTING FOR PDF
+        const adjustmentsByParent = {};
+        if (report.expense_adjustments && report.expense_adjustments.length > 0) {
+            report.expense_adjustments.forEach(adj => {
+                if (!adjustmentsByParent[adj.parent_category]) {
+                    adjustmentsByParent[adj.parent_category] = [];
+                }
+                adjustmentsByParent[adj.parent_category].push(adj);
+            });
+        }
+
+        // Initialize processed layout
+        let processedExpenseBreakdown = [];
+
+        // 1. Sort the raw categories based on custom order if exists
+        let sortedCategories = [...expenseBreakdown];
+
+        // Add PIUTANG Mitra to the raw list so it can be sorted/displayed
+        const piutangLabel = `PIUTANG ${prevMonthName.toUpperCase()}`;
+        if (totalPiutangMitra > 0) {
+            sortedCategories.push({
+                category_name: piutangLabel,
+                total: totalPiutangMitra
+            });
+        }
+
+        if (report.expense_order && Array.isArray(report.expense_order)) {
+            const orderMap = {};
+            report.expense_order.forEach((name, idx) => { orderMap[name] = idx; });
+
+            sortedCategories.sort((a, b) => {
+                const orderA = orderMap[a.category_name] !== undefined ? orderMap[a.category_name] : 1000;
+                const orderB = orderMap[b.category_name] !== undefined ? orderMap[b.category_name] : 1000;
+                return orderA - orderB;
+            });
+        }
+
+        // 2. Build the final flat list with adjustments right after their parents
+        sortedCategories.forEach(item => {
+            const adjs = adjustmentsByParent[item.category_name] || [];
+            const adjTotal = adjs.reduce((sum, a) => sum + (parseFloat(a.amount) || 0), 0);
+            const parentTotal = (parseFloat(item.total) || 0) - adjTotal;
+
+            // Only add parent if it has value
+            if (Math.abs(parentTotal) > 0.01) {
+                processedExpenseBreakdown.push({
+                    category_name: item.category_name,
+                    total: parentTotal
+                });
+            }
+
+            // Add adjustments directly under the parent
+            adjs.forEach(adj => {
+                if (Math.abs(parseFloat(adj.amount) || 0) > 0.01) {
+                    processedExpenseBreakdown.push({
+                        category_name: adj.name,
+                        total: parseFloat(adj.amount) || 0,
+                        is_adjustment: true
+                    });
+                }
+            });
+        });
+
+        // Calculate attachment stats for PDF
+        const txsForStats = await query(
+            `SELECT t.id, t.lampiran, c.min_attachment as category_min_attachment
+             FROM transactions t
+             LEFT JOIN categories c ON t.category_id = c.id
+             WHERE t.branch_id = ?
+               AND t.transaction_date BETWEEN ? AND ?
+               AND t.status_deleted = false
+               AND t.is_umum = true
+               AND NOT EXISTS (SELECT 1 FROM transaction_repayments tr WHERE tr.income_transaction_id = t.id)`,
+            [branchId, startDate, endDate]
+        );
+
+        let statTotal = 0;
+        let statMerah = 0;
+        let statKuning = 0;
+        let statHijau = 0;
+        let statAbu = 0;
+        let statNormal = 0;
+
+        const parseLampiranArray = (lampiranVal) => {
+            if (!lampiranVal) return [];
+            try {
+                const parsed = JSON.parse(lampiranVal);
+                if (Array.isArray(parsed)) return parsed;
+                return [parsed];
+            } catch (e) {
+                return [lampiranVal];
+            }
+        };
+
+        txsForStats.forEach(it => {
+            statTotal++;
+            const reqCount = it.category_min_attachment || 0;
+            const parsedFiles = parseLampiranArray(it.lampiran);
+            const filesCount = parsedFiles ? parsedFiles.length : 0;
+
+            if (reqCount > 0) {
+                if (filesCount === 0) {
+                    statMerah++;
+                } else if (filesCount < reqCount) {
+                    statKuning++;
+                } else {
+                    statHijau++;
+                }
+            } else {
+                if (filesCount > 0) {
+                    statAbu++;
+                } else {
+                    statNormal++;
+                }
+            }
+        });
+
+        const dataForPdf = {
+            ...report,
+            omzet_total: finalOmzetTotal,
+            pengeluaran_total: systemPengeluaran,
+            profit: finalProfit,
+            pelunasan_piutang_bulan_lalu: pelunasanPiutangBulanLalu,
+            prev_month_label: prevMonthName,
+            income_breakdown: incomeBreakdown,
+            expense_breakdown: processedExpenseBreakdown,
+            attachment_stats: {
+                total: statTotal,
+                merah: statMerah,
+                kuning: statKuning,
+                hijau: statHijau,
+                abu: statAbu,
+                normal: statNormal
+            }
+        };
+
+        const { exportFinancialReportToPDF, exportPDFToJPEG, generateFilename } = require('../utils/exportHelper');
+        const filename = generateFilename('PDF', `Laporan_Keuangan_${branch.name}`);
+        const selectedMonthDate = new Date(year, month - 1, 1);
+
+        try {
+            const userName = req.user.name || req.user.email;
+            const filepath = await exportFinancialReportToPDF(dataForPdf, filename, branch.name, selectedMonthDate, report.working_days || workingDays, { printedBy: userName });
+
+            const fs = require('fs');
+            if (!fs.existsSync(filepath)) {
+                return res.status(500).json({ success: false, message: 'File PDF gagal dibuat' });
+            }
+
+            // Convert PDF to JPEG
+            const jpegBuffer = await exportPDFToJPEG(filepath);
+
+            // Clean up PDF immediately
+            fs.unlink(filepath, (err) => {
+                if (err) console.error(`[EXPORT] Error deleting temp PDF:`, err);
+            });
+
+            const jpegFilename = filename.replace(/\.pdf$/i, '.jpg');
+            res.setHeader('Content-Type', 'image/jpeg');
+            res.setHeader('Content-Disposition', `attachment; filename="${jpegFilename}"`);
+            res.end(jpegBuffer);
+
+        } catch (pdfError) {
+            console.error(`[EXPORT IMAGE] Image Gen Error:`, pdfError);
+            return res.status(500).json({ success: false, message: 'Gagal memproses gambar: ' + pdfError.message });
+        }
+    } catch (error) {
+        console.error(`[EXPORT IMAGE] Global Controller Error:`, error);
+        next(error);
+    }
+};
+
 const exportBagiHasilPdf = async (req, res, next) => {
     try {
         const { branchId } = req.params;
@@ -845,4 +1211,4 @@ const exportBagiHasilPdf = async (req, res, next) => {
     }
 };
 
-module.exports = { getReport, updateReport, exportPdf, exportBagiHasilPdf };
+module.exports = { getReport, updateReport, exportPdf, exportBagiHasilPdf, exportImage };

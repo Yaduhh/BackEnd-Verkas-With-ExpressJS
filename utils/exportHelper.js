@@ -2,6 +2,7 @@ const common = require('./export/commonHelper');
 const excel = require('./export/excelHelper');
 const csv = require('./export/csvHelper');
 const pdf = require('./export/pdfHelper');
+const image = require('./export/imageHelper');
 
 /**
  * Centered Export Helper - Acts as an entry point for all export formats.
@@ -22,5 +23,6 @@ module.exports = {
   exportBukuKasToPDF: pdf.exportBukuKasToPDF,
   exportCategoryToPDF: pdf.exportCategoryToPDF,
   exportFinancialReportToPDF: pdf.exportFinancialReportToPDF,
-  exportBagiHasilToPDF: pdf.exportBagiHasilToPDF
+  exportBagiHasilToPDF: pdf.exportBagiHasilToPDF,
+  exportPDFToJPEG: image.exportPDFToJPEG
 };
