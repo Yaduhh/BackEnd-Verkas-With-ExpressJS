@@ -43,18 +43,31 @@ class MitraPiutang {
       subParams.push(endDate + ' 23:59:59');
     }
 
+    let repayAfterSql = '0';
+    const repayParams = [];
+    if (endDate) {
+      repayAfterSql = `COALESCE((
+        SELECT SUM(tr.amount)
+        FROM transaction_repayments tr
+        WHERE tr.transaction_id = t.id
+        AND tr.mitra_piutang_id = mp.id
+        AND tr.payment_date > ?
+      ), 0)`;
+      repayParams.push(endDate + ' 23:59:59');
+    }
+
     let sql = `
       SELECT mp.*, 
              COALESCE(u.name, u.email) as creator_name,
              (
-               SELECT COALESCE(SUM(t.remaining_debt), 0)
+               SELECT COALESCE(SUM(t.remaining_debt + ${repayAfterSql}), 0)
                FROM transactions t
                WHERE t.mitra_piutang_id = mp.id 
                AND t.status_deleted = false
                AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
                ${dateFilterSql}
              ) + (
-               SELECT COALESCE(SUM(tmd.remaining_debt), 0)
+               SELECT COALESCE(SUM(tmd.remaining_debt + ${repayAfterSql}), 0)
                FROM transaction_mitra_details tmd
                JOIN transactions t ON tmd.transaction_id = t.id
                WHERE tmd.mitra_piutang_id = mp.id AND t.status_deleted = false
@@ -64,7 +77,13 @@ class MitraPiutang {
       LEFT JOIN users u ON mp.created_by = u.id
       WHERE mp.branch_id = ?
     `;
-    const params = [...subParams, ...subParams, branchId];
+    const params = [
+      ...(endDate ? repayParams : []),
+      ...subParams,
+      ...(endDate ? repayParams : []),
+      ...subParams,
+      branchId
+    ];
 
     if (!includeDeleted) {
       sql += ' AND mp.deleted_at IS NULL';

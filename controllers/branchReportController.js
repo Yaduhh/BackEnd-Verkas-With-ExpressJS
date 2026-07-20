@@ -133,19 +133,41 @@ const getReport = async (req, res, next) => {
         // Fetch Total Mitra Piutang
         const mitraPiutangResult = await query(
             `SELECT (
-                SELECT COALESCE(SUM(t.remaining_debt), 0)
+                SELECT COALESCE(SUM(t.remaining_debt + COALESCE((
+                  SELECT SUM(tr.amount)
+                  FROM transaction_repayments tr
+                  WHERE tr.transaction_id = t.id
+                    AND tr.payment_date > ?
+                ), 0)), 0)
                 FROM transactions t
                 JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
                 WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+                AND t.transaction_date BETWEEN ? AND ?
                 AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
               ) + (
-                SELECT COALESCE(SUM(tmd.remaining_debt), 0)
+                SELECT COALESCE(SUM(tmd.remaining_debt + COALESCE((
+                  SELECT SUM(tr.amount)
+                  FROM transaction_repayments tr
+                  WHERE tr.transaction_id = t.id
+                    AND tr.mitra_piutang_id = mp.id
+                    AND tr.payment_date > ?
+                ), 0)), 0)
                 FROM transaction_mitra_details tmd
                 JOIN transactions t ON tmd.transaction_id = t.id
                 JOIN mitra_piutang mp ON tmd.mitra_piutang_id = mp.id
                 WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+                AND t.transaction_date BETWEEN ? AND ?
               ) as total_piutang`,
-            [branchId, branchId]
+            [
+              endDate + ' 23:59:59',
+              branchId,
+              startDate + ' 00:00:00',
+              endDate + ' 23:59:59',
+              endDate + ' 23:59:59',
+              branchId,
+              startDate + ' 00:00:00',
+              endDate + ' 23:59:59'
+            ]
         );
         const totalPiutangMitra = parseFloat(mitraPiutangResult[0].total_piutang) || 0;
 
@@ -372,19 +394,41 @@ const updateReport = async (req, res, next) => {
 
         const mitraPiutangResult = await query(
             `SELECT (
-                SELECT COALESCE(SUM(t.remaining_debt), 0)
+                SELECT COALESCE(SUM(t.remaining_debt + COALESCE((
+                  SELECT SUM(tr.amount)
+                  FROM transaction_repayments tr
+                  WHERE tr.transaction_id = t.id
+                    AND tr.payment_date > ?
+                ), 0)), 0)
                 FROM transactions t
                 JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
                 WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+                AND t.transaction_date BETWEEN ? AND ?
                 AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
               ) + (
-                SELECT COALESCE(SUM(tmd.remaining_debt), 0)
+                SELECT COALESCE(SUM(tmd.remaining_debt + COALESCE((
+                  SELECT SUM(tr.amount)
+                  FROM transaction_repayments tr
+                  WHERE tr.transaction_id = t.id
+                    AND tr.mitra_piutang_id = mp.id
+                    AND tr.payment_date > ?
+                ), 0)), 0)
                 FROM transaction_mitra_details tmd
                 JOIN transactions t ON tmd.transaction_id = t.id
                 JOIN mitra_piutang mp ON tmd.mitra_piutang_id = mp.id
                 WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+                AND t.transaction_date BETWEEN ? AND ?
               ) as total_piutang`,
-            [branchId, branchId]
+            [
+              endDate + ' 23:59:59',
+              branchId,
+              startDate + ' 00:00:00',
+              endDate + ' 23:59:59',
+              endDate + ' 23:59:59',
+              branchId,
+              startDate + ' 00:00:00',
+              endDate + ' 23:59:59'
+            ]
         );
         const totalPiutangMitra = parseFloat(mitraPiutangResult[0].total_piutang) || 0;
         const systemPengeluaran = folderPengeluaran + totalPiutangMitra;
@@ -525,19 +569,41 @@ const exportPdf = async (req, res, next) => {
 
         const mitraPiutangResult = await query(
             `SELECT (
-                SELECT COALESCE(SUM(t.remaining_debt), 0)
+                SELECT COALESCE(SUM(t.remaining_debt + COALESCE((
+                  SELECT SUM(tr.amount)
+                  FROM transaction_repayments tr
+                  WHERE tr.transaction_id = t.id
+                    AND tr.payment_date > ?
+                ), 0)), 0)
                 FROM transactions t
                 JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
                 WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+                AND t.transaction_date BETWEEN ? AND ?
                 AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
               ) + (
-                SELECT COALESCE(SUM(tmd.remaining_debt), 0)
+                SELECT COALESCE(SUM(tmd.remaining_debt + COALESCE((
+                  SELECT SUM(tr.amount)
+                  FROM transaction_repayments tr
+                  WHERE tr.transaction_id = t.id
+                    AND tr.mitra_piutang_id = mp.id
+                    AND tr.payment_date > ?
+                ), 0)), 0)
                 FROM transaction_mitra_details tmd
                 JOIN transactions t ON tmd.transaction_id = t.id
                 JOIN mitra_piutang mp ON tmd.mitra_piutang_id = mp.id
                 WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+                AND t.transaction_date BETWEEN ? AND ?
               ) as total_piutang`,
-            [branchId, branchId]
+            [
+              endDate + ' 23:59:59',
+              branchId,
+              startDate + ' 00:00:00',
+              endDate + ' 23:59:59',
+              endDate + ' 23:59:59',
+              branchId,
+              startDate + ' 00:00:00',
+              endDate + ' 23:59:59'
+            ]
         );
         const totalPiutangMitra = parseFloat(mitraPiutangResult[0].total_piutang) || 0;
         const systemPengeluaran = folderPengeluaran + totalPiutangMitra;
@@ -899,19 +965,41 @@ const exportImage = async (req, res, next) => {
 
         const mitraPiutangResult = await query(
             `SELECT (
-                SELECT COALESCE(SUM(t.remaining_debt), 0)
+                SELECT COALESCE(SUM(t.remaining_debt + COALESCE((
+                  SELECT SUM(tr.amount)
+                  FROM transaction_repayments tr
+                  WHERE tr.transaction_id = t.id
+                    AND tr.payment_date > ?
+                ), 0)), 0)
                 FROM transactions t
                 JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
                 WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+                AND t.transaction_date BETWEEN ? AND ?
                 AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
               ) + (
-                SELECT COALESCE(SUM(tmd.remaining_debt), 0)
+                SELECT COALESCE(SUM(tmd.remaining_debt + COALESCE((
+                  SELECT SUM(tr.amount)
+                  FROM transaction_repayments tr
+                  WHERE tr.transaction_id = t.id
+                    AND tr.mitra_piutang_id = mp.id
+                    AND tr.payment_date > ?
+                ), 0)), 0)
                 FROM transaction_mitra_details tmd
                 JOIN transactions t ON tmd.transaction_id = t.id
                 JOIN mitra_piutang mp ON tmd.mitra_piutang_id = mp.id
                 WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+                AND t.transaction_date BETWEEN ? AND ?
               ) as total_piutang`,
-            [branchId, branchId]
+            [
+              endDate + ' 23:59:59',
+              branchId,
+              startDate + ' 00:00:00',
+              endDate + ' 23:59:59',
+              endDate + ' 23:59:59',
+              branchId,
+              startDate + ' 00:00:00',
+              endDate + ' 23:59:59'
+            ]
         );
         const totalPiutangMitra = parseFloat(mitraPiutangResult[0].total_piutang) || 0;
         const systemPengeluaran = folderPengeluaran + totalPiutangMitra;
