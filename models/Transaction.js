@@ -980,7 +980,6 @@ class Transaction {
       const parts = startDate.split('-');
       const startOfMonth = `${parts[0]}-${parts[1]}-01 00:00:00`;
       selectParams.push(startOfMonth);
-      selectParams.push(startOfMonth);
     }
 
     if (categoryId) {
@@ -999,50 +998,64 @@ class Transaction {
     let sql = `
       SELECT 
         COALESCE(SUM(CASE 
-          WHEN t.type = 'income' THEN 
-            CASE 
-              /* Jika Piutang Utama (ada kategori): Ambil PAID AMOUNT (Nominal terbayar di awal) untuk Omzet Rill */
-              WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NOT NULL THEN COALESCE(t.paid_amount, 0)
-              
-              /* Jika Notifikasi Pelunasan (tanpa kategori): */
-              /* Masukkan ke pemasukan HANYA jika pelunasan piutang periode lalu (menambah kas riil periode berjalan) */
-              WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL THEN
-                CASE 
-                  WHEN ${startDate ? 't_parent.transaction_date < ?' : 'FALSE'} THEN t.amount
-                  ELSE 0
-                END
-              
-              /* Transaksi Normal: Ambil amount penuh */
-              ELSE t.amount 
-            END
-          /* Alokasi Simpanan dari Kas Utama (dianggap pemasukan buat kantong) */
-          ${categoryId ? 'WHEN t.type = \'expense\' AND t.is_umum = true THEN COALESCE(tsd_active.amount, t.amount)' : ''}
+          WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+            t.amount
           ELSE 0 
-        END), 0) as pemasukan,
+        END), 0) as omzet_gross,
+
+        COALESCE(SUM(CASE 
+          WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+            COALESCE(
+              (SELECT SUM(tid.amount_app)
+               FROM transaction_income_details tid
+               JOIN payment_methods pm ON tid.payment_method_id = pm.id
+               WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
+              0
+            )
+          ELSE 0 
+        END), 0) as omzet_taxable,
+
+        COALESCE(SUM(CASE 
+          WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+            t.amount 
+          ELSE 0 
+        END), 0) as lain_gross,
+
+        COALESCE(SUM(CASE 
+          WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+            COALESCE(
+              (SELECT SUM(tid.amount_app)
+               FROM transaction_income_details tid
+               JOIN payment_methods pm ON tid.payment_method_id = pm.id
+               WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
+              0
+            )
+          ELSE 0 
+        END), 0) as lain_taxable,
+
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' AND (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL AND ${startDate ? 't_parent.transaction_date < ?' : 'FALSE'} THEN t.amount
           ELSE 0
         END), 0) as pelunasan_piutang_lalu,
+
         COALESCE(SUM(CASE 
-          WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryConditionForExpense}) THEN t.amount
+          WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryConditionForExpense}) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN t.amount + COALESCE(t.pb1, 0)
           ELSE 0 
         END), 0) as pengeluaran,
-        ROUND(COALESCE(SUM(
-          CASE 
-            WHEN t.type = 'income' AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN 
-              COALESCE(
-                (SELECT SUM(tid.amount_app)
-                 FROM transaction_income_details tid
-                 JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                 WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
-                /* Fallback ke kolom pb1 lama dikali 11 (karena pb1 lama itu hasil 10/110, kita butuh nilai taxable-nya buat di-SUM dulu) */
-                /* Tapi lebih aman sum pb1 langsung di luar jika tidak ada details */
-                t.pb1 * 11, 
-                0
-              )
-            ELSE 0 
-          END
-        ), 0) * 10 / 110) as total_pb1,
+
+        COALESCE(SUM(CASE 
+          WHEN t.type = 'income' AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+            COALESCE(
+              (SELECT SUM(tid.amount_app)
+               FROM transaction_income_details tid
+               JOIN payment_methods pm ON tid.payment_method_id = pm.id
+               WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
+              t.pb1 * 11,
+              0
+            )
+          ELSE 0 
+        END), 0) as total_taxable,
+
         COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.is_pb1_payment = true THEN t.amount ELSE 0 END), 0) as total_pb1_paid
       FROM transactions t
       LEFT JOIN categories c ON t.category_id = c.id
@@ -1105,18 +1118,230 @@ class Transaction {
     }
 
     const results = await query(sql, [...selectParams, ...params]);
-    const { pemasukan, pelunasan_piutang_lalu, pengeluaran, total_pb1, total_pb1_paid } = results[0];
-    const saldo = pemasukan - pengeluaran;
-    const saldo_pb1 = (total_pb1 || 0) - (total_pb1_paid || 0);
+    const {
+      omzet_gross,
+      omzet_taxable,
+      lain_gross,
+      lain_taxable,
+      pelunasan_piutang_lalu,
+      pengeluaran,
+      total_taxable,
+      total_pb1_paid
+    } = results[0];
+
+    const omzetTax = Math.round((Number(omzet_taxable) * 10) / 110);
+    const totalOmzetNet = Number(omzet_gross) - omzetTax;
+
+    const lainTax = Math.round((Number(lain_taxable) * 10) / 110);
+    const totalPemasukanLainNet = Number(lain_gross) - lainTax;
+
+    const totalPelunasanLalu = Number(pelunasan_piutang_lalu);
+
+    const totalPb1Paid = Number(total_pb1_paid);
+
+    // Synchronize both Pemasukan & Pengeluaran with Branch Financial Report (100% exact match across all branches)
+    if (branchId && startDate && endDate) {
+      try {
+        const startDateOnly = startDate.split(' ')[0].split('T')[0];
+        const endDateOnly = endDate.split(' ')[0].split('T')[0];
+        const startDtWithTime = `${startDateOnly} 00:00:00`;
+        const endDtWithTime = `${endDateOnly} 23:59:59`;
+
+        // 1. Pelunasan Piutang Bulan Lalu (exact match with branchReportController.js)
+        const debtRepaymentResult = await query(
+            `SELECT SUM(tr.amount) as total
+             FROM transaction_repayments tr
+             JOIN transactions t ON tr.transaction_id = t.id
+             WHERE tr.payment_date BETWEEN ? AND ?
+               AND t.transaction_date < ?
+               AND t.branch_id = ?
+               AND t.status_deleted = false`,
+            [startDateOnly, endDateOnly, startDateOnly, branchId]
+        );
+        const pelunasanPiutangBulanLalu = parseFloat(debtRepaymentResult[0]?.total || 0);
+
+        // 2. Income Breakdown & Net Calculation (exact match with branchReportController.js)
+        const incomeBreakdownResult = await query(
+            `SELECT 
+                t.category_id,
+                COALESCE(c.name, 'Lain-lain') as category_name,
+                t.is_debt_payment,
+                SUM(t.amount) as total_gross,
+                SUM(
+                    COALESCE((
+                        SELECT SUM(tid.amount_app)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), 0)
+                ) as taxable_amount,
+                (SELECT COUNT(*) FROM transactions t2 WHERE t2.category_id = t.category_id AND t2.type = 'expense' AND t2.status_deleted = false AND t2.branch_id = t.branch_id) as has_expense
+             FROM transactions t
+             LEFT JOIN categories c ON t.category_id = c.id
+             WHERE t.branch_id = ?
+               AND t.type = 'income'
+               AND t.transaction_date BETWEEN ? AND ?
+               AND t.status_deleted = false
+               AND t.is_umum = true
+               AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
+             GROUP BY category_name, t.is_debt_payment, t.category_id`,
+            [branchId, startDateOnly, endDateOnly]
+        );
+
+        let omzetNetSum = 0;
+        let omzetTaxSum = 0;
+        let lainNetSum = 0;
+        let lainTaxSum = 0;
+
+        incomeBreakdownResult.forEach(item => {
+            const gross = parseFloat(item.total_gross) || 0;
+            const taxable = parseFloat(item.taxable_amount) || 0;
+            const tax = Math.round((taxable * 10) / 110);
+            const net = gross - tax;
+
+            const nameUpper = item.category_name.toUpperCase();
+            const hasExpense = parseInt(item.has_expense) > 0;
+            const isOmzet = nameUpper.includes('OMZET') || nameUpper.includes('OMSET');
+
+            if (isOmzet) {
+                omzetNetSum += net;
+                omzetTaxSum += tax;
+            } else {
+                if ((!item.is_debt_payment || item.is_debt_payment == 0) && !hasExpense) {
+                    lainNetSum += net;
+                    lainTaxSum += tax;
+                }
+            }
+        });
+
+        // 3. Expense Breakdown & System Pengeluaran (exact match with branchReportController.js)
+        const expenseBreakdownRes = await query(
+          `SELECT COALESCE(SUM(total), 0) as folder_pengeluaran
+           FROM (
+              SELECT (CASE 
+                          WHEN t.type = 'expense' THEN 
+                              (CASE WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) ELSE t.amount END) + COALESCE(t.pb1, 0)
+                          ELSE 
+                              -(t.amount + COALESCE(t.pb1, 0))
+                      END) as total 
+              FROM transactions t 
+              LEFT JOIN categories c ON t.category_id = c.id 
+              WHERE t.branch_id = ? 
+                AND t.transaction_date BETWEEN ? AND ? 
+                AND t.status_deleted = false
+                AND t.is_umum = true
+                AND (t.is_savings = 0 OR t.is_savings IS NULL)
+                AND (
+                  t.type = 'expense' 
+                  OR (t.type = 'income' AND t.category_id IN (
+                     SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false
+                  ))
+                )
+
+              UNION ALL
+
+              SELECT tsd.amount as total
+              FROM transaction_savings_details tsd
+              JOIN transactions t ON tsd.transaction_id = t.id
+              JOIN categories c ON tsd.category_id = c.id
+              WHERE t.branch_id = ? 
+                AND t.transaction_date BETWEEN ? AND ? 
+                AND t.status_deleted = false
+                AND t.is_umum = true
+                AND t.type = 'expense'
+                AND t.is_savings = 1
+           ) as consolidated`,
+          [branchId, startDateOnly, endDateOnly, branchId, branchId, startDateOnly, endDateOnly]
+        );
+
+        const folderPengeluaran = parseFloat(expenseBreakdownRes[0]?.folder_pengeluaran || 0);
+
+        const mitraPiutangRes = await query(
+          `SELECT (
+              SELECT COALESCE(SUM(t.remaining_debt + COALESCE((
+                SELECT SUM(tr.amount)
+                FROM transaction_repayments tr
+                WHERE tr.transaction_id = t.id
+                  AND tr.payment_date > ?
+              ), 0)), 0)
+              FROM transactions t
+              JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
+              WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+              AND t.transaction_date BETWEEN ? AND ?
+              AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
+            ) + (
+              SELECT COALESCE(SUM(tmd.remaining_debt + COALESCE((
+                SELECT SUM(tr.amount)
+                FROM transaction_repayments tr
+                WHERE tr.transaction_id = t.id
+                  AND tr.mitra_piutang_id = mp.id
+                  AND tr.payment_date > ?
+              ), 0)), 0)
+              FROM transaction_mitra_details tmd
+              JOIN transactions t ON tmd.transaction_id = t.id
+              JOIN mitra_piutang mp ON tmd.mitra_piutang_id = mp.id
+              WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+              AND t.transaction_date BETWEEN ? AND ?
+            ) as total_piutang`,
+          [
+            endDtWithTime,
+            branchId,
+            startDtWithTime,
+            endDtWithTime,
+            endDtWithTime,
+            branchId,
+            startDtWithTime,
+            endDtWithTime
+          ]
+        );
+        const totalPiutangMitra = parseFloat(mitraPiutangRes[0]?.total_piutang || 0);
+
+        const totalPemasukan = omzetNetSum + lainNetSum + pelunasanPiutangBulanLalu;
+        const totalPengeluaran = folderPengeluaran + totalPiutangMitra;
+        const saldo = totalPemasukan - totalPengeluaran;
+        const totalPb1 = omzetTaxSum + lainTaxSum;
+
+        return {
+          pemasukan: totalPemasukan,
+          total_omzet: omzetNetSum,
+          pemasukan_lain: lainNetSum,
+          pelunasan_piutang_lalu: pelunasanPiutangBulanLalu,
+          pengeluaran: totalPengeluaran,
+          saldo: saldo,
+          total_pb1: totalPb1,
+          total_pb1_paid: totalPb1Paid,
+          saldo_pb1: totalPb1 - totalPb1Paid
+        };
+      } catch (err) {
+        console.error('Error in getSummary unified calculation:', err);
+      }
+    }
+
+    const fallbackOmzetTax = Math.round((Number(omzet_taxable) * 10) / 110);
+    const fallbackTotalOmzetNet = Number(omzet_gross) - fallbackOmzetTax;
+
+    const fallbackLainTax = Math.round((Number(lain_taxable) * 10) / 110);
+    const fallbackTotalPemasukanLainNet = Number(lain_gross) - fallbackLainTax;
+
+    const fallbackTotalPelunasanLalu = Number(pelunasan_piutang_lalu);
+
+    const fallbackTotalPb1 = Math.round((Number(total_taxable) * 10) / 110);
+    const fallbackSaldoPb1 = fallbackTotalPb1 - totalPb1Paid;
+
+    const fallbackTotalPemasukan = fallbackTotalOmzetNet + fallbackTotalPemasukanLainNet + fallbackTotalPelunasanLalu;
+    const fallbackTotalPengeluaran = Number(pengeluaran);
+    const fallbackSaldo = fallbackTotalPemasukan - fallbackTotalPengeluaran;
 
     return {
-      pemasukan: Number(pemasukan),
-      pelunasan_piutang_lalu: Number(pelunasan_piutang_lalu),
-      pengeluaran: Number(pengeluaran),
-      saldo: Number(saldo),
-      total_pb1: Number(total_pb1),
-      total_pb1_paid: Number(total_pb1_paid),
-      saldo_pb1: Number(saldo_pb1)
+      pemasukan: fallbackTotalPemasukan,
+      total_omzet: fallbackTotalOmzetNet,
+      pemasukan_lain: fallbackTotalPemasukanLainNet,
+      pelunasan_piutang_lalu: fallbackTotalPelunasanLalu,
+      pengeluaran: fallbackTotalPengeluaran,
+      saldo: fallbackSaldo,
+      total_pb1: fallbackTotalPb1,
+      total_pb1_paid: totalPb1Paid,
+      saldo_pb1: fallbackSaldoPb1
     };
   }
 
