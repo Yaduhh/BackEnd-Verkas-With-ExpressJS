@@ -394,7 +394,7 @@ const create = async (req, res, next) => {
       note: note || null,
       transactionDate: date,
       lampiran: lampiranValue,
-      isUmum,
+      isUmum: (is_pb1_payment === true || is_pb1_payment === 'true' || is_pb1_payment === 1) ? false : isUmum,
       isDebtPayment,
       isSavings: is_savings === true || is_savings === 'true' || is_savings === 1,
       paidAmount,
@@ -404,7 +404,7 @@ const create = async (req, res, next) => {
       mitraDetails: mitra_details || [],
       savingsDetails: savings_details || [],
       incomeDetails: income_details || [],
-      isPb1Payment: is_pb1_payment || false
+      isPb1Payment: is_pb1_payment === true || is_pb1_payment === 'true' || is_pb1_payment === 1
     });
 
     // Log to history table (Audit Trail) - Non-blocking
@@ -637,6 +637,15 @@ const update = async (req, res, next) => {
 
     if (is_pb1_payment !== undefined) {
       updateData.isPb1Payment = is_pb1_payment === true || is_pb1_payment === 'true' || is_pb1_payment === 1;
+    }
+
+    // Guarantee PB1 setoran payments NEVER get saved with is_umum = true (Kas Berjalan)
+    const isFinalPb1Payment = updateData.isPb1Payment !== undefined 
+      ? updateData.isPb1Payment 
+      : (existing.is_pb1_payment === 1 || existing.is_pb1_payment === true);
+
+    if (isFinalPb1Payment) {
+      updateData.isUmum = false;
     }
 
     const transaction = await Transaction.update(id, updateData);

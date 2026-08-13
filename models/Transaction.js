@@ -535,9 +535,13 @@ class Transaction {
         updates.push('lampiran = ?');
         params.push(lampiran || null);
       }
-      if (isUmum !== undefined) {
+      const isPb1 = isPb1Payment !== undefined 
+        ? (isPb1Payment === true || isPb1Payment === 'true' || isPb1Payment === 1) 
+        : (oldTx && (oldTx.is_pb1_payment === 1 || oldTx.is_pb1_payment === true));
+
+      if (isUmum !== undefined || isPb1) {
         updates.push('is_umum = ?');
-        params.push(isUmum === true || isUmum === 'true' || isUmum === 1);
+        params.push(isPb1 ? false : (isUmum === true || isUmum === 'true' || isUmum === 1));
       }
       if (isDebtPayment !== undefined) {
         updates.push('is_debt_payment = ?');
