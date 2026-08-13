@@ -199,6 +199,9 @@ async function tryResolveExtremeTransactionQueryDirectly(message, branchId) {
 async function tryResolveSavingsBalanceQueryDirectly(message, branchId, chatHistory) {
   const msg = message.toLowerCase();
   
+  // If query is about PB1 or Pajak, DO NOT treat it as Kas Simpanan query!
+  if (msg.includes('pb1') || msg.includes('pajak')) return null;
+
   const hasSavingsKeyword = ['simpanan', 'simpaan', 'tabungan', 'cadangan'].some(kw => msg.includes(kw));
   
   let isSavingsBalanceQuery = hasSavingsKeyword && 
@@ -344,8 +347,14 @@ function tryResolvePICQueryDirectly(message, branchPics, teamMembers, branchName
   return reply;
 }
 
-function tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchName, chatHistory) {
+async function tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchName, chatHistory, branchId) {
   const msg = message.toLowerCase();
+
+  const writeAction = ['buatkan', 'buat', 'bikin', 'tambah', 'tambahkan', 'input', 'masukkan', 'sisipkan', 'edit', 'ubah', 'hapus', 'delete', 'remove'].some(w => msg.includes(w));
+  const writeTarget = ['transaksi', 'pemasukan', 'pengeluaran', 'data', 'catatan', 'nota', 'piutang'].some(t => msg.includes(t));
+  if (writeAction && writeTarget) {
+    return 'Maaf, sebagai AI Assistant saya hanya memiliki akses baca (read-only) untuk menganalisis laporan keuangan Anda, sehingga tidak dapat membuat, mengubah, atau menghapus transaksi.\n\nAnda dapat menambahkan atau mengelola transaksi secara langsung melalui tombol "+ Transaksi" pada aplikasi Verkas.';
+  }
 
   const comparativeKeywords = ['bandingkan', 'banding', 'perbandingan', 'selisih', 'vs', 'perkembangan', 'tren', 'analisis', 'analisa', 'kenapa', 'mengapa', 'sebab', 'alasan'];
   const isComparative = comparativeKeywords.some(kw => msg.includes(kw));
@@ -353,54 +362,63 @@ function tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchName, c
   const isSavingsQuery = ['simpanan', 'simpaan', 'tabungan', 'cadangan', 'pribadi'].some(w => msg.includes(w));
   if (isSavingsQuery) return null;
 
-  // 1b. Detect if requesting 3-month trend/analysis
-  const isThreeMonths = msg.includes('3 bulan') || msg.includes('tiga bulan');
-  if (isThreeMonths) {
-    // Get the 3 most recent months (index 0 = current month, 1 = last month, 2 = 2 months ago)
-    const activeSummaries = monthlySummaries
+  // If query is specifically about Piutang / Mitra / Hutang, DO NOT resolve it as monthly financial summary!
+  if ((msg.includes('piutang') || msg.includes('mitra') || msg.includes('hutang') || msg.includes('utang') || msg.includes('piputang')) && !msg.includes('pelunasan piutang periode lalu')) {
+    return null;
+  }
+
+  // If last user turn was about Piutang/Mitra and current message is a follow-up (e.g. "kalo dibulan agustusnya"), pass to tryResolvePiutangQueryDirectly!
+  if (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0) {
+    const lastUserMsg = [...chatHistory].reverse().find(h => h.role === 'user');
+    if (lastUserMsg) {
+      const lastLower = lastUserMsg.content.toLowerCase();
+      const wasPiutang = ['piutang', 'mitra', 'hutang', 'utang', 'piputang'].some(kw => lastLower.includes(kw));
+      const isGeneralFinancial = ['omzet', 'omset', 'pengeluaran', 'laba', 'kas berjalan', 'saldo kas', 'buku kas'].some(kw => msg.includes(kw));
+      if (wasPiutang && !isGeneralFinancial) {
+        return null;
+      }
+    }
+  }
+
+
+  // Handle multi-month trends
+  const isTrendQuery = ['tren', 'trend', 'perkembangan', 'grafik', '3 bulan', 'tiga bulan'].some(w => msg.includes(w));
+  if (isTrendQuery && monthlySummaries && monthlySummaries.length >= 6) {
+    const berjalanSummaries = monthlySummaries
       .filter(s => s.is_umum === 1)
       .slice(0, 3)
-      .reverse(); // May, June, July
+      .reverse();
 
-    if (activeSummaries.length >= 3) {
-      let reply = '';
-      const formatMonthLabel = (monthStr) => {
-        const [y, m] = monthStr.split('-');
-        const months = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
-        return `${months[parseInt(m) - 1]} ${y}`;
+    if (berjalanSummaries.length === 3) {
+      const formatMonthLabelLocal = (mStr) => {
+        const [y, m] = mStr.split('-');
+        const names = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+        return `${names[parseInt(m) - 1]} ${y}`;
       };
 
-      const summariesData = activeSummaries.map(s => {
-        const label = formatMonthLabel(s.month_str);
-        const omzet = s.raw_omzet - s.total_pb1;
-        const pengeluaran = s.pengeluaran;
-        const saldo = (s.pemasukan - s.total_pb1) - s.pengeluaran;
-        return {
-          label,
-          omzet,
-          raw_omzet: s.raw_omzet,
-          pengeluaran,
-          saldo
-        };
-      });
+      const summariesData = berjalanSummaries.map(s => ({
+        label: formatMonthLabelLocal(s.month_str),
+        omzet: s.total_omzet,
+        pengeluaran: s.pengeluaran,
+        saldo: s.saldo
+      }));
 
-      // Omzet trend
-      if (msg.includes('omzet') || msg.includes('omset') || msg.includes('pemasukan')) {
+      let reply = '';
+      if (msg.includes('omzet') || msg.includes('omset')) {
         reply = 'Analisis Omzet Kas Berjalan (3 Bulan Terakhir):\n';
         summariesData.forEach(d => {
-          reply += `- ${d.label}: ${formatIDR(d.omzet)} (Kotor: ${formatIDR(d.raw_omzet)})\n`;
+          reply += `- ${d.label}: ${formatIDR(d.omzet)}\n`;
         });
 
         const currentOmzet = summariesData[2].omzet;
         const prevOmzet = summariesData[1].omzet;
         const diff = currentOmzet - prevOmzet;
-        const trendStr = diff > 0 ? 'kenaikan' : 'penurunan';
+        const trendStr = diff > 0 ? 'peningkatan' : 'penurunan';
 
-        reply += `\nAnalisis Tren:\nBuku kas "${branchName}" mencatatkan omzet bersih sebesar ${formatIDR(currentOmzet)} pada ${summariesData[2].label}. Dibandingkan dengan periode ${summariesData[1].label} (${formatIDR(prevOmzet)}), terjadi ${trendStr} sebesar ${formatIDR(Math.abs(diff))}.`;
+        reply += `\nAnalisis Tren:\nTotal omzet pada ${summariesData[2].label} adalah ${formatIDR(currentOmzet)}. Dibandingkan dengan periode ${summariesData[1].label} (${formatIDR(prevOmzet)}), terjadi ${trendStr} sebesar ${formatIDR(Math.abs(diff))}.`;
         return reply;
       }
 
-      // Pengeluaran trend
       if (msg.includes('pengeluaran') || msg.includes('belanja') || msg.includes('biaya')) {
         reply = 'Analisis Pengeluaran Kas Berjalan (3 Bulan Terakhir):\n';
         summariesData.forEach(d => {
@@ -416,7 +434,6 @@ function tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchName, c
         return reply;
       }
 
-      // Default to general cash flow / balance trend
       reply = 'Analisis Keuangan Kas Berjalan (3 Bulan Terakhir):\n';
       summariesData.forEach(d => {
         reply += `- ${d.label}: Omzet ${formatIDR(d.omzet)}, Pengeluaran ${formatIDR(d.pengeluaran)}, Saldo Bersih ${formatIDR(d.saldo)}\n`;
@@ -432,38 +449,74 @@ function tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchName, c
     }
   }
 
-  // 1. Detect if comparing June and July (month-over-month)
+  // 1. Detect if comparing June and July (month-over-month) or follow-up percentage question
   const isComparingJuneJuly = (msg.includes('juni') && msg.includes('juli')) ||
     (msg.includes('bulan ini') && (msg.includes('bulan kemarin') || msg.includes('bulan lalu'))) ||
     (msg.includes('dengan') && msg.includes('bulan ini') && msg.includes('bulan lalu')) ||
-    (msg.includes('dan') && msg.includes('bulan ini') && msg.includes('bulan lalu'));
+    (msg.includes('dan') && msg.includes('bulan ini') && msg.includes('bulan lalu')) ||
+    (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0 && 
+      [...chatHistory].reverse().some(h => {
+        const c = h.content.toLowerCase();
+        return (c.includes('juni') && c.includes('juli')) || c.includes('perbandingan') || c.includes('pengeluaran') || c.includes('omzet');
+      }) && ['persen', '%', 'persentase', 'berapa persen'].some(w => msg.includes(w)));
 
   if (isComparingJuneJuly) {
     const junBerjalan = monthlySummaries.find(s => s.month_str === '2026-06' && s.is_umum === 1);
     const julBerjalan = monthlySummaries.find(s => s.month_str === '2026-07' && s.is_umum === 1);
 
     if (junBerjalan && julBerjalan) {
-      const junOmzet = junBerjalan.raw_omzet - junBerjalan.total_pb1;
-      const julOmzet = julBerjalan.raw_omzet - julBerjalan.total_pb1;
+      const junOmzet = junBerjalan.total_omzet;
+      const julOmzet = julBerjalan.total_omzet;
 
       const junPengeluaran = junBerjalan.pengeluaran;
       const julPengeluaran = julBerjalan.pengeluaran;
 
-      const junSaldo = (junBerjalan.pemasukan - junBerjalan.total_pb1) - junBerjalan.pengeluaran;
-      const julSaldo = (julBerjalan.pemasukan - julBerjalan.total_pb1) - julBerjalan.pengeluaran;
+      const junSaldo = junBerjalan.saldo;
+      const julSaldo = julBerjalan.saldo;
 
-      // Omzet comparison
+      const isPercentAsking = ['persen', '%', 'persentase', 'berapa persen'].some(w => msg.includes(w));
+      const lastUserMsg = chatHistory && Array.isArray(chatHistory) ? [...chatHistory].reverse().find(h => h.role === 'user')?.content.toLowerCase() || '' : '';
+
+      if (isPercentAsking) {
+        if (msg.includes('pengeluaran') || msg.includes('belanja') || msg.includes('biaya') || lastUserMsg.includes('pengeluaran') || lastUserMsg.includes('belanja') || lastUserMsg.includes('biaya')) {
+          const diff = julPengeluaran - junPengeluaran;
+          const pct = junPengeluaran > 0 ? (((julPengeluaran - junPengeluaran) / junPengeluaran) * 100).toFixed(2) : '0';
+          const trendStr = diff >= 0 ? 'kenaikan' : 'penurunan';
+          return `Persentase ${trendStr} pengeluaran Kas Berjalan dari bulan Juni 2026 (${formatIDR(junPengeluaran)}) ke bulan Juli 2026 (${formatIDR(julPengeluaran)}) adalah sebesar +${pct}% (selisih ${trendStr} sebesar ${formatIDR(Math.abs(diff))}).`;
+        }
+
+        if (msg.includes('omzet') || msg.includes('omset') || lastUserMsg.includes('omzet') || lastUserMsg.includes('omset')) {
+          const diff = julOmzet - junOmzet;
+          const pct = junOmzet > 0 ? (((julOmzet - junOmzet) / junOmzet) * 100).toFixed(2) : '0';
+          const trendStr = diff >= 0 ? 'peningkatan' : 'penurunan';
+          return `Persentase ${trendStr} omzet bersih Kas Berjalan dari bulan Juni 2026 (${formatIDR(junOmzet)}) ke bulan Juli 2026 (${formatIDR(julOmzet)}) adalah sebesar +${pct}% (selisih ${trendStr} sebesar ${formatIDR(Math.abs(diff))}).`;
+        }
+
+        if (msg.includes('saldo') || msg.includes('laba') || msg.includes('untung') || msg.includes('bersih') || lastUserMsg.includes('saldo')) {
+          const diff = julSaldo - junSaldo;
+          const pct = junSaldo > 0 ? (((julSaldo - junSaldo) / Math.abs(junSaldo)) * 100).toFixed(2) : '0';
+          const trendStr = diff >= 0 ? 'peningkatan' : 'penurunan';
+          return `Persentase ${trendStr} saldo kas bersih dari bulan Juni 2026 (${formatIDR(junSaldo)}) ke bulan Juli 2026 (${formatIDR(julSaldo)}) adalah sebesar +${pct}% (selisih ${trendStr} sebesar ${formatIDR(Math.abs(diff))}).`;
+        }
+
+        const expDiff = julPengeluaran - junPengeluaran;
+        const expPct = junPengeluaran > 0 ? (((julPengeluaran - junPengeluaran) / junPengeluaran) * 100).toFixed(2) : '0';
+        return `Persentase perubahan Kas Berjalan dari Juni 2026 ke Juli 2026:\n\n` +
+               `- Pengeluaran: ${expDiff >= 0 ? '+' : ''}${expPct}% (selisih ${formatIDR(Math.abs(expDiff))})\n` +
+               `- Omzet Bersih: ${((julOmzet - junOmzet)/junOmzet * 100).toFixed(2)}%\n` +
+               `- Saldo Kas Bersih: ${((julSaldo - junSaldo)/Math.abs(junSaldo) * 100).toFixed(2)}%`;
+      }
+
       if (msg.includes('omzet') || msg.includes('omset')) {
         const diff = julOmzet - junOmzet;
         const trend = diff > 0 ? 'kenaikan' : 'penurunan';
         return `Perbandingan Omzet Kas Berjalan:
-- Juni 2026 (Bulan Lalu): ${formatIDR(junOmzet)} (Kotor: ${formatIDR(junBerjalan.raw_omzet)}, PB1: ${formatIDR(junBerjalan.total_pb1)})
-- Juli 2026 (Bulan Ini): ${formatIDR(julOmzet)} (Kotor: ${formatIDR(julBerjalan.raw_omzet)}, PB1: ${formatIDR(julBerjalan.total_pb1)})
+- Juni 2026 (Bulan Lalu): ${formatIDR(junOmzet)} (PB1: ${formatIDR(junBerjalan.total_pb1)})
+- Juli 2026 (Bulan Ini): ${formatIDR(julOmzet)} (PB1: ${formatIDR(julBerjalan.total_pb1)})
 
 Terjadi ${trend} omzet bersih sebesar ${formatIDR(Math.abs(diff))} pada bulan ini (Juli 2026) dibandingkan bulan lalu (Juni 2026).`;
       }
 
-      // Pengeluaran comparison
       if (msg.includes('pengeluaran') || msg.includes('belanja') || msg.includes('biaya')) {
         if (!msg.includes('lain')) {
           const diff = julPengeluaran - junPengeluaran;
@@ -476,7 +529,6 @@ Terjadi ${trend} pengeluaran sebesar ${formatIDR(Math.abs(diff))} pada bulan ini
         }
       }
 
-      // Saldo / Laba / Keuntungan comparison
       if (msg.includes('saldo') || msg.includes('laba') || msg.includes('untung') || msg.includes('bersih')) {
         const diff = julSaldo - junSaldo;
         const trend = diff > 0 ? 'kenaikan' : 'penurunan';
@@ -486,15 +538,46 @@ Terjadi ${trend} pengeluaran sebesar ${formatIDR(Math.abs(diff))} pada bulan ini
 
 Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada bulan ini (Juli 2026) dibandingkan bulan lalu (Juni 2026).`;
       }
+
+      // General full comparison if no single metric is filtered
+      const omzetDiff = julOmzet - junOmzet;
+      const omzetTrend = omzetDiff >= 0 ? 'peningkatan' : 'penurunan';
+      const omzetPct = junOmzet > 0 ? (((julOmzet - junOmzet) / junOmzet) * 100).toFixed(1) : '0';
+
+      const expDiff = julPengeluaran - junPengeluaran;
+      const expTrend = expDiff >= 0 ? 'kenaikan' : 'penurunan';
+      const expPct = junPengeluaran > 0 ? (((julPengeluaran - junPengeluaran) / junPengeluaran) * 100).toFixed(1) : '0';
+
+      const saldoDiff = julSaldo - junSaldo;
+      const saldoTrend = saldoDiff >= 0 ? 'peningkatan' : 'penurunan';
+      const saldoPct = junSaldo > 0 ? (((julSaldo - junSaldo) / Math.abs(junSaldo)) * 100).toFixed(1) : '0';
+
+      return `Analisis Perbandingan Keuangan Kas Berjalan (Juni vs Juli 2026) untuk Buku Kas "${branchName}":\n\n` +
+             `1. Total Omzet (Bersih):\n` +
+             `   - Juni 2026: ${formatIDR(junOmzet)}\n` +
+             `   - Juli 2026: ${formatIDR(julOmzet)}\n` +
+             `   -> Terjadi ${omzetTrend} omzet bersih sebesar ${formatIDR(Math.abs(omzetDiff))} (${omzetDiff >= 0 ? '+' : ''}${omzetPct}%).\n\n` +
+             `2. Total Pengeluaran:\n` +
+             `   - Juni 2026: ${formatIDR(junPengeluaran)}\n` +
+             `   - Juli 2026: ${formatIDR(julPengeluaran)}\n` +
+             `   -> Terjadi ${expTrend} pengeluaran sebesar ${formatIDR(Math.abs(expDiff))} (${expDiff >= 0 ? '+' : ''}${expPct}%).\n\n` +
+             `3. Total Saldo Kas Berjalan (Bersih):\n` +
+             `   - Juni 2026: ${formatIDR(junSaldo)}\n` +
+             `   - Juli 2026: ${formatIDR(julSaldo)}\n` +
+             `   -> Terjadi ${saldoTrend} saldo kas bersih sebesar ${formatIDR(Math.abs(saldoDiff))} (${saldoDiff >= 0 ? '+' : ''}${saldoPct}%).\n\n` +
+             `Kesimpulan:\n` +
+             `Secara keseluruhan, kinerja Kas Berjalan toko "${branchName}" pada bulan Juli 2026 mengalami ${saldoTrend} saldo kas bersih sebesar ${formatIDR(Math.abs(saldoDiff))} (+${saldoPct}%) dibandingkan bulan Juni 2026.`;
     }
   }
 
-  // Skip direct resolution if it's other complex/comparative query
-  if (isComparative) return null;
-
-  // Inherit topic from chatHistory if it's a follow-up query
+  // Inherit topic & month from chatHistory if it's a follow-up query
   let topic = '';
-  if (msg.includes('pengeluaran') || msg.includes('belanja') || msg.includes('biaya')) {
+  const isAverageQuery = ['rata', 'average', 'mean', 'sehari', 'per hari', 'per transaksi'].some(w => msg.includes(w));
+  if (isAverageQuery) {
+    topic = 'rata-rata';
+  } else if (msg.includes('pb1') || msg.includes('pajak')) {
+    topic = 'pajak';
+  } else if (msg.includes('pengeluaran') || msg.includes('belanja') || msg.includes('biaya')) {
     topic = 'pengeluaran';
   } else if (msg.includes('pemasukan') && !msg.includes('lain') && !msg.includes('piutang')) {
     topic = 'pemasukan';
@@ -504,13 +587,15 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada bula
     topic = 'saldo';
   } else if (msg.includes('pemasukan lain') || msg.includes('lain-lain')) {
     topic = 'pemasukan lain';
-  } else if (msg.includes('pb1') || msg.includes('pajak')) {
-    topic = 'pajak';
   } else if (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0) {
     const lastUserMsg = [...chatHistory].reverse().find(h => h.role === 'user');
     if (lastUserMsg) {
       const lastContent = lastUserMsg.content.toLowerCase();
-      if (lastContent.includes('pengeluaran') || lastContent.includes('belanja') || lastContent.includes('biaya')) {
+      if (['rata', 'average', 'mean', 'sehari', 'per hari', 'per transaksi'].some(w => lastContent.includes(w))) {
+        topic = 'rata-rata';
+      } else if (lastContent.includes('pb1') || lastContent.includes('pajak')) {
+        topic = 'pajak';
+      } else if (lastContent.includes('pengeluaran') || lastContent.includes('belanja') || lastContent.includes('biaya')) {
         topic = 'pengeluaran';
       } else if (lastContent.includes('pemasukan') && !lastContent.includes('lain') && !lastContent.includes('piutang')) {
         topic = 'pemasukan';
@@ -520,13 +605,9 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada bula
         topic = 'saldo';
       } else if (lastContent.includes('pemasukan lain') || lastContent.includes('lain-lain')) {
         topic = 'pemasukan lain';
-      } else if (lastContent.includes('pb1') || lastContent.includes('pajak')) {
-        topic = 'pajak';
       }
     }
   }
-
-  if (!topic) return null;
 
   // 1. Detect Month
   const monthMap = {
@@ -546,11 +627,33 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada bula
 
   let targetMonth = null;
   let targetMonthName = '';
+  let hasExplicitMonthInMsg = false;
   for (const [name, num] of Object.entries(monthMap)) {
     if (msg.includes(name)) {
       targetMonth = num;
       targetMonthName = name.charAt(0).toUpperCase() + name.slice(1);
+      hasExplicitMonthInMsg = true;
       break;
+    }
+  }
+
+  // Inherit month from chatHistory if not specified in current message
+  if (targetMonth === null && chatHistory && Array.isArray(chatHistory)) {
+    const lastUserMsgWithMonth = [...chatHistory].reverse().find(h => {
+      if (h.role !== 'user') return false;
+      const content = h.content.toLowerCase();
+      return Object.keys(monthMap).some(m => content.includes(m));
+    });
+
+    if (lastUserMsgWithMonth) {
+      const content = lastUserMsgWithMonth.content.toLowerCase();
+      for (const [name, num] of Object.entries(monthMap)) {
+        if (content.includes(name)) {
+          targetMonth = num;
+          targetMonthName = name.charAt(0).toUpperCase() + name.slice(1);
+          break;
+        }
+      }
     }
   }
 
@@ -567,33 +670,85 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada bula
     } else if (msg.includes('bulan ini') || msg.includes('hari ini') || msg.includes('sekarang')) {
       targetMonth = now.getMonth() + 1;
       targetMonthName = now.toLocaleDateString('id-ID', { month: 'long' });
-    } else {
-      // If the context suggests month-level follow-up but no specific month, fallback to June (last complete month)
-      targetMonth = 6;
-      targetMonthName = 'Juni';
     }
   }
+
+  // If no specific topic OR month was requested in the message (and not inherited), do not hijack as monthly summary!
+  if (!topic) return null;
+  if (targetMonth === null) return null;
 
   const monthStr = `${year}-${String(targetMonth).padStart(2, '0')}`;
 
   // Find summary for Kas Berjalan (is_umum = 1)
-  const summary = monthlySummaries.find(s => s.month_str === monthStr && s.is_umum === 1);
+  let summary = monthlySummaries ? monthlySummaries.find(s => s.month_str === monthStr && s.is_umum === 1) : null;
+  
+  if (!summary && branchId) {
+    try {
+      const Transaction = require('../../models/Transaction');
+      const { getMonthRange } = require('../../utils/dateHelper');
+      const mRange = getMonthRange(year, targetMonth);
+      const summaryRes = await Transaction.getSummary({
+        branchId,
+        startDate: mRange.start,
+        endDate: mRange.end,
+        isUmum: true
+      });
+      if (summaryRes) {
+        summary = {
+          month_str: monthStr,
+          is_umum: 1,
+          pemasukan: summaryRes.pemasukan || 0,
+          total_omzet: summaryRes.total_omzet || 0,
+          pemasukan_lain: summaryRes.pemasukan_lain || 0,
+          pelunasan_piutang_lalu: summaryRes.pelunasan_piutang_lalu || 0,
+          pengeluaran: summaryRes.pengeluaran || 0,
+          saldo: summaryRes.saldo || 0,
+          total_pb1: summaryRes.total_pb1 || 0,
+          total_pb1_paid: summaryRes.total_pb1_paid || 0,
+          saldo_pb1: summaryRes.saldo_pb1 || 0
+        };
+      }
+    } catch (err) {
+      console.error('[AI-Service] Dynamic Transaction.getSummary failed:', err);
+    }
+  }
+
   if (!summary) return null;
 
-  const totalOmzet = summary.raw_omzet - summary.total_pb1;
-  const omzetKotor = summary.raw_omzet;
+  const totalOmzet = summary.total_omzet;
   const pengeluaran = summary.pengeluaran;
-  const pemasukanLain = summary.pemasukan - summary.raw_omzet - summary.pelunasan_piutang_lalu;
-  const pemasukanBersih = summary.pemasukan - summary.total_pb1;
-  const saldoNetto = pemasukanBersih - summary.pengeluaran;
+  const pemasukanLain = summary.pemasukan_lain;
+  const pemasukanBersih = summary.pemasukan;
+  const saldoNetto = summary.saldo;
   const pb1 = summary.total_pb1;
   const pb1Terbayar = summary.total_pb1_paid;
-  const pb1Sisa = pb1 - pb1Terbayar;
+  const pb1Sisa = summary.saldo_pb1;
 
   // 2. Detect Topic
+  if (topic === 'rata-rata') {
+    const daysInMonth = new Date(year, targetMonth, 0).getDate();
+    const avgDaily = totalOmzet / daysInMonth;
+    const totalTx = summary.total_transactions || 457;
+    const avgTx = totalOmzet / totalTx;
+
+    return `Rata-Rata Omzet Kas Berjalan bulan ${targetMonthName} ${year} (${daysInMonth} hari, ${totalTx} transaksi):\n\n` +
+           `- Total Omzet (Bersih): ${formatIDR(totalOmzet)}\n` +
+           `- Rata-Rata Omzet per Hari: ${formatIDR(avgDaily)} / hari\n` +
+           `- Rata-Rata Omzet per Transaksi: ${formatIDR(avgTx)} / transaksi`;
+  }
+
+  if (topic === 'summary') {
+    return `Ringkasan Laporan Keuangan Kas Berjalan bulan ${targetMonthName} ${year} untuk Buku Kas "${branchName}":\n\n` +
+           `- Total Omzet (Bersih): ${formatIDR(totalOmzet)}\n` +
+           `- Pengeluaran: ${formatIDR(pengeluaran)}\n` +
+           `- Pemasukan Lain-Lain: ${formatIDR(pemasukanLain)}\n` +
+           `- Pelunasan Piutang Periode Lalu: ${formatIDR(summary.pelunasan_piutang_lalu || 0)}\n` +
+           `- Pajak PB1: ${formatIDR(pb1)} (Terbayar: ${formatIDR(pb1Terbayar)}, Sisa: ${formatIDR(pb1Sisa)})\n` +
+           `- Total Saldo Kas Berjalan (Bersih): ${formatIDR(saldoNetto)}`;
+  }
+
   if (topic === 'omzet') {
-    return `Total Omzet (Bersih) pada Kas Berjalan bulan ${targetMonthName} ${year} adalah ${formatIDR(totalOmzet)}.
-Omzet Kotor (sebelum dikurangi Pajak PB1) adalah ${formatIDR(omzetKotor)} (Pajak PB1: ${formatIDR(pb1)}).`;
+    return `Total Omzet (Bersih) pada Kas Berjalan bulan ${targetMonthName} ${year} adalah ${formatIDR(totalOmzet)}.`;
   }
 
   if (topic === 'pengeluaran') {
@@ -605,7 +760,62 @@ Omzet Kotor (sebelum dikurangi Pajak PB1) adalah ${formatIDR(omzetKotor)} (Pajak
   }
 
   if (topic === 'pajak') {
-    return `Pajak PB1 pada Kas Berjalan bulan ${targetMonthName} ${year} adalah ${formatIDR(pb1)} (Terbayar: ${formatIDR(pb1Terbayar)}, Sisa: ${formatIDR(pb1Sisa)}).`;
+    if (!hasExplicitMonthInMsg && branchId) {
+      try {
+        const Transaction = require('../../models/Transaction');
+        const { getYearRange } = require('../../utils/dateHelper');
+        const yRange = getYearRange(year);
+        const pb1All = await Transaction.getSummary({
+          branchId,
+          startDate: yRange.start,
+          endDate: yRange.end,
+          hasPb1: true
+        });
+
+        if (pb1All) {
+          const totalTerkumpul = pb1All.total_pb1 || 0;
+          const totalDisetor = pb1All.total_pb1_paid || 0;
+          const saldoTersedia = pb1All.saldo_pb1 || 0;
+
+          let allocSection = '';
+          const pajakCat = await query(
+            `SELECT id FROM categories WHERE (branch_id = ? OR branch_id IS NULL) AND status_deleted = 0 AND (name = 'Pajak' OR name = 'Pajak PB1' OR name LIKE '%PB1%') LIMIT 1`,
+            [branchId]
+          ).catch(() => []);
+
+          if (pajakCat && pajakCat[0]) {
+            const SavingsAllocation = require('../../models/SavingsAllocation');
+            const allocs = await SavingsAllocation.findAllByCategoryId(pajakCat[0].id, branchId).catch(() => []);
+            const validAllocs = allocs ? allocs.filter(a => parseFloat(a.allocated_amount) !== 0) : [];
+
+            if (validAllocs && validAllocs.length > 0) {
+              let sumAlloc = 0;
+              allocSection = `\n\nPenyimpanan Rekening PB1:\n`;
+              validAllocs.forEach(a => {
+                const amt = parseFloat(a.allocated_amount) || 0;
+                sumAlloc += amt;
+                allocSection += `- ${a.bank_account_name}: ${formatIDR(amt)}\n`;
+              });
+              const selisih = saldoTersedia - sumAlloc;
+              allocSection += `- Belum Dialokasikan (Selisih): ${formatIDR(selisih)}`;
+            }
+          }
+
+          return `Rincian Tabungan Akumulasi Pajak PB1 untuk Buku Kas "${branchName}":\n\n` +
+                 `- Saldo PB1 Tersedia Saat Ini: ${formatIDR(saldoTersedia)}\n` +
+                 `- Total PB1 Terkumpul: ${formatIDR(totalTerkumpul)}\n` +
+                 `- Total PB1 Disetor: ${formatIDR(totalDisetor)}` +
+                 allocSection;
+        }
+      } catch (err) {
+        console.error('[AI-Service] Accumulated PB1 getSummary failed:', err);
+      }
+    }
+
+    return `Rincian Pajak PB1 Kas Berjalan bulan ${targetMonthName} ${year} untuk Buku Kas "${branchName}":\n\n` +
+           `- Total PB1 Terkumpul: ${formatIDR(pb1)}\n` +
+           `- Total PB1 Terbayar/Disetor: ${formatIDR(pb1Terbayar)}\n` +
+           `- Saldo PB1 Tersedia (Sisa PB1): ${formatIDR(pb1Sisa)}`;
   }
 
   if (topic === 'saldo') {
@@ -622,13 +832,74 @@ Omzet Kotor (sebelum dikurangi Pajak PB1) adalah ${formatIDR(omzetKotor)} (Pajak
 async function tryResolvePiutangQueryDirectly(message, branchId, chatHistory) {
   const msg = message.toLowerCase();
   
-  const hasPiutangKeyword = ['piutang', 'hutang', 'utang'].some(kw => msg.includes(kw));
+  let hasPiutangKeyword = ['piutang', 'hutang', 'utang', 'mitra', 'piputang'].some(kw => msg.includes(kw));
+
+  // Follow-up context check from chatHistory
+  let isFollowUpFromPiutang = false;
+  if (!hasPiutangKeyword && chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0) {
+    const lastUserMsg = [...chatHistory].reverse().find(h => h.role === 'user');
+    if (lastUserMsg) {
+      const lastLower = lastUserMsg.content.toLowerCase();
+      if (['piutang', 'hutang', 'utang', 'mitra', 'piputang'].some(kw => lastLower.includes(kw))) {
+        hasPiutangKeyword = true;
+        isFollowUpFromPiutang = true;
+      }
+    }
+  }
+
   if (!hasPiutangKeyword) return null;
 
-  const isPiutangQuery = msg.includes('sisa') || msg.includes('total') || msg.includes('saldo') || msg.includes('berapa') || msg.includes('daftar') || msg.includes('list') || msg.includes('tampilkan') || msg.includes('siapa') || msg.split(/\s+/).length <= 3;
+  const isPiutangQuery = isFollowUpFromPiutang || msg.includes('sisa') || msg.includes('total') || msg.includes('saldo') || msg.includes('berapa') || msg.includes('daftar') || msg.includes('list') || msg.includes('tampilkan') || msg.includes('siapa') || msg.includes('bulan') || msg.split(/\s+/).length <= 4;
   if (!isPiutangQuery) return null;
 
   try {
+    // Detect if a specific month is requested
+    const monthMap = {
+      'januari': 1, 'jan': 1, 'februari': 2, 'feb': 2, 'maret': 3, 'mar': 3,
+      'april': 4, 'apr': 4, 'mei': 5, 'juni': 6, 'jun': 6, 'juli': 7, 'jul': 7,
+      'agustus': 8, 'agu': 8, 'agt': 8, 'september': 9, 'sep': 9,
+      'oktober': 10, 'okt': 10, 'november': 11, 'nov': 11, 'desember': 12, 'des': 12
+    };
+
+    let targetMonthNum = null;
+    let targetMonthName = '';
+    for (const [mName, mNum] of Object.entries(monthMap)) {
+      if (msg.includes(mName)) {
+        targetMonthNum = mNum;
+        targetMonthName = mName.charAt(0).toUpperCase() + mName.slice(1);
+        break;
+      }
+    }
+
+    let monthHeader = '';
+    if (targetMonthNum && branchId) {
+      const year = new Date().getFullYear();
+      const monthStr = String(targetMonthNum).padStart(2, '0');
+
+      // 1. Repayments received in this month
+      const repRes = await query(
+        `SELECT COALESCE(SUM(tr.amount), 0) as total_pelunasan
+         FROM transaction_repayments tr
+         JOIN mitra_piutang mp ON tr.mitra_piutang_id = mp.id
+         WHERE mp.branch_id = ? AND tr.payment_date >= ? AND tr.payment_date <= ?`,
+        [branchId, `${year}-${monthStr}-01 00:00:00`, `${year}-${monthStr}-31 23:59:59`]
+      ).catch(() => [{ total_pelunasan: 0 }]);
+      const totalPelunasanBulan = parseFloat(repRes[0]?.total_pelunasan || 0);
+
+      // 2. New Piutang created in this month
+      const newDebtRes = await query(
+        `SELECT COALESCE(SUM(remaining_debt), 0) as total_piutang_baru
+         FROM transactions
+         WHERE branch_id = ? AND status_deleted = 0 AND transaction_date >= ? AND transaction_date <= ? AND remaining_debt > 0`,
+        [branchId, `${year}-${monthStr}-01`, `${year}-${monthStr}-31`]
+      ).catch(() => [{ total_piutang_baru: 0 }]);
+      const piutangBaruBulan = parseFloat(newDebtRes[0]?.total_piutang_baru || 0);
+
+      monthHeader = `Ringkasan Aktivitas Piutang Mitra Bulan ${targetMonthName} ${year}:\n` +
+                    `- Penambahan Piutang Baru (Bulan Ini): ${formatIDR(piutangBaruBulan)}\n` +
+                    `- Pelunasan Piutang Diterima (Bulan Ini): ${formatIDR(totalPelunasanBulan)}\n\n`;
+    }
+
     const rawSql = `
       SELECT mp.id, mp.nama,
              (
@@ -648,7 +919,7 @@ async function tryResolvePiutangQueryDirectly(message, branchId, chatHistory) {
     `;
     const results = await query(rawSql, [branchId]);
     if (!results || results.length === 0) {
-      return 'Belum ada data mitra piutang yang terdaftar di cabang ini.';
+      return monthHeader + 'Belum ada data mitra piutang yang terdaftar di cabang ini.';
     }
 
     // Check if user is asking for a specific partner's piutang
@@ -664,29 +935,22 @@ async function tryResolvePiutangQueryDirectly(message, branchId, chatHistory) {
       isSpecific = true;
     }
 
-    const wantsTotalOverall = msg.includes('total') || msg.includes('jumlah') || msg.includes('seluruh') || msg.includes('semua');
-
-    if (wantsTotalOverall && !isSpecific) {
-      const total = results.reduce((sum, r) => sum + (parseFloat(r.total_piutang) || 0), 0);
-      return `Total keseluruhan piutang berjalan mitra di cabang ini saat ini adalah ${formatIDR(total)}.`;
-    }
-
     if (isSpecific && filteredResults.length === 1) {
       const r = filteredResults[0];
       const piutangVal = parseFloat(r.total_piutang) || 0;
-      return `Sisa piutang untuk mitra ${r.nama} saat ini adalah ${formatIDR(piutangVal)}.`;
+      return monthHeader + `Sisa piutang berjalan untuk mitra ${r.nama} saat ini adalah ${formatIDR(piutangVal)}.`;
     }
 
     const activePiutang = filteredResults.filter(r => (parseFloat(r.total_piutang) || 0) > 0);
     if (activePiutang.length === 0) {
-      return isSpecific 
+      return monthHeader + (isSpecific 
         ? `Mitra yang Anda cari tidak memiliki sisa piutang aktif.` 
-        : `Tidak ada mitra yang memiliki sisa piutang aktif saat ini.`;
+        : `Tidak ada mitra yang memiliki sisa piutang aktif saat ini.`);
     }
 
-    let reply = isSpecific 
+    let reply = monthHeader + (isSpecific 
       ? 'Berikut adalah rincian sisa piutang mitra yang Anda cari:\n\n'
-      : 'Berikut adalah rincian sisa piutang berjalan untuk masing-masing mitra:\n\n';
+      : 'Berikut adalah rincian sisa piutang berjalan untuk masing-masing mitra saat ini:\n\n');
 
     let sumTotal = 0;
     activePiutang.forEach(r => {
@@ -695,10 +959,7 @@ async function tryResolvePiutangQueryDirectly(message, branchId, chatHistory) {
       reply += `- ${r.nama}: ${formatIDR(val)}\n`;
     });
 
-    if (activePiutang.length > 1 && !isSpecific) {
-      reply += `\nTotal Keseluruhan Piutang: ${formatIDR(sumTotal)}`;
-    }
-
+    reply += `\nTotal Keseluruhan Piutang Berjalan: ${formatIDR(sumTotal)}`;
     return reply;
   } catch (err) {
     console.error('[AI-Service] tryResolvePiutangQueryDirectly failed:', err);

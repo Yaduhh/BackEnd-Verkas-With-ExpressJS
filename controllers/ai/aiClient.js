@@ -1,24 +1,14 @@
 const os = require('os');
 
-// Log resource utilization (RAM and CPU Cores)
+// Log resource utilization (RAM and CPU Cores) - Disabled
 function logResourceUsage(label = 'Resource Usage') {
-  const memory = process.memoryUsage();
-  const rss = (memory.rss / 1024 / 1024).toFixed(1);
-  const heapUsed = (memory.heapUsed / 1024 / 1024).toFixed(1);
-  const totalSystemRam = (os.totalmem() / 1024 / 1024 / 1024).toFixed(1);
-  const freeSystemRam = (os.freemem() / 1024 / 1024 / 1024).toFixed(1);
-  const cpuCount = os.cpus().length;
-
-  console.log(`[AI-Service] [${label}]`);
-  console.log(`  * CPU Cores Available  : ${cpuCount}`);
-  console.log(`  * Total System RAM     : ${totalSystemRam} GB (Free: ${freeSystemRam} GB)`);
-  console.log(`  * Process RSS Memory   : ${rss} MB`);
-  console.log(`  * JS Heap Used Memory  : ${heapUsed} MB`);
+  // No-op to keep console clean
 }
 
-// AI API helper client (supports OpenRouter and Local AI like Ollama)
+
+// AI API helper client (supports Groq, OpenRouter, and Local AI like Ollama)
 async function callOpenRouter(messages) {
-  const provider = process.env.AI_PROVIDER || 'openrouter';
+  const provider = (process.env.AI_PROVIDER || 'groq').toLowerCase();
 
   let url;
   let headers = {
@@ -29,7 +19,17 @@ async function callOpenRouter(messages) {
     temperature: 0.1 // Low temperature for factual consistency
   };
 
-  if (provider === 'local') {
+  if (provider === 'groq') {
+    const apiKey = process.env.GROQ_API_KEY;
+    const modelName = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+
+    if (!apiKey) {
+      throw new Error('GROQ_API_KEY is not defined in .env file.');
+    }
+    url = 'https://api.groq.com/openai/v1/chat/completions';
+    headers['Authorization'] = `Bearer ${apiKey}`;
+    body.model = modelName;
+  } else if (provider === 'local') {
     const localUrl = process.env.LOCAL_AI_URL || 'http://localhost:11434/v1/chat/completions';
     const localModel = process.env.LOCAL_AI_MODEL || 'gemma4:12b';
     url = localUrl;
@@ -39,7 +39,7 @@ async function callOpenRouter(messages) {
     const modelName = process.env.OPENROUTER_MODEL || 'google/gemma-2-9b-it';
 
     if (!apiKey) {
-      throw new Error('OPENROUTER_API_KEY is not defined in env.');
+      throw new Error('OPENROUTER_API_KEY is not defined in .env file.');
     }
     url = 'https://openrouter.ai/api/v1/chat/completions';
     headers['Authorization'] = `Bearer ${apiKey}`;
@@ -69,5 +69,7 @@ async function callOpenRouter(messages) {
 
 module.exports = {
   logResourceUsage,
-  callOpenRouter
+  callOpenRouter,
+  callAI: callOpenRouter
 };
+

@@ -31,7 +31,6 @@ const chatWithAssistant = async (req, res, next) => {
     // Set branchId on req.body so chatWithAI can extract it
     req.body.branchId = branchId;
 
-    console.log(`[Backend-Main] Calling local integrated AI Service directly...`);
     return await chatWithAI(req, res);
 
   } catch (error) {

@@ -24,7 +24,6 @@ const lastActiveBranch = new Map();
 const chatWithAI = async (req, res) => {
   try {
     const { message, chatHistory, branchId, branchName } = req.body;
-    logResourceUsage(`Request Start: "${message}"`);
 
     if (!message) {
       return res.status(400).json({
@@ -169,15 +168,10 @@ Contoh Kueri SQL yang benar:
 - Mencari saldo masing-masing/setiap kas simpanan:
   SELECT cat.name, SUM(CASE WHEN t.type = 'income' OR (t.is_umum = 1 AND t.type = 'expense') THEN amount_val ELSE -amount_val END) as saldo FROM (SELECT id, type, is_umum, amount as amount_val, category_id, transaction_date FROM transactions WHERE status_deleted = 0 UNION ALL SELECT t.id, t.type, t.is_umum, tsd.amount as amount_val, tsd.category_id, t.transaction_date FROM transaction_savings_details tsd JOIN transactions t ON tsd.transaction_id = t.id WHERE t.status_deleted = 0) as t JOIN categories cat ON t.category_id = cat.id WHERE cat.parent_id IS NOT NULL AND (cat.name LIKE '%Simpanan%' OR cat.name = 'Packaging') GROUP BY cat.id, cat.name`;
 
-    console.log(`[AI-Service] Generating SQL query for user prompt: "${message}"`);
-
     let aiSqlResponse = 'SELECT 1';
     const isGeneral = isGeneralMonthlyQuery(message, chatHistory);
-    if (isGeneral) {
-      console.log(`[AI-Service] Bypassing SQL generator (general monthly report query matched): "${message}"`);
-    } else {
+    if (!isGeneral) {
       try {
-        process.stdout.write('[AI-Service] Generating SQL: ');
 
         // Build payload for OpenRouter
         const openRouterMessages = [
@@ -197,8 +191,6 @@ Contoh Kueri SQL yang benar:
         });
 
         const response = await callOpenRouter(openRouterMessages);
-        process.stdout.write(response);
-        console.log(); // Add newline after response prints
 
         // Robust extraction of SQL query to handle chatty models (like Gemma)
         const markdownMatch = response.match(/```sql([\s\S]*?)```/i);
@@ -212,7 +204,6 @@ Contoh Kueri SQL yang benar:
             aiSqlResponse = response.replace(/```sql/gi, '').replace(/```/g, '').trim();
           }
         }
-        console.log(`[AI-Service] Raw SQL generated: ${aiSqlResponse}`);
       } catch (err) {
         console.error('[AI-Service] Failed to generate SQL via OpenRouter:', err);
       }
@@ -225,7 +216,6 @@ Contoh Kueri SQL yang benar:
       let sandboxedSql = '';
       try {
         sandboxedSql = sanitizeAndSandboxSQL(generatedSql, branchId);
-        console.log(`[AI-Service] Executing Sandboxed SQL: ${sandboxedSql}`);
         queryResult = await query(sandboxedSql);
       } catch (err) {
         console.error('[AI-Service] SQL Execution Error:', err);
@@ -234,20 +224,12 @@ Contoh Kueri SQL yang benar:
 
       // Direct intercept for out-of-domain query
       if (queryResult && Array.isArray(queryResult) && queryResult[0] && queryResult[0].status === 'OUT_OF_DOMAIN') {
-        console.log(`[AI-Service] SQL Generator detected OUT_OF_DOMAIN query: "${message}"`);
         return res.status(200).json({
           success: true,
           reply: `Maaf, sebagai Asisten Keuangan Verkas, saya hanya dapat membantu Anda menganalisis buku kas, transaksi keuangan, dan operasional aplikasi Verkas.`
         });
       }
-      try {
-        const fs = require('fs');
-        fs.appendFileSync(path.join(__dirname, 'sql_debug.log'),
-          `\n[${new Date().toISOString()}] USER PROMPT: "${message}"\nGENERATED SQL: ${generatedSql}\nSANDBOXED SQL: ${sandboxedSql}\nQUERY RESULT: ${JSON.stringify(queryResult)}\n`
-        );
-      } catch (logErr) {
-        console.error('Failed to write debug log:', logErr);
-      }
+      // Debug log writing removed
     }
 
     // Fetch user access branches, counts, and subscription info directly from the database based on branchId
@@ -309,8 +291,6 @@ Contoh Kueri SQL yang benar:
           activeSubscription = subRes;
         }
 
-        console.log(`[AI-Service] Branches queried. Unique count: ${accessibleBranches.length}, Double-counted total (matches UI): ${totalBranchesCount}`);
-        console.log(`[AI-Service] Subscription found: ${activeSubscription ? activeSubscription.plan_name : 'None'}, Active packages: ${subscriptionPlans.length}`);
       }
     } catch (dbErr) {
       console.error('[AI-Service] Failed to query branches/subscription context:', dbErr);
@@ -350,7 +330,6 @@ Contoh Kueri SQL yang benar:
        !['admin', 'pic', 'tim', 'siapa', 'orang', 'staff', 'staf', 'owner', 'user', 'pembuat', 'buat'].some(w => msg.includes(w)));
       
     if (isAmbiguousAnalysis) {
-      console.log(`[AI-Service] Intercepted vague query for clarification: "${message}"`);
       return res.status(200).json({
         success: true,
         reply: `Saya bisa membantu Anda menganalisis kas atau laporan keuangan toko. Untuk memastikan analisisnya tepat dan sesuai kebutuhan Anda, periode mana yang ingin Anda bedah?\n\n- Juni 2026 (Bulan Lalu - Data Lengkap)\n- Juli 2026 (Bulan Ini - Sedang Berjalan)\n- Perbandingan tren antara Juni vs Juli 2026`
@@ -360,7 +339,6 @@ Contoh Kueri SQL yang benar:
     // Direct resolver for Verkas packages / subscriptions
     const subResolution = tryResolveSubscriptionQueryDirectly(message, subscriptionPlans, activeSubscription);
     if (subResolution) {
-      console.log(`[AI-Service] Resolved subscription query directly: "${message}"`);
       const finalReply = subResolution;
       return res.status(200).json({
         success: true,
@@ -371,7 +349,6 @@ Contoh Kueri SQL yang benar:
     // Direct resolver for savings account balances
     const savingsResolution = await tryResolveSavingsBalanceQueryDirectly(message, branchId, chatHistory);
     if (savingsResolution) {
-      console.log(`[AI-Service] Resolved savings balance query directly: "${message}"`);
       return res.status(200).json({
         success: true,
         reply: savingsResolution
@@ -381,7 +358,6 @@ Contoh Kueri SQL yang benar:
     // Direct resolver for extreme transactions (largest/smallest)
     const extremeTxResolution = await tryResolveExtremeTransactionQueryDirectly(message, branchId);
     if (extremeTxResolution) {
-      console.log(`[AI-Service] Resolved extreme transaction query directly: "${message}"`);
       return res.status(200).json({
         success: true,
         reply: extremeTxResolution
@@ -391,7 +367,6 @@ Contoh Kueri SQL yang benar:
     // Direct resolver for partner piutang balances
     const piutangResolution = await tryResolvePiutangQueryDirectly(message, branchId, chatHistory);
     if (piutangResolution) {
-      console.log(`[AI-Service] Resolved piutang query directly: "${message}"`);
       return res.status(200).json({
         success: true,
         reply: piutangResolution
@@ -496,11 +471,14 @@ Contoh Kueri SQL yang benar:
         month_str: `${year}-${String(month).padStart(2, '0')}`,
         is_umum: 1,
         pemasukan: summaryBerjalan?.pemasukan || 0,
+        total_omzet: summaryBerjalan?.total_omzet || 0,
+        pemasukan_lain: summaryBerjalan?.pemasukan_lain || 0,
         pelunasan_piutang_lalu: summaryBerjalan?.pelunasan_piutang_lalu || 0,
         pengeluaran: summaryBerjalan?.pengeluaran || 0,
+        saldo: summaryBerjalan?.saldo || 0,
         total_pb1: summaryBerjalan?.total_pb1 || 0,
         total_pb1_paid: summaryBerjalan?.total_pb1_paid || 0,
-        raw_omzet: omzetBerjalanRes?.raw_omzet || 0,
+        saldo_pb1: summaryBerjalan?.saldo_pb1 || 0,
         total_transactions: countBerjalan?.count || 0
       });
 
@@ -508,11 +486,14 @@ Contoh Kueri SQL yang benar:
         month_str: `${year}-${String(month).padStart(2, '0')}`,
         is_umum: 0,
         pemasukan: summarySimpanan?.pemasukan || 0,
+        total_omzet: summarySimpanan?.total_omzet || 0,
+        pemasukan_lain: summarySimpanan?.pemasukan_lain || 0,
         pelunasan_piutang_lalu: summarySimpanan?.pelunasan_piutang_lalu || 0,
         pengeluaran: summarySimpanan?.pengeluaran || 0,
+        saldo: summarySimpanan?.saldo || 0,
         total_pb1: summarySimpanan?.total_pb1 || 0,
         total_pb1_paid: summarySimpanan?.total_pb1_paid || 0,
-        raw_omzet: omzetSimpananRes?.raw_omzet || 0,
+        saldo_pb1: summarySimpanan?.saldo_pb1 || 0,
         total_transactions: countSimpanan?.count || 0
       });
     }
@@ -582,7 +563,6 @@ Contoh Kueri SQL yang benar:
     // Direct resolver for PIC / Team Members / Admins of the branch
     const picResolution = tryResolvePICQueryDirectly(message, branchPics, teamMembers, branchName);
     if (picResolution) {
-      console.log(`[AI-Service] Resolved PIC/team query directly: "${message}"`);
       return res.status(200).json({
         success: true,
         reply: picResolution
@@ -590,9 +570,8 @@ Contoh Kueri SQL yang benar:
     }
 
     // Try to resolve general monthly queries directly in JavaScript for 100% precision and zero latency
-    const directResolution = tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchName, chatHistory);
+    const directResolution = await tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchName, chatHistory, branchId);
     if (directResolution) {
-      console.log(`[AI-Service] Resolved query directly via JS helper: "${message}"`);
       const finalReply = directResolution;
       return res.status(200).json({
         success: true,
@@ -605,7 +584,6 @@ Contoh Kueri SQL yang benar:
 
     // Limit chat history to only the last 4 messages to prevent context poisoning/leaks from old conversations
     if (sanitizedChatHistory && Array.isArray(sanitizedChatHistory) && sanitizedChatHistory.length > 4) {
-      console.log(`[AI-Service] Limiting chat history from ${sanitizedChatHistory.length} to last 4 messages to prevent context drift.`);
       sanitizedChatHistory = sanitizedChatHistory.slice(-4);
     }
 
@@ -613,7 +591,6 @@ Contoh Kueri SQL yang benar:
     const userId = req.userId || (req.user && req.user.id) || 'default_user';
     const prevBranchId = lastActiveBranch.get(userId);
     if (prevBranchId && String(prevBranchId) !== String(branchId)) {
-      console.log(`[AI-Service] Detected branch switch via session Map (from ${prevBranchId} to ${branchId}). Clearing history.`);
       sanitizedChatHistory = [];
     }
     lastActiveBranch.set(userId, branchId);
@@ -628,7 +605,6 @@ Contoh Kueri SQL yang benar:
       });
 
       if (hasAssistantMsgWithoutBranch) {
-        console.log(`[AI-Service] Detected assistant messages in history missing branch prefix. Purging history.`);
         sanitizedChatHistory = [];
       }
     }
@@ -645,7 +621,6 @@ Contoh Kueri SQL yang benar:
       });
 
       if (hasOtherBranch) {
-        console.log(`[AI-Service] Detected branch switch in chat history content. Clearing history.`);
         sanitizedChatHistory = [];
       }
     }
@@ -687,27 +662,23 @@ DEFINISI KONTEKS KEUANGAN APLIKASI (DISINKRONKAN DENGAN DASHBOARD UTAMA):
    - "Pajak PB1": Pajak pembangunan 10% yang terkumpul dari metode pembayaran kena pajak (dihitung dari total_pb1, dengan total_pb1_paid adalah yang sudah disetor dan saldo_pb1 adalah sisa PB1 yang belum disetor).
    - "Total Pengeluaran": Semua biaya belanja operasional, gaji, bahan baku, dll.
    - "Total Saldo Kas Berjalan (Bersih)": Sisa kas setelah semua omzet dan pengeluaran dikurangi PB1 (Pemasukan Bersih - Pengeluaran).
-5. "AKSES HISTORIS & PERIODE": Hari ini adalah tanggal Rabu, 1 Juli 2026 (Juli 2026). Kamu memiliki akses penuh ke data transaksi historis dari bulan-bulan sebelumnya (seperti Juni 2026, Mei 2026, April 2026, dll.) baik dari data baseline bulanan yang disediakan di bawah ini maupun dengan menjalankan kueri SQL dinamis ke database. JANGAN PERNAH beralasan atau menolak menjawab pertanyaan tentang bulan-bulan lalu (seperti Juni 2026 or sebelumnya) dengan mengatakan kamu hanya memiliki akses ke bulan berjalan (Juli 2026) karena itu tidak benar.
+5. "AKSES HISTORIS & PERIODE": Hari ini adalah tanggal ${formattedToday}. Kamu memiliki akses penuh ke data transaksi historis baik dari data baseline bulanan yang disediakan di bawah ini maupun dengan menjalankan kueri SQL dinamis ke database. JANGAN PERNAH beralasan atau menolak menjawab pertanyaan tentang bulan-bulan lalu.
 
 Berikut adalah baseline ringkasan keuangan bulanan Buku Kas "${branchName || 'Kas Berjalan'}":
 `;
 
     monthlySummaries.forEach(m => {
       const typeLabel = (m.is_umum === 1) ? 'KAS BERJALAN' : 'KAS SIMPANAN';
-      const totalOmzet = m.raw_omzet - m.total_pb1;
-      const pemasukanLain = m.pemasukan - m.raw_omzet - m.pelunasan_piutang_lalu;
-      const pemasukanBersih = m.pemasukan - m.total_pb1;
-      const saldoNetto = pemasukanBersih - m.pengeluaran;
 
       systemPrompt += `Periode ${formatMonthIndo(m.month_str)} [Folder: ${typeLabel}]:\n`;
-      systemPrompt += `  - Total Omzet: Rp ${formatIDRClean(totalOmzet)}\n`;
-      systemPrompt += `  - Pemasukan Lain-Lain: Rp ${formatIDRClean(pemasukanLain)}\n`;
+      systemPrompt += `  - Total Omzet: Rp ${formatIDRClean(m.total_omzet)}\n`;
+      systemPrompt += `  - Pemasukan Lain-Lain: Rp ${formatIDRClean(m.pemasukan_lain)}\n`;
       systemPrompt += `  - Pelunasan Piutang Periode Lalu: Rp ${formatIDRClean(m.pelunasan_piutang_lalu)}\n`;
       systemPrompt += `  - Pajak PB1: Rp ${formatIDRClean(m.total_pb1)}\n`;
       systemPrompt += `  - Pajak PB1 Terbayar: Rp ${formatIDRClean(m.total_pb1_paid)}\n`;
-      systemPrompt += `  - Sisa Pajak PB1: Rp ${formatIDRClean(m.total_pb1 - m.total_pb1_paid)}\n`;
+      systemPrompt += `  - Sisa Pajak PB1: Rp ${formatIDRClean(m.saldo_pb1)}\n`;
       systemPrompt += `  - Total Pengeluaran: Rp ${formatIDRClean(m.pengeluaran)}\n`;
-      systemPrompt += `  - Total Saldo Kas Harian/Berjalan (Bersih): Rp ${formatIDRClean(saldoNetto)}\n`;
+      systemPrompt += `  - Total Saldo Kas Harian/Berjalan (Bersih): Rp ${formatIDRClean(m.saldo)}\n`;
       systemPrompt += `  - Jumlah Transaksi Terdaftar: ${m.total_transactions} transaksi\n\n`;
     });
 
@@ -756,45 +727,39 @@ Berikut adalah baseline ringkasan keuangan bulanan Buku Kas "${branchName || 'Ka
 5. Jika kueri database dinamis memberikan hasil kosong atau null, sampaikan bahwa transaksi tidak ditemukan dengan sopan.
 6. Kamu HANYA memiliki akses baca (read-only) terhadap data. Kamu tidak memiliki izin atau kemampuan untuk menambah (create/add), mengedit (edit/update), atau menghapus (delete) data apapun (seperti transaksi, kategori, atau buku kas). Jika pengguna memintamu mengubah data, jelaskan dengan ramah bahwa peranmu hanya untuk membaca dan menganalisis laporan keuangan saja.
 7. JAWAB HANYA DOMAIN KEUANGAN & VERKAS (MUTLAK): Kamu dilarang keras menjawab pertanyaan umum di luar data keuangan toko, kas, piutang, transaksi, atau panduan Verkas. Jika ditanya tentang pengetahuan umum, presiden, resep, sains, geografi, atau obrolan di luar bisnis Verkas, kamu wajib menolak secara halus dengan kalimat: "Maaf, saya hanya dapat membantu Anda menganalisis buku kas, transaksi keuangan, dan operasional aplikasi Verkas."
-8. FORMAT TANGGAL: Selalu sajikan tanggal dalam format bahasa Indonesia yang mudah dibaca dan sopan (contoh: "20 Juni 2026" atau "1 Juni 2026"). JANGAN sekali-kali menampilkan tanggal dalam format mentah database seperti YYYY-MM-DD (contoh: "2026-06-20" or "2026-06-01").
+8. FORMAT TANGGAL: Selalu sajikan tanggal dalam format bahasa Indonesia yang mudah dibaca dan sopan (contoh: "20 Juni 2026" atau "1 Juni 2026"). JANGAN sekali-kali menampilkan tanggal dalam format mentah database seperti YYYY-MM-DD.
 9. HINDARI MENAMPILKAN ID DATABASE: JANGAN PERNAH menyertakan database ID (seperti ID Buku Kas/Cabang, ID Kategori, ID Transaksi, dll) di balasan akhirmu agar balasan terlihat bersih dan profesional, kecuali jika pengguna meminta ID tersebut secara spesifik.
-10. FORMAT RUPIAH / NOMINAL UANG: Kamu WAJIB menulis setiap nominal uang dalam format Rupiah yang benar dengan pemisah ribuan titik (.) dan pemisah desimal koma (,) jika nominal tersebut memiliki nilai desimal/sen (contoh: Rp 533.817.384,75 atau Rp 2.155.314.631,25). Jika nominalnya adalah bilangan bulat tanpa nilai desimal, kamu juga WAJIB menyertakan desimal bulat ",00" di belakangnya (contoh: Rp 148.740.600,00 atau Rp 71.000,00) agar semua angka konsisten memiliki koma desimal di belakangnya sesuai tampilan dashboard. JANGAN salah meletakkan posisi titik ribuan (misal: jangan menulis 53.381.738.475 jika aslinya 533.817.384,75).
-11. JANGAN KONTRAKTIF: JANGAN PERNAH menyatakan bahwa kategori atau transaksi tidak ditemukan jika hasil kueri database dinamis di atas telah sukses mengembalikan data nominal (seperti total pengeluaran atau pemasukan bernilai lebih dari 0). Jika ada data nominal yang ditemukan, langsung laporkan saja data tersebut sebagai hasil kategori yang dicari tanpa memberikan pernyataan membingungkan bahwa kategori tersebut "tidak ditemukan".
-12. DEFAULT & KETERANGAN KAS BERJALAN: Jika pengguna menanyakan pemasukan, pengeluaran, omzet, atau saldo secara umum (seperti: "pemasukan lain-lain bulan juni", "pengeluaran bulan juni"), kamu WAJIB menggunakan data Kas Berjalan sebagai default jawabanmu. Kamu juga WAJIB menuliskan secara eksplisit keterangan "pada Kas Berjalan" or "di Buku Kas Berjalan" di dalam balasan akhirmu agar pengguna mengetahui dengan jelas sumber buku kas data tersebut (kecuali jika pengguna secara khusus menyebutkan nama kategori transaksi atau Kas Simpanan tertentu).
-13. PERIODE KOSONG (BULAN INI / HARI INI): Jika pengguna menanyakan data keuangan untuk "bulan ini" (Juli 2026) atau "hari ini" namun data pada periode tersebut masih kosong/Rp 0 (karena baru memasuki awal bulan atau hari baru), kamu WAJIB menyajikan data tersebut secara jujur sebagai Rp 0 (contoh: "laba bersih Juli 2026 masih Rp 0 karena belum ada transaksi yang tercatat"). JANGAN PERNAH memetakan nominal kueri dari bulan lalu (seperti Juni 2026) ke dalam deklarasi "bulan ini/Juli 2026" seolah-olah itu adalah data bulan ini! Jika kamu menampilkan data Juni, sebutkan secara eksplisit bahwa data tersebut adalah periode Juni 2026.
-14. PRIORITASKAN HASIL KUERI BARU & KOREKSI DIRI: Jika hasil kueri database dinamis terbaru mengembalikan data riil yang berbeda atau bertentangan dengan jawabanmu di riwayat obrolan sebelumnya (misalnya di riwayat sebelumnya kueri database error dan kamu terpaksa menebak November, lalu sekarang kueri database sukses dijalankan dan menunjukkan bulan Juni), kamu WAJIB memprioritaskan data terbaru dari hasil kueri database dinamis yang sukses tersebut dan mengoreksi jawaban lamamu secara sopan (contoh: "Mohon maaf atas kekeliruan sebelumnya, berdasarkan data transaksi terbaru di database...").
-15. PERUBAHAN CABANG BUKU KAS: Jika di dalam riwayat obrolan (chat history) terdapat data nominal dari Buku Kas/cabang lain (misal: "BOSGIL CONDET"), kamu WAJIB mengabaikan seluruh angka dari riwayat obrolan tersebut. Fokus HANYA pada data Buku Kas aktif saat ini yaitu "${branchName || 'Kas Berjalan'}" yang terera di baseline summaries terbaru!
+10. FORMAT RUPIAH / NOMINAL UANG: Kamu WAJIB menulis setiap nominal uang dalam format Rupiah yang benar dengan pemisah ribuan titik (.) dan pemisah desimal koma (,) jika nominal tersebut memiliki nilai desimal/sen (contoh: Rp 533.817.384,75 atau Rp 2.155.314.631,25). Jika nominalnya adalah bilangan bulat tanpa nilai desimal, kamu juga WAJIB menyertakan desimal bulat ",00" di belakangnya (contoh: Rp 148.740.600,00 atau Rp 71.000,00) agar semua angka konsisten memiliki koma desimal di belakangnya sesuai tampilan dashboard.
+11. JANGAN KONTRAKTIF: JANGAN PERNAH menyatakan bahwa kategori atau transaksi tidak ditemukan jika hasil kueri database dinamis atau baseline summaries di atas telah sukses mengembalikan data nominal. Jika ada data nominal yang ditemukan, langsung laporkan saja data tersebut.
+12. DEFAULT & KETERANGAN KAS BERJALAN: Jika pengguna menanyakan pemasukan, pengeluaran, omzet, atau saldo secara umum, kamu WAJIB menggunakan data Kas Berjalan sebagai default jawabanmu.
+13. DATA RIIL: Gunakan data baseline summaries dan hasil kueri database secara riil. Jangan pernah mengarang bahwa suatu bulan kosong jika data baseline summaries atau kueri database menunjukkan nominal transaksi.
+14. PRIORITASKAN HASIL KUERI BARU & KOREKSI DIRI: Jika hasil kueri database dinamis terbaru mengembalikan data riil yang berbeda atau bertentangan dengan jawabanmu di riwayat obrolan sebelumnya, kamu WAJIB memprioritaskan data terbaru dari hasil kueri database dinamis.
+15. PERUBAHAN CABANG BUKU KAS: Jika di dalam riwayat obrolan (chat history) terdapat data nominal dari Buku Kas/cabang lain, kamu WAJIB mengabaikan seluruh angka dari riwayat obrolan tersebut. Fokus HANYA pada data Buku Kas aktif saat ini yaitu "${branchName || 'Kas Berjalan'}"!
 16. PERBEDAAN OMZET BERSIH & KOTOR:
     - Omzet Bersih: Nilai "Total Omzet" yang tampil di dashboard/baseline summaries (sudah dikurangi Pajak PB1).
     - Omzet Kotor: Jumlah total sebelum dikurangi Pajak PB1 (dihitung dari: Omzet Bersih + Pajak PB1).
-    Jika pengguna bertanya apakah omzet tersebut sudah bersih atau termasuk pajak, jelaskan secara jujur perbedaan angka bersih dan kotor tersebut secara dinamis berdasarkan data baseline summaries bulan terkait. JANGAN PERNAH menyebut Omzet Kotor sebagai Omzet Bersih! JANGAN PERNAH menghitung sendiri nilai Omzet dengan mengalikan Pajak PB1 dengan 10! Selalu baca langsung nilai "Total Omzet" yang tertulis di baseline summaries secara bulat.
-17. JIKA PENGGUNA MEMINTA SALDO MASING-MASING KAS SIMPANAN: Kamu WAJIB menyajikan daftar nama kas simpanan beserta masing-masing saldonya secara jelas berdasarkan hasil kueri database dinamis (misalnya menggunakan format list - Nama Kas Simpanan: Nominal). JANGAN hanya menyebutkan total saldonya saja, sebutkan rincian masing-masing kas simpanan dan nominalnya.
-18. KOMUNIKASI 2 ARAH & KLARIFIKASI: Jika kueri pengguna masih sangat umum atau "ngambang" (misal: "analisa perputaran kas", "analisa cashflow", dll) tanpa menyebutkan periode atau perbandingan yang jelas, kamu WAJIB menawarkan komunikasi dua arah. Sebutkan pilihan periode yang tersedia (misalnya Juni 2026 atau Juli berjalan) dan tanyakan dengan ramah periode mana yang ingin mereka analisis, atau apakah mereka ingin membandingkan tren antar bulan agar hasil analisis menjadi sangat akurat.`;
+    Jika pengguna bertanya apakah omzet tersebut sudah bersih atau termasuk pajak, jelaskan secara jujur perbedaan angka bersih dan kotor tersebut secara dinamis berdasarkan data baseline summaries bulan terkait.
+17. JIKA PENGGUNA MEMINTA SALDO MASING-MASING KAS SIMPANAN: Kamu WAJIB menyajikan daftar nama kas simpanan beserta masing-masing saldonya secara jelas berdasarkan hasil kueri database dinamis.
+18. KOMUNIKASI 2 ARAH & KLARIFIKASI: Jika kueri pengguna masih sangat umum atau "ngambang" tanpa menyebutkan periode atau perbandingan yang jelas, kamu WAJIB menawarkan komunikasi dua arah.`;
 
-    console.log('[AI-Service] Generating final chat reply...');
     const finalPromptText = `Pesan dari pengguna: "${message}"
 
 PENTING UNTUK JAWABANMU (ATURAN MUTLAK):
 1. Hasil kueri database dinamis saat ini adalah: ${JSON.stringify(formatDatesToLocal(queryResult))}
-2. SESUAIKAN KEDALAMAN JAWABAN: Jika pengguna hanya bertanya nominal singkat, jawablah secara singkat, padat, dan langsung. Namun, jika pengguna meminta "analisis", "analisa", atau penjelasan mendalam (seperti "analisa perputaran kas berjalan gua"), kamu WAJIB memberikan analisis yang cerdas dan profesional berdasarkan data kueri (seperti membandingkan perbandingan pemasukan vs pengeluaran, perputaran kas, atau cashflow) tanpa memotong penjelasan terlalu pendek. JANGAN menulis intro/outro panjang lebar atau mengulang-ulang penjelasan batasan sistem.
-3. JANGAN PERNAH menyebutkan ID database internal berupa angka (seperti ID Cabang: 13, ID Transaksi, dll) kepada pengguna. Cukup sebutkan nama Buku Kas secara ramah (misal: "BOSGIL CONDET") tanpa menyertakan angka ID-nya.
+2. SESUAIKAN KEDALAMAN JAWABAN: Jika pengguna hanya bertanya nominal singkat, jawablah secara singkat, padat, dan langsung. Namun, jika pengguna meminta "analisis", "analisa", atau penjelasan mendalam, kamu WAJIB memberikan analisis yang cerdas dan profesional berdasarkan data kueri tanpa memotong penjelasan terlalu pendek.
+3. JANGAN PERNAH menyebutkan ID database internal berupa angka kepada pengguna. Cukup sebutkan nama Buku Kas secara ramah.
 4. JANGAN PERNAH memanipulasi, mengubah, merekayasa, atau mengarang (halusinasi) angka nominal keuangan! Semua angka nominal yang kamu sebutkan wajib berbasis data riil dari database dinamis atau baseline bulanan secara persis tanpa rekayasa.
-5. JANGAN PERNAH menyebutkan istilah teknis database kepada user seperti "kueri database", "SQL", "null", "array kosong", "SELECT 1", atau "database dinamis". Terjemahkan ini ke bahasa bisnis biasa (misal: jika null/kosong, katakan "belum ada data transaksi yang tercatat", atau "saldonya masih kosong/Rp 0").
-6. BATASAN OPRASIONAL (HANYA BACA / READ-ONLY): Kamu HANYA diizinkan untuk MEMBACA dan MENGANALISIS data keuangan pada Buku Kas aktif yang sedang dibuka (Nama: "${branchName}"). Kamu DILARANG KERAS berpura-pura bisa membuat (create), mengedit (update), atau menghapus (delete) transaksi/kategori di database! Jika pengguna memintamu menulis/mengubah data, tolak secara halus dan jelaskan bahwa kamu adalah asisten analisis yang hanya bisa membaca data, lalu berikan panduan cara melakukannya secara manual di aplikasi jika dibutuhkan.
-7. BATASAN RUANG LINGKUP BUKU KAS: Kamu DILARANG membahas data buku kas (cabang) selain Buku Kas aktif saat ini yaitu "${branchName}" untuk mencegah kebocoran data antar cabang.
-8. Jika hasil kueri database bernilai null atau kosong, namun data yang ditanyakan ada di data baseline summaries di atas (seperti total omzet, saldo, pb1, pengeluaran bulan Juni), GUNAKAN data dari baseline summaries tersebut untuk menjawab secara akurat. Jangan katakan tidak ada data jika data baseline memuat nominalnya!
-9. Jika ditanya tentang bulan berjalan (Juli 2026) yang datanya memang kosong di database, katakan secara jujur bahwa bulan Juli baru berjalan dan belum memiliki transaksi tercatat (saldonya Rp 0).
-10. JAWAB SECARA DIRECT: JANGAN PERNAH menyalin, mengulang, atau menulis kembali teks "Pertanyaan User:", "Pesan dari pengguna:", atau pertanyaan pengguna di awal jawabanmu. Langsung berikan jawaban akhir saja.
-11. Jawab dengan bahasa Indonesia yang santai, bersahabat, ringkas, dan to-the-point tanpa menggunakan tanda bintang markdown (**) secara berlebihan.
-12. PERIODE JUNI 2026 MEMILIKI DATA AKTIF: Hari ini adalah Juli 2026. Data transaksi untuk periode Juni 2026 sudah lengkap dan terisi di baseline summaries di atas. Harap baca data "Periode Juni 2026" dengan teliti untuk menjawab pertanyaan tentang Juni.
-13. JIKA PENGGUNA MEMINTA SALDO MASING-MASING KAS SIMPANAN: Sebutkan rincian nama kas simpanan dan masing-masing nominal saldonya secara jelas berdasarkan hasil kueri database dinamis (misalnya: tabungan, cadangan, dll beserta nominalnya).
-14. KOMUNIKASI 2 ARAH & KLARIFIKASI: Jika kueri pengguna masih umum atau "ngambang" tanpa menyebutkan periode yang jelas, kamu WAJIB menawarkan komunikasi dua arah. Tawarkan pilihan periode (seperti Juni 2026 atau Juli berjalan) atau analisis perbandingan tren antar bulan secara ramah.`;
+5. JANGAN PERNAH menyebutkan istilah teknis database kepada user seperti "kueri database", "SQL", "null", "array kosong", "SELECT 1", atau "database dinamis". Terjemahkan ini ke bahasa bisnis biasa.
+6. BATASAN OPRASIONAL (HANYA BACA / READ-ONLY): Kamu HANYA diizinkan untuk MEMBACA dan MENGANALISIS data keuangan pada Buku Kas aktif yang sedang dibuka (Nama: "${branchName}"). Kamu DILARANG KERAS berpura-pura bisa membuat, mengedit, atau menghapus data!
+7. BATASAN RUANG LINGKUP BUKU KAS: Kamu DILARANG membahas data buku kas selain Buku Kas aktif saat ini yaitu "${branchName}".
+8. Jika hasil kueri database bernilai null atau kosong, namun data yang ditanyakan ada di data baseline summaries di atas, GUNAKAN data dari baseline summaries tersebut untuk menjawab secara akurat.
+9. JAWAB SECARA DIRECT: JANGAN PERNAH menyalin, mengulang, atau menulis kembali teks "Pertanyaan User:", "Pesan dari pengguna:", atau pertanyaan pengguna di awal jawabanmu. Langsung berikan jawaban akhir saja.
+10. Jawab dengan bahasa Indonesia yang santai, bersahabat, ringkas, dan to-the-point tanpa menggunakan tanda bintang markdown (**) secara berlebihan.
+11. JIKA PENGGUNA MEMINTA SALDO MASING-MASING KAS SIMPANAN: Sebutkan rincian nama kas simpanan dan masing-masing nominal saldonya secara jelas.
+12. KOMUNIKASI 2 ARAH & KLARIFIKASI: Jika kueri pengguna masih umum atau "ngambang" tanpa menyebutkan periode yang jelas, kamu WAJIB menawarkan komunikasi dua arah.`;
 
     let innerReplyText = 'Maaf, saya tidak dapat memproses pesan tersebut.';
     try {
-      process.stdout.write('[AI-Service] Final reply: ');
-      const fs = require('fs');
-      fs.appendFileSync(path.join(__dirname, 'sql_debug.log'), `\n=== FINAL PROMPT SENT TO LLM ===\n${finalPromptText}\n================================\n`);
 
       const openRouterMessages = [
         { role: 'system', content: systemPrompt }
@@ -812,8 +777,6 @@ PENTING UNTUK JAWABANMU (ATURAN MUTLAK):
       });
 
       const response = await callOpenRouter(openRouterMessages);
-      process.stdout.write(response);
-      console.log();
       innerReplyText = response;
     } catch (err) {
       console.error('[AI-Service] Failed to generate reply via OpenRouter:', err);
@@ -827,7 +790,6 @@ PENTING UNTUK JAWABANMU (ATURAN MUTLAK):
 
     // Programmatic Rupiah formatter to fix LLM's bad dot placements/decimals
     cleanedReplyText = cleanedReplyText.replace(/Rp\.?\s*([0-9.,]+)/gi, (match, p1) => {
-      console.log(`[DEBUG REGEX] Match found: "${match}", p1: "${p1}"`);
       let cleanDigits = p1.replace(/[.,]+$/, ''); // strip trailing punctuation dots/commas
       cleanDigits = cleanDigits.replace(/[.,]0{1,2}$/, ''); // strip any trailing zero decimals (e.g. .0 or .00)
 
@@ -854,14 +816,11 @@ PENTING UNTUK JAWABANMU (ATURAN MUTLAK):
       }
 
       const num = parseFloat(parsedNumString);
-      console.log(`[DEBUG REGEX] parsedNumString: "${parsedNumString}", num: ${num}, formatIDR(num): "${formatIDR(num)}"`);
       if (!isNaN(num)) {
         return formatIDR(num);
       }
       return match;
     });
-
-    logResourceUsage('Request Complete');
 
     let finalReply = cleanedReplyText || 'Maaf, saya tidak dapat memproses pesan tersebut.';
 
