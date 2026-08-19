@@ -330,12 +330,6 @@ app.listen(PORT, () => {
   console.log(`🌐 CORS enabled for: ${config.corsOrigin}`);
   console.log(`\n💡 Run migrations: npm run migrate`);
   console.log(`💡 Check status: npm run migrate:status\n`);
-  
-  // Self-healing database cleanup: ensure all PB1 setoran payments have is_umum = 0 (never in Kas Berjalan)
-  const { query: dbQuery } = require('./config/database');
-  dbQuery('UPDATE transactions SET is_umum = 0 WHERE is_pb1_payment = 1 AND is_umum = 1')
-    .then(() => console.log('✅ PB1 transactions is_umum flag synchronized.'))
-    .catch(err => console.error('⚠️ PB1 transaction sync warning:', err.message));
 });
 
 module.exports = app;

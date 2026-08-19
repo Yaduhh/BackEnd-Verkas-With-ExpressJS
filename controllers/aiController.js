@@ -39,6 +39,19 @@ const chatWithAI = async (req, res) => {
       });
     }
 
+    // Sanitize chat history early to maintain conversational continuity while preventing branch switching context leaks
+    let sanitizedChatHistory = chatHistory;
+    if (sanitizedChatHistory && Array.isArray(sanitizedChatHistory) && sanitizedChatHistory.length > 6) {
+      sanitizedChatHistory = sanitizedChatHistory.slice(-6);
+    }
+
+    const userId = req.userId || (req.user && req.user.id) || 'default_user';
+    const prevBranchId = lastActiveBranch.get(userId);
+    if (prevBranchId && String(prevBranchId) !== String(branchId)) {
+      sanitizedChatHistory = [];
+    }
+    lastActiveBranch.set(userId, branchId);
+
     // Intercept casual greetings to prevent database querying/LLM hallucinations on simple hi/hello
     const cleanMsg = message.trim().toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "");
     const casualGreetings = ['halo', 'hi', 'hello', 'hey', 'pagi', 'siang', 'sore', 'malam', 'tes', 'test', 'assalamualaikum', 'ping', 'oi'];
@@ -81,8 +94,9 @@ DEFINISI KONTEKS KEUANGAN APLIKASI:
     INFORMASI WAKTU SEKARANG:
 - Tanggal hari ini: ${formattedToday} (Format YYYY-MM-DD: ${formattedTodayIso})
 - Tahun saat ini: ${now.getFullYear()}
-- Gunakan tahun ${now.getFullYear()} untuk setiap pertanyaan berbasis bulan/waktu sekarang (misal: "bulan Juni ini" berarti Juni ${now.getFullYear()}).
-- CATATAN PENTING DATA BULANAN: Hari ini adalah tanggal 1 Juli 2026, yang berarti bulan berjalan saat ini (Juli 2026) baru berjalan 1 hari dan belum memiliki data transaksi yang lengkap. Jika pengguna bertanya tentang laporan, pengeluaran terbesar, omzet, atau kategori keuangan TANPA menyebutkan nama bulan secara spesifik, kamu WAJIB memprioritaskan kueri untuk menyaring data pada periode Juni 2026 (yaitu: DATE(t.transaction_date) BETWEEN '2026-06-01' AND '2026-06-30') agar kueri menghasilkan data transaksi yang relevan.
+- Bulan saat ini: ${now.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' })}
+- Gunakan tahun ${now.getFullYear()} untuk setiap pertanyaan berbasis bulan/waktu sekarang.
+- KONTEKS WAKTU TRANSAKSI: Jika pengguna menanyakan data untuk "bulan ini", saring transaksi pada bulan berjalan saat ini (${now.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' })}). Jika pengguna menanyakan "bulan lalu" atau "bulan kemarin", saring transaksi pada bulan sebelumnya.
 
 Tabel dan Kolom yang tersedia (tabel ini sudah ter-filter otomatis per cabang):
 ${DB_SCHEMA}
@@ -179,8 +193,8 @@ Contoh Kueri SQL yang benar:
         ];
 
         // Append chat history to context so it supports conversational follow-ups
-        if (chatHistory && Array.isArray(chatHistory)) {
-          chatHistory.forEach(h => {
+        if (sanitizedChatHistory && Array.isArray(sanitizedChatHistory)) {
+          sanitizedChatHistory.forEach(h => {
             openRouterMessages.push({ role: h.role, content: h.content });
           });
         }
@@ -325,14 +339,17 @@ Contoh Kueri SQL yang benar:
       ((['analisa', 'analisis', 'perkembangan', 'laporan'].some(w => msg.includes(w)) || 
         (['perputaran', 'aliran', 'arus', 'cashflow', 'turnover'].some(w => msg.includes(w)) && msg.includes('kas'))) && 
        // Must NOT contain period keywords
-       !['juni', 'juli', 'mei', 'april', 'bulan ini', 'bulan lalu', 'kemarin', 'semua', 'tahunan', 'mingguan', 'harian', 'simpanan', 'simpaan', 'tabungan', 'cadangan', 'terakhir', 'lalu', 'sebelumnya', 'bulan', 'minggu', 'tahun', 'periode'].some(m => msg.includes(m)) &&
+       !['juni', 'juli', 'agustus', 'september', 'oktober', 'november', 'desember', 'januari', 'februari', 'maret', 'april', 'mei', 'bulan ini', 'bulan lalu', 'kemarin', 'semua', 'tahunan', 'mingguan', 'harian', 'simpanan', 'simpaan', 'tabungan', 'cadangan', 'terakhir', 'lalu', 'sebelumnya', 'bulan', 'minggu', 'tahun', 'periode'].some(m => msg.includes(m)) &&
        // Must NOT contain PIC/admin/user keywords
        !['admin', 'pic', 'tim', 'siapa', 'orang', 'staff', 'staf', 'owner', 'user', 'pembuat', 'buat'].some(w => msg.includes(w)));
       
     if (isAmbiguousAnalysis) {
+      const prevD = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const prevMonthName = prevD.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
+      const currMonthName = now.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
       return res.status(200).json({
         success: true,
-        reply: `Saya bisa membantu Anda menganalisis kas atau laporan keuangan toko. Untuk memastikan analisisnya tepat dan sesuai kebutuhan Anda, periode mana yang ingin Anda bedah?\n\n- Juni 2026 (Bulan Lalu - Data Lengkap)\n- Juli 2026 (Bulan Ini - Sedang Berjalan)\n- Perbandingan tren antara Juni vs Juli 2026`
+        reply: `Saya bisa membantu Anda menganalisis kas atau laporan keuangan toko. Untuk memastikan analisisnya tepat dan sesuai kebutuhan Anda, periode mana yang ingin Anda bedah?\n\n- ${prevMonthName} (Bulan Lalu)\n- ${currMonthName} (Bulan Ini - Sedang Berjalan)\n- Perbandingan tren antara ${prevMonthName} vs ${currMonthName}`
       });
     }
 
@@ -579,37 +596,7 @@ Contoh Kueri SQL yang benar:
       });
     }
 
-    // Sanitize chat history to avoid branch switching context poisoning
-    let sanitizedChatHistory = chatHistory;
-
-    // Limit chat history to only the last 4 messages to prevent context poisoning/leaks from old conversations
-    if (sanitizedChatHistory && Array.isArray(sanitizedChatHistory) && sanitizedChatHistory.length > 4) {
-      sanitizedChatHistory = sanitizedChatHistory.slice(-4);
-    }
-
-    // Check using global state map (Map-based branch switch detection)
-    const userId = req.userId || (req.user && req.user.id) || 'default_user';
-    const prevBranchId = lastActiveBranch.get(userId);
-    if (prevBranchId && String(prevBranchId) !== String(branchId)) {
-      sanitizedChatHistory = [];
-    }
-    lastActiveBranch.set(userId, branchId);
-
-    // Backup check 1: Clean history if assistant messages do not contain the current branch name (to purge old poisoned Condet messages)
-    if (sanitizedChatHistory && sanitizedChatHistory.length > 0) {
-      const hasAssistantMsgWithoutBranch = sanitizedChatHistory.some(h => {
-        if (h.role === 'assistant') {
-          return !h.content.toLowerCase().includes(branchName.toLowerCase());
-        }
-        return false;
-      });
-
-      if (hasAssistantMsgWithoutBranch) {
-        sanitizedChatHistory = [];
-      }
-    }
-
-    // Backup check 2: Check using other branch name keywords in history
+    // Check using other branch name keywords in history to prevent cross-branch leaks
     if (sanitizedChatHistory && sanitizedChatHistory.length > 0 && accessibleBranches && accessibleBranches.length > 0) {
       const otherBranchNames = accessibleBranches
         .map(b => b.name)

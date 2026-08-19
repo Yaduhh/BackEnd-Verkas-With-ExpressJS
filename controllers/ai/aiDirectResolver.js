@@ -2,6 +2,23 @@
 const { query } = require('../../config/database');
 const { formatIDR } = require('./aiFormatter');
 
+const GLOBAL_MONTH_MAP = {
+  'januari': 1, 'jan': 1,
+  'februari': 2, 'feb': 2,
+  'maret': 3, 'mar': 3,
+  'april': 4, 'apr': 4,
+  'mei': 5,
+  'juni': 6, 'jun': 6,
+  'juli': 7, 'jul': 7,
+  'agustus': 8, 'agu': 8, 'agt': 8,
+  'september': 9, 'sep': 9,
+  'oktober': 10, 'okt': 10,
+  'november': 11, 'nov': 11,
+  'desember': 12, 'des': 12
+};
+
+const GLOBAL_MONTH_NAMES_INDO = ['', 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+
 function isGeneralMonthlyQuery(message, chatHistory) {
   const msg = message.toLowerCase();
 
@@ -28,7 +45,7 @@ function isGeneralMonthlyQuery(message, chatHistory) {
   }
 
   // Keywords indicating a monthly or current period query
-  const months = ['januari', 'februari', 'maret', 'april', 'mei', 'juni', 'juli', 'agustus', 'september', 'oktober', 'november', 'desember', 'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'agu', 'sep', 'okt', 'nov', 'des'];
+  const months = Object.keys(GLOBAL_MONTH_MAP);
 
   const hasMonth = months.some(m => msg.includes(m));
   const hasThisMonth = msg.includes('bulan ini') || msg.includes('hari ini') || msg.includes('sekarang');
@@ -54,8 +71,12 @@ function isGeneralMonthlyQuery(message, chatHistory) {
   ];
   const isSpecific = specificExclusions.some(ex => msg.includes(ex));
 
-  // Exclude detailed/sorting/extreme queries that need SQL query execution
-  const hasDetailedOrSorted = ['besar', 'banyak', 'kecil', 'detail', 'apa saja', 'daftar', 'list', 'nama', 'kategori', 'terbesar', 'terbanyak', 'terkecil', 'paling'].some(w => msg.includes(w));
+  // Exclude detailed/sorting/extreme/creator queries that need SQL query execution
+  const hasDetailedOrSorted = [
+    'besar', 'banyak', 'kecil', 'detail', 'apa saja', 'daftar', 'list', 'nama', 'kategori',
+    'terbesar', 'terbanyak', 'terkecil', 'paling', 'siapa', 'dibuat', 'buat', 'pembuat', 'input',
+    'keterangan', 'catatan', 'nota', 'bukti', 'lampiran', 'kapan', 'tanggal', 'jam', 'user', 'admin', 'pic'
+  ].some(w => msg.includes(w));
   if (hasDetailedOrSorted) return false;
 
   return hasGeneralKeyword && !isSpecific;
@@ -114,23 +135,8 @@ async function tryResolveExtremeTransactionQueryDirectly(message, branchId) {
   let targetYear = now.getFullYear();
   let targetMonthName = now.toLocaleDateString('id-ID', { month: 'long' });
 
-  const monthMap = {
-    'januari': 1, 'jan': 1,
-    'februari': 2, 'feb': 2,
-    'maret': 3, 'mar': 3,
-    'april': 4, 'apr': 4,
-    'mei': 5,
-    'juni': 6, 'jun': 6,
-    'juli': 7, 'jul': 7,
-    'agustus': 8, 'agu': 8, 'agt': 8,
-    'september': 9, 'sep': 9,
-    'oktober': 10, 'okt': 10,
-    'november': 11, 'nov': 11,
-    'desember': 12, 'des': 12
-  };
-
   let foundMonth = false;
-  for (const [name, num] of Object.entries(monthMap)) {
+  for (const [name, num] of Object.entries(GLOBAL_MONTH_MAP)) {
     if (msg.includes(name)) {
       targetMonth = num;
       targetMonthName = name.charAt(0).toUpperCase() + name.slice(1);
@@ -350,9 +356,10 @@ function tryResolvePICQueryDirectly(message, branchPics, teamMembers, branchName
 async function tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchName, chatHistory, branchId) {
   const msg = message.toLowerCase();
 
+  const isQuestion = ['siapa', 'kapan', 'kenapa', 'mengapa', 'bagaimana', 'apa', 'apakah', 'berapa', '?'].some(q => msg.includes(q));
   const writeAction = ['buatkan', 'buat', 'bikin', 'tambah', 'tambahkan', 'input', 'masukkan', 'sisipkan', 'edit', 'ubah', 'hapus', 'delete', 'remove'].some(w => msg.includes(w));
   const writeTarget = ['transaksi', 'pemasukan', 'pengeluaran', 'data', 'catatan', 'nota', 'piutang'].some(t => msg.includes(t));
-  if (writeAction && writeTarget) {
+  if (!isQuestion && writeAction && writeTarget) {
     return 'Maaf, sebagai AI Assistant saya hanya memiliki akses baca (read-only) untuk menganalisis laporan keuangan Anda, sehingga tidak dapat membuat, mengubah, atau menghapus transaksi.\n\nAnda dapat menambahkan atau mengelola transaksi secara langsung melalui tombol "+ Transaksi" pada aplikasi Verkas.';
   }
 
@@ -361,6 +368,15 @@ async function tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchN
 
   const isSavingsQuery = ['simpanan', 'simpaan', 'tabungan', 'cadangan', 'pribadi'].some(w => msg.includes(w));
   if (isSavingsQuery) return null;
+
+  // If query is asking about creator/user, specific details, notes, categories, attachments, reasons, or specific single transactions, DO NOT hijack as monthly summary!
+  const isDetailOrAttributeQuery = [
+    'siapa', 'dibuat', 'buat', 'pembuat', 'input', 'oleh siapa', 'user', 'admin', 'staf', 'staff', 'pic',
+    'keterangan', 'catatan', 'note', 'deskripsi', 'rincian', 'detail', 'transaksi apa', 'kategori apa',
+    'nama transaksi', 'nomor', 'nota', 'lampiran', 'bukti', 'kapan', 'tanggal berapa', 'jam berapa',
+    'metode', 'pembayaran apa', 'kenapa', 'mengapa', 'alasan', 'sebab'
+  ].some(w => msg.includes(w));
+  if (isDetailOrAttributeQuery) return null;
 
   // If query is specifically about Piutang / Mitra / Hutang, DO NOT resolve it as monthly financial summary!
   if ((msg.includes('piutang') || msg.includes('mitra') || msg.includes('hutang') || msg.includes('utang') || msg.includes('piputang')) && !msg.includes('pelunasan piutang periode lalu')) {
@@ -449,124 +465,246 @@ async function tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchN
     }
   }
 
-  // 1. Detect if comparing June and July (month-over-month) or follow-up percentage question
-  const isComparingJuneJuly = (msg.includes('juni') && msg.includes('juli')) ||
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonthNum = now.getMonth() + 1;
+
+  // Check how many distinct month names are mentioned in the message
+  const mentionedMonthNums = [];
+  const standardMonthNames = ['januari', 'februari', 'maret', 'april', 'mei', 'juni', 'juli', 'agustus', 'september', 'oktober', 'november', 'desember'];
+  standardMonthNames.forEach((name, idx) => {
+    const num = idx + 1;
+    const shortNames = [name, name.slice(0, 3)];
+    if (name === 'agustus') shortNames.push('agu', 'agt');
+    if (shortNames.some(sn => {
+      const re = new RegExp(`\\b${sn}\\b`, 'i');
+      return re.test(msg) || msg.includes(sn);
+    })) {
+      mentionedMonthNums.push(num);
+    }
+  });
+
+  const hasTwoMonthsExplicit = mentionedMonthNums.length >= 2;
+  const hasMonthComparisonKeywords = ['bandingkan', 'banding', 'perbandingan', 'selisih', 'vs', 'perkembangan', 'tren'].some(kw => msg.includes(kw)) ||
+    (msg.includes('dan') && (msg.includes('bulan ini') || msg.includes('bulan lalu') || msg.includes('bulan kemarin'))) ||
+    (msg.includes('dengan') && (msg.includes('bulan ini') || msg.includes('bulan lalu') || msg.includes('bulan kemarin')));
+
+  const isRelativeComparison = 
     (msg.includes('bulan ini') && (msg.includes('bulan kemarin') || msg.includes('bulan lalu'))) ||
-    (msg.includes('dengan') && msg.includes('bulan ini') && msg.includes('bulan lalu')) ||
-    (msg.includes('dan') && msg.includes('bulan ini') && msg.includes('bulan lalu')) ||
-    (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0 && 
-      [...chatHistory].reverse().some(h => {
+    (hasMonthComparisonKeywords && (msg.includes('bulan ini') || msg.includes('bulan kemarin') || msg.includes('bulan lalu')));
+
+  const isPercentFollowUp = (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0 && 
+    [...chatHistory].reverse().some(h => {
+      const c = h.content.toLowerCase();
+      return c.includes('perbandingan') || c.includes('dibandingkan') || c.includes('bulan ini') || c.includes('pengeluaran') || c.includes('omzet') || c.includes('saldo');
+    }) && ['persen', '%', 'persentase', 'berapa persen'].some(w => msg.includes(w)));
+
+  const isComparing = hasTwoMonthsExplicit || isRelativeComparison || isPercentFollowUp;
+
+  if (isComparing) {
+    let m1Year = currentYear;
+    let m1Month = currentMonthNum === 1 ? 12 : currentMonthNum - 1;
+    if (currentMonthNum === 1) m1Year = currentYear - 1;
+
+    let m2Year = currentYear;
+    let m2Month = currentMonthNum;
+
+    let isRelative = true;
+
+    if (hasTwoMonthsExplicit) {
+      isRelative = false;
+      const sortedMonths = [...mentionedMonthNums].sort((a, b) => a - b);
+      m1Month = sortedMonths[0];
+      m1Year = currentYear;
+      m2Month = sortedMonths[1];
+      m2Year = currentYear;
+    } else if (isPercentFollowUp && !isRelativeComparison) {
+      const lastUserOrAsstWithComparison = [...chatHistory].reverse().find(h => {
         const c = h.content.toLowerCase();
-        return (c.includes('juni') && c.includes('juli')) || c.includes('perbandingan') || c.includes('pengeluaran') || c.includes('omzet');
-      }) && ['persen', '%', 'persentase', 'berapa persen'].some(w => msg.includes(w)));
+        return standardMonthNames.some(m => c.includes(m));
+      });
+      if (lastUserOrAsstWithComparison) {
+        const c = lastUserOrAsstWithComparison.content.toLowerCase();
+        const historyMonths = [];
+        standardMonthNames.forEach((name, idx) => {
+          if (c.includes(name)) historyMonths.push(idx + 1);
+        });
+        if (historyMonths.length >= 2) {
+          isRelative = false;
+          const sorted = [...historyMonths].sort((a, b) => a - b);
+          m1Month = sorted[0];
+          m2Month = sorted[1];
+        }
+      }
+    }
 
-  if (isComparingJuneJuly) {
-    const junBerjalan = monthlySummaries.find(s => s.month_str === '2026-06' && s.is_umum === 1);
-    const julBerjalan = monthlySummaries.find(s => s.month_str === '2026-07' && s.is_umum === 1);
+    const m1MonthStr = `${m1Year}-${String(m1Month).padStart(2, '0')}`;
+    const m2MonthStr = `${m2Year}-${String(m2Month).padStart(2, '0')}`;
 
-    if (junBerjalan && julBerjalan) {
-      const junOmzet = junBerjalan.total_omzet;
-      const julOmzet = julBerjalan.total_omzet;
+    const getSummary = async (mStr, year, mNum) => {
+      let s = monthlySummaries ? monthlySummaries.find(item => item.month_str === mStr && item.is_umum === 1) : null;
+      if (!s && branchId) {
+        try {
+          const Transaction = require('../../models/Transaction');
+          const { getMonthRange } = require('./aiFormatter');
+          const mRange = getMonthRange(year, mNum);
+          const summaryRes = await Transaction.getSummary({
+            branchId,
+            startDate: mRange.start,
+            endDate: mRange.end,
+            isUmum: true
+          });
+          if (summaryRes) {
+            s = {
+              month_str: mStr,
+              is_umum: 1,
+              pemasukan: summaryRes.pemasukan || 0,
+              total_omzet: summaryRes.total_omzet || 0,
+              pemasukan_lain: summaryRes.pemasukan_lain || 0,
+              pelunasan_piutang_lalu: summaryRes.pelunasan_piutang_lalu || 0,
+              pengeluaran: summaryRes.pengeluaran || 0,
+              saldo: summaryRes.saldo || 0,
+              total_pb1: summaryRes.total_pb1 || 0,
+              total_pb1_paid: summaryRes.total_pb1_paid || 0,
+              saldo_pb1: summaryRes.saldo_pb1 || 0
+            };
+          }
+        } catch (err) {
+          console.error('[AI-Service] Dynamic getSummary in comparison failed:', err);
+        }
+      }
+      return s || {
+        month_str: mStr,
+        is_umum: 1,
+        pemasukan: 0,
+        total_omzet: 0,
+        pemasukan_lain: 0,
+        pelunasan_piutang_lalu: 0,
+        pengeluaran: 0,
+        saldo: 0,
+        total_pb1: 0,
+        total_pb1_paid: 0,
+        saldo_pb1: 0
+      };
+    };
 
-      const junPengeluaran = junBerjalan.pengeluaran;
-      const julPengeluaran = julBerjalan.pengeluaran;
+    const m1Berjalan = await getSummary(m1MonthStr, m1Year, m1Month);
+    const m2Berjalan = await getSummary(m2MonthStr, m2Year, m2Month);
 
-      const junSaldo = junBerjalan.saldo;
-      const julSaldo = julBerjalan.saldo;
+    if (m1Berjalan && m2Berjalan) {
+      const m1Name = `${GLOBAL_MONTH_NAMES_INDO[m1Month]} ${m1Year}`;
+      const m2Name = `${GLOBAL_MONTH_NAMES_INDO[m2Month]} ${m2Year}`;
+
+      const m1Label = isRelative ? `${m1Name} (Bulan Lalu)` : m1Name;
+      const m2Label = isRelative ? `${m2Name} (Bulan Ini)` : m2Name;
+
+      const m1Omzet = m1Berjalan.total_omzet || 0;
+      const m2Omzet = m2Berjalan.total_omzet || 0;
+
+      const m1Pengeluaran = m1Berjalan.pengeluaran || 0;
+      const m2Pengeluaran = m2Berjalan.pengeluaran || 0;
+
+      const m1Saldo = m1Berjalan.saldo || 0;
+      const m2Saldo = m2Berjalan.saldo || 0;
 
       const isPercentAsking = ['persen', '%', 'persentase', 'berapa persen'].some(w => msg.includes(w));
       const lastUserMsg = chatHistory && Array.isArray(chatHistory) ? [...chatHistory].reverse().find(h => h.role === 'user')?.content.toLowerCase() || '' : '';
 
       if (isPercentAsking) {
         if (msg.includes('pengeluaran') || msg.includes('belanja') || msg.includes('biaya') || lastUserMsg.includes('pengeluaran') || lastUserMsg.includes('belanja') || lastUserMsg.includes('biaya')) {
-          const diff = julPengeluaran - junPengeluaran;
-          const pct = junPengeluaran > 0 ? (((julPengeluaran - junPengeluaran) / junPengeluaran) * 100).toFixed(2) : '0';
+          const diff = m2Pengeluaran - m1Pengeluaran;
+          const pct = m1Pengeluaran > 0 ? (((m2Pengeluaran - m1Pengeluaran) / m1Pengeluaran) * 100).toFixed(2) : '0';
           const trendStr = diff >= 0 ? 'kenaikan' : 'penurunan';
-          return `Persentase ${trendStr} pengeluaran Kas Berjalan dari bulan Juni 2026 (${formatIDR(junPengeluaran)}) ke bulan Juli 2026 (${formatIDR(julPengeluaran)}) adalah sebesar +${pct}% (selisih ${trendStr} sebesar ${formatIDR(Math.abs(diff))}).`;
+          return `Persentase ${trendStr} pengeluaran Kas Berjalan dari bulan ${m1Name} (${formatIDR(m1Pengeluaran)}) ke bulan ${m2Name} (${formatIDR(m2Pengeluaran)}) adalah sebesar ${diff >= 0 ? '+' : ''}${pct}% (selisih ${trendStr} sebesar ${formatIDR(Math.abs(diff))}).`;
         }
 
         if (msg.includes('omzet') || msg.includes('omset') || lastUserMsg.includes('omzet') || lastUserMsg.includes('omset')) {
-          const diff = julOmzet - junOmzet;
-          const pct = junOmzet > 0 ? (((julOmzet - junOmzet) / junOmzet) * 100).toFixed(2) : '0';
+          const diff = m2Omzet - m1Omzet;
+          const pct = m1Omzet > 0 ? (((m2Omzet - m1Omzet) / m1Omzet) * 100).toFixed(2) : '0';
           const trendStr = diff >= 0 ? 'peningkatan' : 'penurunan';
-          return `Persentase ${trendStr} omzet bersih Kas Berjalan dari bulan Juni 2026 (${formatIDR(junOmzet)}) ke bulan Juli 2026 (${formatIDR(julOmzet)}) adalah sebesar +${pct}% (selisih ${trendStr} sebesar ${formatIDR(Math.abs(diff))}).`;
+          return `Persentase ${trendStr} omzet bersih Kas Berjalan dari bulan ${m1Name} (${formatIDR(m1Omzet)}) ke bulan ${m2Name} (${formatIDR(m2Omzet)}) adalah sebesar ${diff >= 0 ? '+' : ''}${pct}% (selisih ${trendStr} sebesar ${formatIDR(Math.abs(diff))}).`;
         }
 
         if (msg.includes('saldo') || msg.includes('laba') || msg.includes('untung') || msg.includes('bersih') || lastUserMsg.includes('saldo')) {
-          const diff = julSaldo - junSaldo;
-          const pct = junSaldo > 0 ? (((julSaldo - junSaldo) / Math.abs(junSaldo)) * 100).toFixed(2) : '0';
+          const diff = m2Saldo - m1Saldo;
+          const pct = m1Saldo !== 0 ? (((m2Saldo - m1Saldo) / Math.abs(m1Saldo)) * 100).toFixed(2) : '0';
           const trendStr = diff >= 0 ? 'peningkatan' : 'penurunan';
-          return `Persentase ${trendStr} saldo kas bersih dari bulan Juni 2026 (${formatIDR(junSaldo)}) ke bulan Juli 2026 (${formatIDR(julSaldo)}) adalah sebesar +${pct}% (selisih ${trendStr} sebesar ${formatIDR(Math.abs(diff))}).`;
+          return `Persentase ${trendStr} saldo kas bersih dari bulan ${m1Name} (${formatIDR(m1Saldo)}) ke bulan ${m2Name} (${formatIDR(m2Saldo)}) adalah sebesar ${diff >= 0 ? '+' : ''}${pct}% (selisih ${trendStr} sebesar ${formatIDR(Math.abs(diff))}).`;
         }
 
-        const expDiff = julPengeluaran - junPengeluaran;
-        const expPct = junPengeluaran > 0 ? (((julPengeluaran - junPengeluaran) / junPengeluaran) * 100).toFixed(2) : '0';
-        return `Persentase perubahan Kas Berjalan dari Juni 2026 ke Juli 2026:\n\n` +
+        const expDiff = m2Pengeluaran - m1Pengeluaran;
+        const expPct = m1Pengeluaran > 0 ? (((m2Pengeluaran - m1Pengeluaran) / m1Pengeluaran) * 100).toFixed(2) : '0';
+        const omzetDiff = m2Omzet - m1Omzet;
+        const omzetPct = m1Omzet > 0 ? (((m2Omzet - m1Omzet) / m1Omzet) * 100).toFixed(2) : '0';
+        const saldoDiff = m2Saldo - m1Saldo;
+        const saldoPct = m1Saldo !== 0 ? (((m2Saldo - m1Saldo) / Math.abs(m1Saldo)) * 100).toFixed(2) : '0';
+
+        return `Persentase perubahan Kas Berjalan dari ${m1Name} ke ${m2Name}:\n\n` +
                `- Pengeluaran: ${expDiff >= 0 ? '+' : ''}${expPct}% (selisih ${formatIDR(Math.abs(expDiff))})\n` +
-               `- Omzet Bersih: ${((julOmzet - junOmzet)/junOmzet * 100).toFixed(2)}%\n` +
-               `- Saldo Kas Bersih: ${((julSaldo - junSaldo)/Math.abs(junSaldo) * 100).toFixed(2)}%`;
+               `- Omzet Bersih: ${omzetDiff >= 0 ? '+' : ''}${omzetPct}%\n` +
+               `- Saldo Kas Bersih: ${saldoDiff >= 0 ? '+' : ''}${saldoPct}%`;
       }
 
       if (msg.includes('omzet') || msg.includes('omset')) {
-        const diff = julOmzet - junOmzet;
-        const trend = diff > 0 ? 'kenaikan' : 'penurunan';
+        const diff = m2Omzet - m1Omzet;
+        const trend = diff >= 0 ? 'kenaikan' : 'penurunan';
         return `Perbandingan Omzet Kas Berjalan:
-- Juni 2026 (Bulan Lalu): ${formatIDR(junOmzet)} (PB1: ${formatIDR(junBerjalan.total_pb1)})
-- Juli 2026 (Bulan Ini): ${formatIDR(julOmzet)} (PB1: ${formatIDR(julBerjalan.total_pb1)})
+- ${m1Label}: ${formatIDR(m1Omzet)} (PB1: ${formatIDR(m1Berjalan.total_pb1 || 0)})
+- ${m2Label}: ${formatIDR(m2Omzet)} (PB1: ${formatIDR(m2Berjalan.total_pb1 || 0)})
 
-Terjadi ${trend} omzet bersih sebesar ${formatIDR(Math.abs(diff))} pada bulan ini (Juli 2026) dibandingkan bulan lalu (Juni 2026).`;
+Terjadi ${trend} omzet bersih sebesar ${formatIDR(Math.abs(diff))} pada ${m2Label} dibandingkan ${m1Label}.`;
       }
 
       if (msg.includes('pengeluaran') || msg.includes('belanja') || msg.includes('biaya')) {
         if (!msg.includes('lain')) {
-          const diff = julPengeluaran - junPengeluaran;
-          const trend = diff > 0 ? 'kenaikan' : 'penurunan';
+          const diff = m2Pengeluaran - m1Pengeluaran;
+          const trend = diff >= 0 ? 'kenaikan' : 'penurunan';
           return `Perbandingan Pengeluaran Kas Berjalan:
-- Juni 2026 (Bulan Lalu): ${formatIDR(junPengeluaran)}
-- Juli 2026 (Bulan Ini): ${formatIDR(julPengeluaran)}
+- ${m1Label}: ${formatIDR(m1Pengeluaran)}
+- ${m2Label}: ${formatIDR(m2Pengeluaran)}
 
-Terjadi ${trend} pengeluaran sebesar ${formatIDR(Math.abs(diff))} pada bulan ini (Juli 2026) dibandingkan bulan lalu (Juni 2026).`;
+Terjadi ${trend} pengeluaran sebesar ${formatIDR(Math.abs(diff))} pada ${m2Label} dibandingkan ${m1Label}.`;
         }
       }
 
       if (msg.includes('saldo') || msg.includes('laba') || msg.includes('untung') || msg.includes('bersih')) {
-        const diff = julSaldo - junSaldo;
-        const trend = diff > 0 ? 'kenaikan' : 'penurunan';
+        const diff = m2Saldo - m1Saldo;
+        const trend = diff >= 0 ? 'kenaikan' : 'penurunan';
         return `Perbandingan Saldo Kas Berjalan (Bersih):
-- Juni 2026 (Bulan Lalu): ${formatIDR(junSaldo)}
-- Juli 2026 (Bulan Ini): ${formatIDR(julSaldo)}
+- ${m1Label}: ${formatIDR(m1Saldo)}
+- ${m2Label}: ${formatIDR(m2Saldo)}
 
-Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada bulan ini (Juli 2026) dibandingkan bulan lalu (Juni 2026).`;
+Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada ${m2Label} dibandingkan ${m1Label}.`;
       }
 
       // General full comparison if no single metric is filtered
-      const omzetDiff = julOmzet - junOmzet;
+      const omzetDiff = m2Omzet - m1Omzet;
       const omzetTrend = omzetDiff >= 0 ? 'peningkatan' : 'penurunan';
-      const omzetPct = junOmzet > 0 ? (((julOmzet - junOmzet) / junOmzet) * 100).toFixed(1) : '0';
+      const omzetPct = m1Omzet > 0 ? (((m2Omzet - m1Omzet) / m1Omzet) * 100).toFixed(1) : '0';
 
-      const expDiff = julPengeluaran - junPengeluaran;
+      const expDiff = m2Pengeluaran - m1Pengeluaran;
       const expTrend = expDiff >= 0 ? 'kenaikan' : 'penurunan';
-      const expPct = junPengeluaran > 0 ? (((julPengeluaran - junPengeluaran) / junPengeluaran) * 100).toFixed(1) : '0';
+      const expPct = m1Pengeluaran > 0 ? (((m2Pengeluaran - m1Pengeluaran) / m1Pengeluaran) * 100).toFixed(1) : '0';
 
-      const saldoDiff = julSaldo - junSaldo;
+      const saldoDiff = m2Saldo - m1Saldo;
       const saldoTrend = saldoDiff >= 0 ? 'peningkatan' : 'penurunan';
-      const saldoPct = junSaldo > 0 ? (((julSaldo - junSaldo) / Math.abs(junSaldo)) * 100).toFixed(1) : '0';
+      const saldoPct = m1Saldo !== 0 ? (((m2Saldo - m1Saldo) / Math.abs(m1Saldo)) * 100).toFixed(1) : '0';
 
-      return `Analisis Perbandingan Keuangan Kas Berjalan (Juni vs Juli 2026) untuk Buku Kas "${branchName}":\n\n` +
+      return `Analisis Perbandingan Keuangan Kas Berjalan (${m1Name} vs ${m2Name}) untuk Buku Kas "${branchName}":\n\n` +
              `1. Total Omzet (Bersih):\n` +
-             `   - Juni 2026: ${formatIDR(junOmzet)}\n` +
-             `   - Juli 2026: ${formatIDR(julOmzet)}\n` +
+             `   - ${m1Name}: ${formatIDR(m1Omzet)}\n` +
+             `   - ${m2Name}: ${formatIDR(m2Omzet)}\n` +
              `   -> Terjadi ${omzetTrend} omzet bersih sebesar ${formatIDR(Math.abs(omzetDiff))} (${omzetDiff >= 0 ? '+' : ''}${omzetPct}%).\n\n` +
              `2. Total Pengeluaran:\n` +
-             `   - Juni 2026: ${formatIDR(junPengeluaran)}\n` +
-             `   - Juli 2026: ${formatIDR(julPengeluaran)}\n` +
+             `   - ${m1Name}: ${formatIDR(m1Pengeluaran)}\n` +
+             `   - ${m2Name}: ${formatIDR(m2Pengeluaran)}\n` +
              `   -> Terjadi ${expTrend} pengeluaran sebesar ${formatIDR(Math.abs(expDiff))} (${expDiff >= 0 ? '+' : ''}${expPct}%).\n\n` +
              `3. Total Saldo Kas Berjalan (Bersih):\n` +
-             `   - Juni 2026: ${formatIDR(junSaldo)}\n` +
-             `   - Juli 2026: ${formatIDR(julSaldo)}\n` +
+             `   - ${m1Name}: ${formatIDR(m1Saldo)}\n` +
+             `   - ${m2Name}: ${formatIDR(m2Saldo)}\n` +
              `   -> Terjadi ${saldoTrend} saldo kas bersih sebesar ${formatIDR(Math.abs(saldoDiff))} (${saldoDiff >= 0 ? '+' : ''}${saldoPct}%).\n\n` +
              `Kesimpulan:\n` +
-             `Secara keseluruhan, kinerja Kas Berjalan toko "${branchName}" pada bulan Juli 2026 mengalami ${saldoTrend} saldo kas bersih sebesar ${formatIDR(Math.abs(saldoDiff))} (+${saldoPct}%) dibandingkan bulan Juni 2026.`;
+             `Secara keseluruhan, kinerja Kas Berjalan toko "${branchName}" pada bulan ${m2Name} mengalami ${saldoTrend} saldo kas bersih sebesar ${formatIDR(Math.abs(saldoDiff))} (${saldoDiff >= 0 ? '+' : ''}${saldoPct}%) dibandingkan bulan ${m1Name}.`;
     }
   }
 
@@ -610,25 +748,10 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada bula
   }
 
   // 1. Detect Month
-  const monthMap = {
-    'januari': 1, 'jan': 1,
-    'februari': 2, 'feb': 2,
-    'maret': 3, 'mar': 3,
-    'april': 4, 'apr': 4,
-    'mei': 5,
-    'juni': 6, 'jun': 6,
-    'juli': 7, 'jul': 7,
-    'agustus': 8, 'agu': 8, 'agt': 8,
-    'september': 9, 'sep': 9,
-    'oktober': 10, 'okt': 10,
-    'november': 11, 'nov': 11,
-    'desember': 12, 'des': 12
-  };
-
   let targetMonth = null;
   let targetMonthName = '';
   let hasExplicitMonthInMsg = false;
-  for (const [name, num] of Object.entries(monthMap)) {
+  for (const [name, num] of Object.entries(GLOBAL_MONTH_MAP)) {
     if (msg.includes(name)) {
       targetMonth = num;
       targetMonthName = name.charAt(0).toUpperCase() + name.slice(1);
@@ -642,12 +765,12 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada bula
     const lastUserMsgWithMonth = [...chatHistory].reverse().find(h => {
       if (h.role !== 'user') return false;
       const content = h.content.toLowerCase();
-      return Object.keys(monthMap).some(m => content.includes(m));
+      return Object.keys(GLOBAL_MONTH_MAP).some(m => content.includes(m));
     });
 
     if (lastUserMsgWithMonth) {
       const content = lastUserMsgWithMonth.content.toLowerCase();
-      for (const [name, num] of Object.entries(monthMap)) {
+      for (const [name, num] of Object.entries(GLOBAL_MONTH_MAP)) {
         if (content.includes(name)) {
           targetMonth = num;
           targetMonthName = name.charAt(0).toUpperCase() + name.slice(1);
@@ -657,8 +780,7 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada bula
     }
   }
 
-  const now = new Date();
-  let year = now.getFullYear();
+  let year = currentYear;
 
   if (targetMonth === null) {
     if (msg.includes('bulan lalu') || msg.includes('bulan kemarin')) {
@@ -676,6 +798,18 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada bula
   // If no specific topic OR month was requested in the message (and not inherited), do not hijack as monthly summary!
   if (!topic) return null;
   if (targetMonth === null) return null;
+
+  // Only return direct monthly summary if the CURRENT message actually asks for a financial metric or period
+  const hasCurrentMonthOrPeriod = Object.keys(GLOBAL_MONTH_MAP).some(m => msg.includes(m)) ||
+    msg.includes('bulan ini') || msg.includes('bulan lalu') || msg.includes('bulan kemarin') || msg.includes('sekarang');
+  const hasCurrentFinancialTopic = [
+    'omzet', 'omset', 'pengeluaran', 'belanja', 'biaya', 'pemasukan', 'saldo', 'laba', 'untung', 'bersih',
+    'kas berjalan', 'pb1', 'pajak', 'laporan', 'ringkasan', 'rata', 'average'
+  ].some(w => msg.includes(w));
+
+  if (!hasCurrentMonthOrPeriod && !hasCurrentFinancialTopic) {
+    return null;
+  }
 
   const monthStr = `${year}-${String(targetMonth).padStart(2, '0')}`;
 
@@ -853,17 +987,9 @@ async function tryResolvePiutangQueryDirectly(message, branchId, chatHistory) {
   if (!isPiutangQuery) return null;
 
   try {
-    // Detect if a specific month is requested
-    const monthMap = {
-      'januari': 1, 'jan': 1, 'februari': 2, 'feb': 2, 'maret': 3, 'mar': 3,
-      'april': 4, 'apr': 4, 'mei': 5, 'juni': 6, 'jun': 6, 'juli': 7, 'jul': 7,
-      'agustus': 8, 'agu': 8, 'agt': 8, 'september': 9, 'sep': 9,
-      'oktober': 10, 'okt': 10, 'november': 11, 'nov': 11, 'desember': 12, 'des': 12
-    };
-
     let targetMonthNum = null;
     let targetMonthName = '';
-    for (const [mName, mNum] of Object.entries(monthMap)) {
+    for (const [mName, mNum] of Object.entries(GLOBAL_MONTH_MAP)) {
       if (msg.includes(mName)) {
         targetMonthNum = mNum;
         targetMonthName = mName.charAt(0).toUpperCase() + mName.slice(1);
