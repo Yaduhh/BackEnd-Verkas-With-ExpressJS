@@ -5,7 +5,7 @@ class Transaction {
   static async findById(id, includeDeleted = false) {
     const results = await query(
       `SELECT t.*, c.name as category_name, c.min_attachment as category_min_attachment, COALESCE(u.name, u.email) as user_name,
-              mp.nama as mitra_piutang_nama, ba.name as bank_account_name
+              mp.nama as mitra_piutang_nama, ba.name as bank_account_name, ba.type as bank_account_type
        FROM transactions t
        LEFT JOIN categories c ON t.category_id = c.id
        LEFT JOIN users u ON t.user_id = u.id
@@ -42,9 +42,10 @@ class Transaction {
 
     // Fetch income details
     const incomeDetails = await query(
-      `SELECT tid.*, pm.name as payment_method_name
+      `SELECT tid.*, pm.name as payment_method_name, ba.name as bank_account_name, ba.type as bank_account_type
        FROM transaction_income_details tid
        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+       LEFT JOIN bank_accounts ba ON tid.bank_account_id = ba.id
        WHERE tid.transaction_id = ?`,
       [id]
     );
@@ -105,6 +106,8 @@ class Transaction {
     let selectFields = `
       SELECT t.*, c.name as category_name, c.min_attachment as category_min_attachment, COALESCE(u.name, u.email) as user_name,
              mp.nama as mitra_piutang_nama,
+             ba.name as bank_account_name,
+             ba.type as bank_account_type,
              tr_notif.transaction_id as parent_transaction_id,
              t_parent.transaction_date as parent_transaction_date,
              COALESCE(tr_sum.total_repayment, 0) as total_repayment,
@@ -145,6 +148,7 @@ class Transaction {
       LEFT JOIN categories c ON t.category_id = c.id
       LEFT JOIN users u ON t.user_id = u.id
       LEFT JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
+      LEFT JOIN bank_accounts ba ON t.bank_account_id = ba.id
       LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id
       LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
       LEFT JOIN (
@@ -299,9 +303,10 @@ class Transaction {
       const transactionIds = transactions.map(t => t.id);
       const placeholders = transactionIds.map(() => '?').join(',');
       const incomeSql = `
-        SELECT tid.*, pm.name as payment_method_name, pm.category_id 
+        SELECT tid.*, pm.name as payment_method_name, pm.category_id, ba.name as bank_account_name, ba.type as bank_account_type
         FROM transaction_income_details tid
         LEFT JOIN payment_methods pm ON tid.payment_method_id = pm.id
+        LEFT JOIN bank_accounts ba ON tid.bank_account_id = ba.id
         WHERE tid.transaction_id IN (${placeholders})
       `;
       const allIncomeDetails = await query(incomeSql, transactionIds);
@@ -477,9 +482,9 @@ class Transaction {
         for (const detail of incomeDetails) {
           const rowLampiran = detail.lampiran ? (Array.isArray(detail.lampiran) ? JSON.stringify(detail.lampiran) : detail.lampiran) : null;
           await conn.execute(
-            `INSERT INTO transaction_income_details (transaction_id, payment_method_id, amount_app, amount_cashier, lampiran)
-             VALUES (?, ?, ?, ?, ?)`,
-            [newId, detail.payment_method_id, detail.amount_app || 0, detail.amount_cashier || 0, rowLampiran]
+            `INSERT INTO transaction_income_details (transaction_id, payment_method_id, bank_account_id, amount_app, amount_cashier, lampiran)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [newId, detail.payment_method_id, detail.bank_account_id || null, detail.amount_app || 0, detail.amount_cashier || 0, rowLampiran]
           );
         }
       }
@@ -690,9 +695,9 @@ class Transaction {
           for (const detail of incomeDetails) {
             const rowLampiran = detail.lampiran ? (Array.isArray(detail.lampiran) ? JSON.stringify(detail.lampiran) : detail.lampiran) : null;
             await conn.execute(
-              `INSERT INTO transaction_income_details (transaction_id, payment_method_id, amount_app, amount_cashier, lampiran)
-               VALUES (?, ?, ?, ?, ?)`,
-              [id, detail.payment_method_id, detail.amount_app || 0, detail.amount_cashier || 0, rowLampiran]
+              `INSERT INTO transaction_income_details (transaction_id, payment_method_id, bank_account_id, amount_app, amount_cashier, lampiran)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+              [id, detail.payment_method_id, detail.bank_account_id || null, detail.amount_app || 0, detail.amount_cashier || 0, rowLampiran]
             );
           }
         }

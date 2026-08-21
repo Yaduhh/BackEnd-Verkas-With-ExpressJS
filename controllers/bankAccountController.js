@@ -4,6 +4,8 @@ const LogService = require('../services/logService');
 const getAll = async (req, res, next) => {
   try {
     const branchId = req.branchId || req.headers['x-branch-id'] || null;
+    const { type } = req.query;
+
     if (!branchId) {
       return res.status(400).json({
         success: false,
@@ -11,7 +13,7 @@ const getAll = async (req, res, next) => {
       });
     }
 
-    const accounts = await BankAccount.findAll(parseInt(branchId));
+    const accounts = await BankAccount.findAll(parseInt(branchId), type || null);
     res.json({
       success: true,
       data: accounts
@@ -23,7 +25,7 @@ const getAll = async (req, res, next) => {
 
 const create = async (req, res, next) => {
   try {
-    const { name } = req.body;
+    const { name, type } = req.body;
     const branchId = req.branchId || req.headers['x-branch-id'] || null;
 
     if (!name) {
@@ -42,13 +44,39 @@ const create = async (req, res, next) => {
 
     const account = await BankAccount.create({
       name,
-      branchId: parseInt(branchId)
+      branchId: parseInt(branchId),
+      type: type || 'savings'
     });
 
     res.status(201).json({
       success: true,
       message: 'Bank account created successfully',
       data: account
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const updateAccount = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { name, type } = req.body;
+
+    const account = await BankAccount.findById(id);
+    if (!account) {
+      return res.status(404).json({
+        success: false,
+        message: 'Bank account not found'
+      });
+    }
+
+    const updated = await BankAccount.update(id, { name, type });
+
+    res.json({
+      success: true,
+      message: 'Bank account updated successfully',
+      data: updated
     });
   } catch (error) {
     next(error);
@@ -81,5 +109,6 @@ const deleteAccount = async (req, res, next) => {
 module.exports = {
   getAll,
   create,
+  updateAccount,
   deleteAccount
 };
