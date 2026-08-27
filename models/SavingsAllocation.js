@@ -10,7 +10,7 @@ class SavingsAllocation {
         saa.id as allocation_id
       FROM bank_accounts ba
       LEFT JOIN savings_account_allocations saa ON ba.id = saa.bank_account_id AND saa.category_id = ?
-      WHERE ba.is_active = 1
+      WHERE ba.is_active = 1 AND ba.type = 'savings'
     `;
     const params = [categoryId];
     
