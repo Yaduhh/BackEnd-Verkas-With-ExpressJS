@@ -1209,14 +1209,13 @@ class Transaction {
             const net = gross - tax;
 
             const nameUpper = item.category_name.toUpperCase();
-            const hasExpense = parseInt(item.has_expense) > 0;
             const isOmzet = nameUpper.includes('OMZET') || nameUpper.includes('OMSET');
 
             if (isOmzet) {
                 omzetNetSum += net;
                 omzetTaxSum += tax;
             } else {
-                if ((!item.is_debt_payment || item.is_debt_payment == 0) && !hasExpense) {
+                if (!item.is_debt_payment || item.is_debt_payment == 0) {
                     lainNetSum += net;
                     lainTaxSum += tax;
                 }
@@ -1228,11 +1227,7 @@ class Transaction {
           `SELECT COALESCE(SUM(total), 0) as folder_pengeluaran
            FROM (
               SELECT (CASE 
-                          WHEN t.type = 'expense' THEN 
-                              (CASE WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) ELSE t.amount END) + COALESCE(t.pb1, 0)
-                          ELSE 
-                              -(t.amount + COALESCE(t.pb1, 0))
-                      END) as total 
+                          WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) ELSE t.amount END) + COALESCE(t.pb1, 0) as total 
               FROM transactions t 
               LEFT JOIN categories c ON t.category_id = c.id 
               WHERE t.branch_id = ? 
@@ -1240,12 +1235,7 @@ class Transaction {
                 AND t.status_deleted = false
                 AND t.is_umum = true
                 AND (t.is_savings = 0 OR t.is_savings IS NULL)
-                AND (
-                  t.type = 'expense' 
-                  OR (t.type = 'income' AND t.category_id IN (
-                     SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false
-                  ))
-                )
+                AND t.type = 'expense'
 
               UNION ALL
 
@@ -1260,7 +1250,7 @@ class Transaction {
                 AND t.type = 'expense'
                 AND t.is_savings = 1
            ) as consolidated`,
-          [branchId, startDateOnly, endDateOnly, branchId, branchId, startDateOnly, endDateOnly]
+          [branchId, startDateOnly, endDateOnly, branchId, startDateOnly, endDateOnly]
         );
 
         const folderPengeluaran = parseFloat(expenseBreakdownRes[0]?.folder_pengeluaran || 0);
@@ -1306,7 +1296,7 @@ class Transaction {
         const totalPiutangMitra = parseFloat(mitraPiutangRes[0]?.total_piutang || 0);
 
         const totalPemasukan = omzetNetSum + lainNetSum + pelunasanPiutangBulanLalu;
-        const totalPengeluaran = folderPengeluaran + totalPiutangMitra;
+        const totalPengeluaran = folderPengeluaran;
         const saldo = totalPemasukan - totalPengeluaran;
         const totalPb1 = omzetTaxSum + lainTaxSum;
 
@@ -1316,6 +1306,7 @@ class Transaction {
           pemasukan_lain: lainNetSum,
           pelunasan_piutang_lalu: pelunasanPiutangBulanLalu,
           pengeluaran: totalPengeluaran,
+          total_piutang_mitra: totalPiutangMitra,
           saldo: saldo,
           total_pb1: totalPb1,
           total_pb1_paid: totalPb1Paid,
