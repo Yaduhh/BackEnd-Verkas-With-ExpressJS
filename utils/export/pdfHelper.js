@@ -732,7 +732,7 @@ async function exportBagiHasilToPDF(report, filename, branchName, selectedMonthD
     const fontBold = 'Helvetica-Bold';
     const fontRegular = 'Helvetica';
 
-    const monthLabel = getMonthName(selectedMonthDate.getMonth() + 1);
+    const monthLabel = getMonthName(selectedMonthDate.getMonth());
     const yearLabel = selectedMonthDate.getFullYear();
 
     // 1. Header
