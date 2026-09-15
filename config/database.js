@@ -9,7 +9,7 @@ const pool = mysql.createPool({
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'verkas_db',
   charset: 'utf8mb4',
-  timezone: '+00:00',
+  timezone: '+07:00',
   dateStrings: ['DATE'],
   waitForConnections: true,
   connectionLimit: 10,
