@@ -116,6 +116,8 @@ function formatSection(date, items, transactions, req) {
         pb1: item.pb1 ? parseFloat(item.pb1) : null,
         lampiran: lampiran, // Always array or null with full URLs
         user_name: item.user_name || null,
+        bank_account_name: item.bank_account_name || null,
+        bank_account_type: item.bank_account_type || null,
         edit_accepted: item.edit_accepted !== undefined && item.edit_accepted !== null ? parseInt(item.edit_accepted) : 0, // 0 = default, 1 = pending, 2 = approved, 3 = rejected
         is_debt_payment: item.is_debt_payment === true || item.is_debt_payment === 1 || item.is_debt_payment === '1', // Pembayaran hutang
         paid_amount: item.paid_amount !== undefined && item.paid_amount !== null ? parseFloat(item.paid_amount) : null,

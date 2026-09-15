@@ -106,8 +106,19 @@ class Transaction {
     let selectFields = `
       SELECT t.*, c.name as category_name, c.min_attachment as category_min_attachment, COALESCE(u.name, u.email) as user_name,
              mp.nama as mitra_piutang_nama,
-             ba.name as bank_account_name,
-             ba.type as bank_account_type,
+             COALESCE(ba.name, (
+               SELECT GROUP_CONCAT(DISTINCT ba_sub.name SEPARATOR ', ')
+               FROM transaction_income_details tid
+               JOIN bank_accounts ba_sub ON tid.bank_account_id = ba_sub.id
+               WHERE tid.transaction_id = t.id
+             )) as bank_account_name,
+             COALESCE(ba.type, (
+               SELECT ba_sub.type
+               FROM transaction_income_details tid
+               JOIN bank_accounts ba_sub ON tid.bank_account_id = ba_sub.id
+               WHERE tid.transaction_id = t.id
+               LIMIT 1
+             )) as bank_account_type,
              tr_notif.transaction_id as parent_transaction_id,
              t_parent.transaction_date as parent_transaction_date,
              COALESCE(tr_sum.total_repayment, 0) as total_repayment,
