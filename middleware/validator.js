@@ -18,7 +18,7 @@ const validateLogin = [
   body('email')
     .isEmail()
     .withMessage('Format email tidak valid')
-    .normalizeEmail(),
+    .normalizeEmail({ gmail_remove_dots: false }),
   body('password')
     .notEmpty()
     .withMessage('Password wajib diisi')

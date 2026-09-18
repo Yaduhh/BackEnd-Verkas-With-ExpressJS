@@ -10,7 +10,7 @@ const validateRegister = [
   body('email')
     .isEmail()
     .withMessage('Email must be valid')
-    .normalizeEmail(),
+    .normalizeEmail({ gmail_remove_dots: false }),
   body('password')
     .notEmpty()
     .withMessage('Password is required')
