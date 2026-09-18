@@ -117,7 +117,7 @@ class User {
   }
 
   // Get admin users by owner's team
-  // Returns admin users that were created by this owner OR are assigned as PIC to owner's branches
+  // Returns admin users that were created by this owner/co-owners in their team OR are assigned as PIC to owner's branches
   static async findAdminsByOwnerTeam(ownerId) {
     const OwnerTeam = require('./OwnerTeam');
 
@@ -125,27 +125,41 @@ class User {
     const teams = await OwnerTeam.findByUserId(ownerId);
     const teamIds = teams.map(t => t.id);
 
-    // Build query: get admins created by this owner OR admins that are PIC in owner's branches
+    // Get all creator IDs in this owner's team ecosystem (owner, co-owners, primary owners)
+    let creatorIds = [ownerId];
+    if (teamIds.length > 0) {
+      const memberRows = await query(
+        `SELECT DISTINCT user_id FROM owner_team_members WHERE team_id IN (${teamIds.map(() => '?').join(',')}) AND status = 'active'`,
+        teamIds
+      );
+      const teamOwners = await query(
+        `SELECT DISTINCT primary_owner_id FROM owner_teams WHERE id IN (${teamIds.map(() => '?').join(',')})`,
+        teamIds
+      );
+      creatorIds = [...new Set([
+        ownerId,
+        ...memberRows.map(m => m.user_id),
+        ...teamOwners.map(t => t.primary_owner_id)
+      ])];
+    }
+
+    // Build query: get admins created by this owner/team members OR admins that are PIC in owner's branches
     let sql = `
       SELECT DISTINCT u.id, u.email, u.name, u.role, u.created_at, u.updated_at
       FROM users u
       WHERE u.role = 'admin' 
       AND u.status_deleted = false
       AND (
-        u.created_by = ?
+        u.created_by IN (${creatorIds.map(() => '?').join(',')})
+        OR u.id IN (
+          SELECT DISTINCT bp.user_id
+          FROM branch_pics bp
+          JOIN branches b ON bp.branch_id = b.id
+          WHERE b.status_deleted = false 
+          AND (
+            b.owner_id = ?
     `;
-    const params = [ownerId];
-
-    // Also include admins that are PIC in branches owned by this owner or in owner's teams
-    sql += ` OR u.id IN (
-        SELECT DISTINCT b.pic_id
-        FROM branches b
-        WHERE b.status_deleted = false 
-        AND b.pic_id IS NOT NULL
-        AND (
-          b.owner_id = ?
-    `;
-    params.push(ownerId);
+    const params = [...creatorIds, ownerId];
 
     // Add team filter if owner has teams
     if (teamIds.length > 0) {
@@ -154,8 +168,8 @@ class User {
     }
 
     sql += `)
+        )
       )
-    )
       ORDER BY u.name ASC, u.email ASC`;
 
     return await query(sql, params);

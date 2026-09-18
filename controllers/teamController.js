@@ -40,12 +40,9 @@ const checkAdminLimit = async (req, res, next) => {
       }
     }
 
-    // Count active admins created by this owner
-    const adminCountResult = await query(
-      "SELECT COUNT(*) as count FROM users WHERE role = 'admin' AND created_by = ? AND status_deleted = false",
-      [ownerId]
-    );
-    const currentAdmins = adminCountResult[0]?.count || 0;
+    // Count active admins in this owner's team ecosystem
+    const adminsInTeam = await User.findAdminsByOwnerTeam(ownerId);
+    const currentAdmins = adminsInTeam.length;
 
     res.json({
       success: true,
@@ -272,12 +269,9 @@ const addMember = async (req, res, next) => {
         }
 
         if (maxAdmin !== null) {
-          // Count active admins created by this owner
-          const adminCountResult = await query(
-            "SELECT COUNT(*) as count FROM users WHERE role = 'admin' AND created_by = ? AND status_deleted = false",
-            [ownerId]
-          );
-          const currentAdmins = adminCountResult[0]?.count || 0;
+          // Count active admins in this owner's team ecosystem
+          const adminsInTeam = await User.findAdminsByOwnerTeam(ownerId);
+          const currentAdmins = adminsInTeam.length;
           if (currentAdmins >= maxAdmin) {
             return res.status(403).json({
               success: false,
