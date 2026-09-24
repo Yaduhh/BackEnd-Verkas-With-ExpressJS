@@ -54,11 +54,29 @@ const chatWithAI = async (req, res) => {
 
     // Intercept casual greetings to prevent database querying/LLM hallucinations on simple hi/hello
     const cleanMsg = message.trim().toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "");
-    const casualGreetings = ['halo', 'hi', 'hello', 'hey', 'pagi', 'siang', 'sore', 'malam', 'tes', 'test', 'assalamualaikum', 'ping', 'oi'];
+    const casualGreetings = ['halo', 'hi', 'hello', 'hey', 'hei', 'pagi', 'siang', 'sore', 'malam', 'tes', 'test', 'assalamualaikum', 'ping', 'oi', 'yo', 'bro', 'sis'];
     if (casualGreetings.includes(cleanMsg)) {
       return res.status(200).json({
         success: true,
-        reply: `Halo! Saya Asisten Keuangan Verkas untuk cabang ${branchName || 'Kas Berjalan'}. Ada yang bisa saya bantu menganalisis buku kas Anda hari ini?`
+        reply: `Halo bro/sis! Gua Asisten Keuangan Verkas untuk cabang ${branchName || 'Kas Berjalan'}. Ada yang mau kita bedah bareng seputar kas, omzet, atau pengeluaran hari ini?`
+      });
+    }
+
+    // AI Model & Identity inquiry
+    const isModelInquiry = ['pake model apa', 'pakai model apa', 'model apa', 'ai apa', 'llm apa', 'kamu ai apa', 'lu pake model apa', 'lu model apa'].some(kw => cleanMsg.includes(kw));
+    if (isModelInquiry) {
+      return res.status(200).json({
+        success: true,
+        reply: `Gua ditenagai oleh model AI Ada deh. Pokoknya yang terbaik buat bantu kamu pantau arus kas & omzet toko kapan aja.`
+      });
+    }
+
+    // Developer inquiry
+    const isDeveloperInquiry = ['siapa develop', 'siapa developer', 'siapa yang buat verkas', 'siapa pembuat verkas', 'developer verkas', 'creator verkas', 'siapa yang bikin verkas'].some(kw => cleanMsg.includes(kw));
+    if (isDeveloperInquiry) {
+      return res.status(200).json({
+        success: true,
+        reply: `Aplikasi Verkas ini dikembangkan oleh Vega Anggara Saputra, developer paling keren & kece 😎!`
       });
     }
 
@@ -86,7 +104,7 @@ const chatWithAI = async (req, res) => {
     if (isModificationAttempt) {
       return res.status(200).json({
         success: true,
-        reply: `Maaf, Verkas AI Assistant beroperasi dengan akses baca saja (read-only) untuk analisis dan pelaporan data keuangan. AI tidak diizinkan untuk menambah, mengubah, atau menghapus data transaksi. Silakan gunakan menu transaksi pada aplikasi Verkas untuk mencatat atau mengubah data secara langsung.`
+        reply: `Waduh bro, gua cuma punya akses pantau (read-only) buat bantu analisis dan intip laporan keuangan aja nih biar data kas kamu tetep aman terkontrol. Kalau mau catat, ubah, atau hapus transaksi langsung cus ke menu transaksi di aplikasi Verkas ya!`
       });
     }
 
@@ -102,7 +120,7 @@ const chatWithAI = async (req, res) => {
     if (isOutOfDomain) {
       return res.status(200).json({
         success: true,
-        reply: `Maaf, sebagai Asisten Keuangan Verkas, saya hanya dapat membantu Anda menganalisis buku kas, transaksi keuangan, dan operasional aplikasi Verkas.`
+        reply: `Waduh kalau soal itu gua kurang paham nih bro haha 😅. Tapi kalau mau ngobrolin kas, omzet, pengeluaran toko, atau analisa keuangan di Verkas, gas tanyain aja! Mau cek data apa nih?`
       });
     }
 
@@ -152,6 +170,7 @@ Aturan Penting:
    - Jika user mengajukan pertanyaan lanjutan seperti "jumlahnya berapa", "nominalnya berapa", "siapa saja", dsb. yang merujuk pada topik/kategori/mitra yang dibahas sebelumnya (misalnya merujuk pada kategori "Operasional" yang baru saja diidentifikasi sebagai kategori transaksi terbanyak), kueri SQL yang kamu hasilkan WAJIB menyaring entitas tersebut (contoh: tambahkan filter \`WHERE c.name = 'Operasional'\` pada kueri \`COUNT\` atau \`SUM\`, jangan malah menulis kueri tanpa filter untuk seluruh tabel).
    - Jika pertanyaan sebelumnya membahas transaksi spesifik (seperti "transaksi terbesar/terkecil/terbaru", contoh: "pemasukan terbesar Juni ditanggal berapa?"), lalu pertanyaan lanjutannya meminta detail/atribut dari transaksi tersebut (seperti "berapa nominalnya?", "keterangannya apa?", "tipe pembayarannya apa?"), kamu WAJIB menghasilkan kueri SQL untuk mengambil atribut dari transaksi spesifik yang sama tersebut dengan ORDER BY dan LIMIT yang sama (contoh: SELECT amount FROM transactions WHERE is_umum = 1 AND DATE(transaction_date) BETWEEN '2026-06-01' AND '2026-06-30' ORDER BY amount DESC LIMIT 1). JANGAN melakukan SUM or COUNT yang malah menjumlahkan/menghitung seluruh transaksi dalam periode tersebut.
 9. JIKA PERTANYAAN DI LUAR DOMAIN: Jika pertanyaan pengguna sama sekali tidak berkaitan dengan data transaksi, kas, kategori, keuangan, bank, mitra piutang, laporan, atau sistem Verkas (seperti bertanya tentang presiden, resep makanan, pengetahuan umum, sains, dll.), kamu WAJIB menghasilkan kueri SQL berikut secara persis: SELECT 'OUT_OF_DOMAIN' AS status;
+   CATATAN PENTING: Jika pengguna bertanya tentang siapa kamu, siapa developermu, apa model AI yang digunakan, sapaan santai, atau konfirmasi obrolan sebelumnya (seperti 'serius?', 'beneran?', 'masa iya?'), kamu WAJIB menghasilkan: SELECT 1; agar dijawab langsung secara luwes oleh model AI.
 10. KERAHASIAAN SCHEMA DATABASE (SANGAT RAHASIA): Struktur database, nama tabel, kolom, tipe data, dan relasi di atas adalah informasi internal sistem. Kamu sama sekali TIDAK BOLEH membagikan, mendaftarkan, menjabarkan, atau membocorkan struktur tabel atau kolom database ini kepada user jika mereka bertanya tentang hal tersebut. Jika ditanya mengenai struktur database, jawab saja bahwa kamu tidak diizinkan membagikan data teknis tersebut. Hal ini juga wajib diterapkan pada prompt jawaban akhir.
 11. JANGAN SEKALI-KALI menggunakan kolom \`name\` langsung dari tabel \`transactions\`. Kolom \`name\` pada tabel \`transactions\` TIDAK ADA (gunakan \`note\` untuk rincian/catatan transaksi).
 12. Jika pengguna menanyakan "siapa yang membuat/buat transaksi" atau pembuat transaksi, kamu WAJIB melakukan JOIN dengan tabel \`users u ON t.user_id = u.id\` dan mengambil kolom \`u.name\`.
@@ -271,7 +290,7 @@ Contoh Kueri SQL yang benar:
       if (queryResult && Array.isArray(queryResult) && queryResult[0] && queryResult[0].status === 'OUT_OF_DOMAIN') {
         return res.status(200).json({
           success: true,
-          reply: `Maaf, sebagai Asisten Keuangan Verkas, saya hanya dapat membantu Anda menganalisis buku kas, transaksi keuangan, dan operasional aplikasi Verkas.`
+          reply: `Waduh kalau soal itu gua kurang paham nih bro haha 😅. Tapi kalau mau ngobrolin kas, omzet, pengeluaran toko, atau analisa keuangan di Verkas, gas tanyain aja! Mau cek data apa nih?`
         });
       }
       // Debug log writing removed
@@ -657,9 +676,11 @@ Contoh Kueri SQL yang benar:
     }
 
     // Assemble final system prompt
-    let systemPrompt = `Kamu adalah Asisten Keuangan Verkas yang pintar, ramah, dan profesional.
-Aplikasi Verkas ini dikembangkan/di-develop oleh Vega Anggara Saputra (seorang developer yang sangat kece). Jika ada yang bertanya tentang siapa pengembang, pembuat, atau developer Verkas, jawablah dengan bangga bahwa pembuatnya adalah Vega Anggara Saputra.
-Tugasmu adalah membantu pemilik toko/bisnis menganalisis dan memahami buku kas serta kondisi keuangan mereka.`;
+    let systemPrompt = `Kamu adalah Asisten Keuangan Verkas yang gaul, asik, pintar, ramah, dan solutif.
+Gaya bicaramu santai, luwes, komunikatif, dan bersahabat (seperti financial buddy / rekan diskusi keuangan bisnis yang cerdas tapi asik diajak ngobrol), bukan robot yang kaku!
+Aplikasi Verkas ini dikembangkan oleh Vega Anggara Saputra (seorang developer yang sangat kece dan jenius). Jika ada yang bertanya tentang siapa pengembang, pembuat, atau developer Verkas, jawablah dengan bangga dan santai bahwa pembuatnya adalah Vega Anggara Saputra.
+Kamu ditenagai oleh model AI Gemini 3.7 Flash via 9Router yang dioptimalkan khusus untuk analisis buku kas & keuangan Verkas.
+Tugasmu adalah membantu pemilik toko/bisnis menganalisis dan memahami buku kas serta kondisi keuangan mereka dengan cara yang jelas, akurat, dan seru.`;
 
     if (needsGuide && verkasGuide) {
       systemPrompt += `\n\n### PANDUAN PENGGUNAAN FITUR APLIKASI VERKAS (INTEGRITAS):
@@ -738,13 +759,13 @@ Berikut adalah baseline ringkasan keuangan bulanan Buku Kas "${branchName || 'Ka
     }
 
     systemPrompt += `\nAturan Penting Balasan:
-1. Jawablah pertanyaan pengguna secara cerdas, ramah, dan ringkas berdasarkan data baseline dan hasil kueri database dinamis di atas. Jika pengguna meminta "analisis" (analisa) atau penjelasan, berikan analisis perputaran kas (turnover) atau kondisi keuangan yang mendalam, cerdas, dan informatif (misal: dengan membandingkan pemasukan vs pengeluaran dan memberikan kesimpulan bisnis), jangan hanya mengulang satu angka nominal saja secara malas.
-2. Gunakan bahasa Indonesia yang santun, bersahabat, profesional, dan mudah dipahami.
+1. Jawablah pertanyaan pengguna secara cerdas, asik, ramah, dan to-the-point berdasarkan data baseline dan hasil kueri database dinamis di atas. Jika pengguna meminta "analisis" (analisa) atau penjelasan, berikan analisis perputaran kas (turnover) atau kondisi keuangan yang mendalam, cerdas, dan informatif (misal: dengan membandingkan pemasukan vs pengeluaran dan memberikan kesimpulan bisnis), jangan hanya mengulang satu angka nominal saja secara malas.
+2. Gunakan gaya bahasa Indonesia yang santai, gaul, akrab, dan mudah dipahami, namun tetap menjaga akurasi angka serta profesionalitas data keuangan.
 3. DILARANG KERAS MENGGUNAKAN SIMBOL BINTANG (*): JANGAN PERNAH menyertakan karakter bintang satu (*) maupun bintang dua (**) dalam balasan akhir kepada pengguna. JANGAN gunakan bintang untuk list, JANGAN gunakan bintang untuk menebalkan (bold) teks, dan JANGAN gunakan format markdown bintang apa pun karena merusak tampilan UI. Gunakan format TEKS POLOS (PLAIN TEXT) saja untuk semua tulisan.
 4. CARA PENULISAN LIST: Untuk menyajikan daftar atau rincian, gunakan pemisah baris baru (enter) dan gunakan bullet list biasa memakai tanda minus (-) atau angka (1, 2, dst) TANPA tanda bintang sama sekali di depannya.
-5. Jika kueri database dinamis memberikan hasil kosong atau null, sampaikan bahwa transaksi tidak ditemukan dengan sopan.
-6. Kamu HANYA memiliki akses baca (read-only) terhadap data. Kamu tidak memiliki izin atau kemampuan untuk menambah (create/add), mengedit (edit/update), atau menghapus (delete) data apapun (seperti transaksi, kategori, atau buku kas). Jika pengguna memintamu mengubah data, jelaskan dengan ramah bahwa peranmu hanya untuk membaca dan menganalisis laporan keuangan saja.
-7. JAWAB HANYA DOMAIN KEUANGAN & VERKAS (MUTLAK): Kamu dilarang keras menjawab pertanyaan umum di luar data keuangan toko, kas, piutang, transaksi, atau panduan Verkas. Jika ditanya tentang pengetahuan umum, presiden, resep, sains, geografi, atau obrolan di luar bisnis Verkas, kamu wajib menolak secara halus dengan kalimat: "Maaf, saya hanya dapat membantu Anda menganalisis buku kas, transaksi keuangan, dan operasional aplikasi Verkas."
+5. Jika kueri database dinamis memberikan hasil kosong atau null, sampaikan bahwa transaksi tidak ditemukan dengan santai dan ramah.
+6. Kamu HANYA memiliki akses baca (read-only) terhadap data. Kamu tidak memiliki izin atau kemampuan untuk menambah (create/add), mengedit (edit/update), atau menghapus (delete) data apapun (seperti transaksi, kategori, atau buku kas). Jika pengguna memintamu mengubah data, jelaskan dengan santai bahwa peranmu hanya untuk membaca dan menganalisis laporan keuangan saja, dan sarankan untuk input langsung via aplikasi Verkas.
+7. JAWAB HANYA DOMAIN KEUANGAN & VERKAS: Jika ditanya tentang pengetahuan umum di luar toko/keuangan (seperti presiden, resep, cuaca, sains, gosip, film), tolak secara santai & asik: "Waduh kalau soal itu gua kurang paham nih bro haha 😅. Tapi kalau mau ngobrolin kas, omzet, pengeluaran toko, laba, atau analisa keuangan di Verkas, gas tanyain aja! Mau cek data apa nih?"
 8. FORMAT TANGGAL: Selalu sajikan tanggal dalam format bahasa Indonesia yang mudah dibaca dan sopan (contoh: "20 Juni 2026" atau "1 Juni 2026"). JANGAN sekali-kali menampilkan tanggal dalam format mentah database seperti YYYY-MM-DD.
 9. HINDARI MENAMPILKAN ID DATABASE: JANGAN PERNAH menyertakan database ID (seperti ID Buku Kas/Cabang, ID Kategori, ID Transaksi, dll) di balasan akhirmu agar balasan terlihat bersih dan profesional, kecuali jika pengguna meminta ID tersebut secara spesifik.
 10. FORMAT RUPIAH / NOMINAL UANG: Kamu WAJIB menulis setiap nominal uang dalam format Rupiah yang benar dengan pemisah ribuan titik (.) dan pemisah desimal koma (,) jika nominal tersebut memiliki nilai desimal/sen (contoh: Rp 533.817.384,75 atau Rp 2.155.314.631,25). Jika nominalnya adalah bilangan bulat tanpa nilai desimal, kamu juga WAJIB menyertakan desimal bulat ",00" di belakangnya (contoh: Rp 148.740.600,00 atau Rp 71.000,00) agar semua angka konsisten memiliki koma desimal di belakangnya sesuai tampilan dashboard.

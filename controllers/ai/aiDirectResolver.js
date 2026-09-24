@@ -120,13 +120,13 @@ function tryResolveSubscriptionQueryDirectly(message, subscriptionPlans, activeS
 
 async function tryResolveExtremeTransactionQueryDirectly(message, branchId) {
   const msg = message.toLowerCase();
-  const hasLargest = msg.includes('terbesar') || msg.includes('paling besar') || msg.includes('maksimal');
-  const hasSmallest = msg.includes('terkecil') || msg.includes('paling kecil') || msg.includes('minimal');
+  const hasLargest = msg.includes('terbesar') || msg.includes('paling besar') || msg.includes('maksimal') || msg.includes('terbanyak');
+  const hasSmallest = msg.includes('terkecil') || msg.includes('paling kecil') || msg.includes('minimal') || msg.includes('tersedikit');
   
   if (!hasLargest && !hasSmallest) return null;
   
   // check if it's about transactions
-  const hasTxKeyword = ['transaksi', 'pembayaran', 'belanja', 'pemasukan', 'pengeluaran', 'omzet', 'omset'].some(kw => msg.includes(kw));
+  const hasTxKeyword = ['transaksi', 'pembayaran', 'belanja', 'pemasukan', 'pemasuka', 'pengeluaran', 'pengeluara', 'keluar', 'masuk', 'omzet', 'omset', 'biaya'].some(kw => msg.includes(kw));
   if (!hasTxKeyword) return null;
 
   // determine period dynamically
@@ -157,12 +157,10 @@ async function tryResolveExtremeTransactionQueryDirectly(message, branchId) {
       targetYear = now.getFullYear();
       targetMonthName = now.toLocaleDateString('id-ID', { month: 'long' });
     } else {
-      // Default to previous month if no month specified
-      const prevDate = new Date();
-      prevDate.setMonth(now.getMonth() - 1);
-      targetMonth = prevDate.getMonth() + 1;
-      targetYear = prevDate.getFullYear();
-      targetMonthName = prevDate.toLocaleDateString('id-ID', { month: 'long' });
+      // Default to current month if no month specified
+      targetMonth = now.getMonth() + 1;
+      targetYear = now.getFullYear();
+      targetMonthName = now.toLocaleDateString('id-ID', { month: 'long' });
     }
   }
 
@@ -170,10 +168,13 @@ async function tryResolveExtremeTransactionQueryDirectly(message, branchId) {
   const lastDay = new Date(targetYear, targetMonth, 0).getDate();
   const endDate = `${targetYear}-${String(targetMonth).padStart(2, '0')}-${lastDay}`;
 
-  const type = msg.includes('pengeluaran') ? 'expense' : (msg.includes('pemasukan') || msg.includes('omzet') || msg.includes('omset') ? 'income' : null);
+  const isExpense = ['pengeluaran', 'pengeluara', 'belanja', 'biaya', 'keluar'].some(kw => msg.includes(kw));
+  const isIncome = ['pemasukan', 'pemasuka', 'omzet', 'omset', 'masuk'].some(kw => msg.includes(kw));
+  const type = isExpense ? 'expense' : (isIncome ? 'income' : null);
   const typeFilter = type ? `AND t.type = '${type}'` : '';
   const order = hasLargest ? 'DESC' : 'ASC';
   const label = hasLargest ? 'terbesar' : 'terkecil';
+  const typeLabel = isExpense ? 'Pengeluaran' : (isIncome ? 'Pemasukan' : 'Transaksi');
 
   try {
     const rawSql = `
@@ -188,14 +189,14 @@ async function tryResolveExtremeTransactionQueryDirectly(message, branchId) {
     `;
     const [result] = await query(rawSql, [branchId, startOfMonth, endDate]);
     if (!result) {
-      return `Tidak ada data transaksi yang tercatat pada Kas Berjalan untuk bulan ${targetMonthName} ${targetYear}.`;
+      return `Belum ada data transaksi yang tercatat di Kas Berjalan untuk bulan ${targetMonthName} ${targetYear} nih.`;
     }
 
     const dateStr = new Date(result.transaction_date).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
     const categoryStr = result.category_name ? `kategori ${result.category_name}` : 'tanpa kategori';
     const noteStr = result.note ? ` ("${result.note}")` : '';
 
-    return `Transaksi ${label} pada Kas Berjalan untuk bulan ${targetMonthName} ${targetYear} adalah transaksi ${categoryStr} senilai ${formatIDR(result.amount)}${noteStr} pada tanggal ${dateStr}.`;
+    return `${typeLabel} ${label} di Kas Berjalan bulan ${targetMonthName} ${targetYear} itu ada ${categoryStr} senilai ${formatIDR(result.amount)}${noteStr} pada tanggal ${dateStr}.`;
   } catch (err) {
     console.error('[AI-Service] tryResolveExtremeTransactionQueryDirectly failed:', err);
     return null;
@@ -360,7 +361,7 @@ async function tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchN
   const writeAction = ['buatkan', 'buat', 'bikin', 'tambah', 'tambahkan', 'input', 'masukkan', 'sisipkan', 'edit', 'ubah', 'hapus', 'delete', 'remove'].some(w => msg.includes(w));
   const writeTarget = ['transaksi', 'pemasukan', 'pengeluaran', 'data', 'catatan', 'nota', 'piutang'].some(t => msg.includes(t));
   if (!isQuestion && writeAction && writeTarget) {
-    return 'Maaf, sebagai AI Assistant saya hanya memiliki akses baca (read-only) untuk menganalisis laporan keuangan Anda, sehingga tidak dapat membuat, mengubah, atau menghapus transaksi.\n\nAnda dapat menambahkan atau mengelola transaksi secara langsung melalui tombol "+ Transaksi" pada aplikasi Verkas.';
+    return 'Waduh bro, gua cuma punya akses pantau (read-only) buat bantu analisis laporan keuangan nih. Kalau mau catat atau ubah transaksi, langsung cus lewat menu Transaksi di aplikasi Verkas ya!';
   }
 
   const comparativeKeywords = ['bandingkan', 'banding', 'perbandingan', 'selisih', 'vs', 'perkembangan', 'tren', 'analisis', 'analisa', 'kenapa', 'mengapa', 'sebab', 'alasan'];
@@ -371,6 +372,7 @@ async function tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchN
 
   // If query is asking about creator/user, specific details, notes, categories, attachments, reasons, or specific single transactions, DO NOT hijack as monthly summary!
   const isDetailOrAttributeQuery = [
+    'terbesar', 'terkecil', 'maksimal', 'minimal', 'paling besar', 'paling kecil', 'paling banyak', 'terbanyak', 'tersedikit',
     'siapa', 'dibuat', 'buat', 'pembuat', 'input', 'oleh siapa', 'user', 'admin', 'staf', 'staff', 'pic',
     'keterangan', 'catatan', 'note', 'deskripsi', 'rincian', 'detail', 'transaksi apa', 'kategori apa',
     'nama transaksi', 'nomor', 'nota', 'lampiran', 'bukti', 'kapan', 'tanggal berapa', 'jam berapa',
@@ -715,9 +717,9 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada ${m2
     topic = 'rata-rata';
   } else if (msg.includes('pb1') || msg.includes('pajak')) {
     topic = 'pajak';
-  } else if (msg.includes('pengeluaran') || msg.includes('belanja') || msg.includes('biaya')) {
+  } else if (['pengeluaran', 'pengeluara', 'belanja', 'biaya', 'keluar'].some(w => msg.includes(w))) {
     topic = 'pengeluaran';
-  } else if (msg.includes('pemasukan') && !msg.includes('lain') && !msg.includes('piutang')) {
+  } else if (['pemasukan', 'pemasuka', 'masuk'].some(w => msg.includes(w)) && !msg.includes('lain') && !msg.includes('piutang')) {
     topic = 'pemasukan';
   } else if (msg.includes('omzet') || msg.includes('omset')) {
     topic = 'omzet';
@@ -726,23 +728,26 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada ${m2
   } else if (msg.includes('pemasukan lain') || msg.includes('lain-lain')) {
     topic = 'pemasukan lain';
   } else if (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0) {
-    const lastUserMsg = [...chatHistory].reverse().find(h => h.role === 'user');
-    if (lastUserMsg) {
-      const lastContent = lastUserMsg.content.toLowerCase();
-      if (['rata', 'average', 'mean', 'sehari', 'per hari', 'per transaksi'].some(w => lastContent.includes(w))) {
-        topic = 'rata-rata';
-      } else if (lastContent.includes('pb1') || lastContent.includes('pajak')) {
-        topic = 'pajak';
-      } else if (lastContent.includes('pengeluaran') || lastContent.includes('belanja') || lastContent.includes('biaya')) {
-        topic = 'pengeluaran';
-      } else if (lastContent.includes('pemasukan') && !lastContent.includes('lain') && !lastContent.includes('piutang')) {
-        topic = 'pemasukan';
-      } else if (lastContent.includes('omzet') || lastContent.includes('omset')) {
-        topic = 'omzet';
-      } else if (lastContent.includes('saldo') || lastContent.includes('laba') || lastContent.includes('untung') || lastContent.includes('bersih') || lastContent.includes('kas berjalan') || lastContent.includes('kas harian') || lastContent.includes('saldo berjalan')) {
-        topic = 'saldo';
-      } else if (lastContent.includes('pemasukan lain') || lastContent.includes('lain-lain')) {
-        topic = 'pemasukan lain';
+    const isSpecialOrExtreme = ['terbesar', 'terkecil', 'paling', 'siapa', 'kapan', 'apa', 'kenapa', 'mengapa', 'berapa'].some(w => msg.includes(w));
+    if (!isSpecialOrExtreme) {
+      const lastUserMsg = [...chatHistory].reverse().find(h => h.role === 'user');
+      if (lastUserMsg) {
+        const lastContent = lastUserMsg.content.toLowerCase();
+        if (['rata', 'average', 'mean', 'sehari', 'per hari', 'per transaksi'].some(w => lastContent.includes(w))) {
+          topic = 'rata-rata';
+        } else if (lastContent.includes('pb1') || lastContent.includes('pajak')) {
+          topic = 'pajak';
+        } else if (['pengeluaran', 'pengeluara', 'belanja', 'biaya', 'keluar'].some(w => lastContent.includes(w))) {
+          topic = 'pengeluaran';
+        } else if (['pemasukan', 'pemasuka', 'masuk'].some(w => lastContent.includes(w)) && !lastContent.includes('lain') && !lastContent.includes('piutang')) {
+          topic = 'pemasukan';
+        } else if (lastContent.includes('omzet') || lastContent.includes('omset')) {
+          topic = 'omzet';
+        } else if (lastContent.includes('saldo') || lastContent.includes('laba') || lastContent.includes('untung') || lastContent.includes('bersih') || lastContent.includes('kas berjalan') || lastContent.includes('kas harian') || lastContent.includes('saldo berjalan')) {
+          topic = 'saldo';
+        } else if (lastContent.includes('pemasukan lain') || lastContent.includes('lain-lain')) {
+          topic = 'pemasukan lain';
+        }
       }
     }
   }
@@ -865,16 +870,16 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada ${m2
     const totalTx = summary.total_transactions || 457;
     const avgTx = totalOmzet / totalTx;
 
-    return `Rata-Rata Omzet Kas Berjalan bulan ${targetMonthName} ${year} (${daysInMonth} hari, ${totalTx} transaksi):\n\n` +
+    return `Nih rata-rata omzet Kas Berjalan bulan ${targetMonthName} ${year} (${daysInMonth} hari, ${totalTx} transaksi):\n\n` +
            `- Total Omzet (Bersih): ${formatIDR(totalOmzet)}\n` +
            `- Rata-Rata Omzet per Hari: ${formatIDR(avgDaily)} / hari\n` +
            `- Rata-Rata Omzet per Transaksi: ${formatIDR(avgTx)} / transaksi`;
   }
 
   if (topic === 'summary') {
-    return `Ringkasan Laporan Keuangan Kas Berjalan bulan ${targetMonthName} ${year} untuk Buku Kas "${branchName}":\n\n` +
+    return `Nih ringkasan laporan keuangan Kas Berjalan bulan ${targetMonthName} ${year} buat cabang "${branchName}":\n\n` +
            `- Total Omzet (Bersih): ${formatIDR(totalOmzet)}\n` +
-           `- Pengeluaran: ${formatIDR(pengeluaran)}\n` +
+           `- Total Pengeluaran: ${formatIDR(pengeluaran)}\n` +
            `- Pemasukan Lain-Lain: ${formatIDR(pemasukanLain)}\n` +
            `- Pelunasan Piutang Periode Lalu: ${formatIDR(summary.pelunasan_piutang_lalu || 0)}\n` +
            `- Pajak PB1: ${formatIDR(pb1)} (Terbayar: ${formatIDR(pb1Terbayar)}, Sisa: ${formatIDR(pb1Sisa)})\n` +
@@ -935,7 +940,7 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada ${m2
             }
           }
 
-          return `Rincian Tabungan Akumulasi Pajak PB1 untuk Buku Kas "${branchName}":\n\n` +
+          return `Nih rincian tabungan akumulasi Pajak PB1 buat cabang "${branchName}":\n\n` +
                  `- Saldo PB1 Tersedia Saat Ini: ${formatIDR(saldoTersedia)}\n` +
                  `- Total PB1 Terkumpul: ${formatIDR(totalTerkumpul)}\n` +
                  `- Total PB1 Disetor: ${formatIDR(totalDisetor)}` +
@@ -946,14 +951,14 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada ${m2
       }
     }
 
-    return `Rincian Pajak PB1 Kas Berjalan bulan ${targetMonthName} ${year} untuk Buku Kas "${branchName}":\n\n` +
+    return `Nih rincian Pajak PB1 Kas Berjalan bulan ${targetMonthName} ${year} buat cabang "${branchName}":\n\n` +
            `- Total PB1 Terkumpul: ${formatIDR(pb1)}\n` +
            `- Total PB1 Terbayar/Disetor: ${formatIDR(pb1Terbayar)}\n` +
            `- Saldo PB1 Tersedia (Sisa PB1): ${formatIDR(pb1Sisa)}`;
   }
 
   if (topic === 'saldo') {
-    return `Total Saldo Kas Berjalan (Bersih) pada bulan ${targetMonthName} ${year} adalah ${formatIDR(saldoNetto)}.`;
+    return `Total Saldo Kas Berjalan (Bersih) bulan ${targetMonthName} ${year} saat ini ada di angka ${formatIDR(saldoNetto)}.`;
   }
 
   if (topic === 'pemasukan') {
