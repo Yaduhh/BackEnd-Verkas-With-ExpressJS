@@ -834,10 +834,197 @@ async function exportBagiHasilToPDF(report, filename, branchName, selectedMonthD
     });
 }
 
+// Export Savings Report (Laporan Simpanan) to PDF
+async function exportSavingsReportToPDF(reportData, filename, branchName, selectedMonthDate, workingDays) {
+    const filepath = path.join(EXPORTS_DIR, filename);
+    const doc = new PDFDocument({
+        margin: 40,
+        size: 'A4',
+        info: {
+            Title: `Laporan Simpanan ${branchName}`,
+            Author: 'VERKAS'
+        }
+    });
+
+    const writeStream = fs.createWriteStream(filepath);
+    doc.pipe(writeStream);
+
+    const pageWidth = doc.page.width;
+    const margin = 40;
+    const contentWidth = pageWidth - 2 * margin;
+    let y = margin;
+
+    const checkNewPage = (h) => {
+        if (y + h > doc.page.height - 40) {
+            doc.addPage();
+            y = margin;
+            return true;
+        }
+        return false;
+    };
+
+    const formatCurrencyForPDF = (amount) => {
+        if (amount === undefined || amount === null || isNaN(amount)) return '0';
+        return new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(amount);
+    };
+
+    const fontBold = 'Helvetica-Bold';
+    const fontRegular = 'Helvetica';
+
+    const monthIndex = selectedMonthDate.getMonth();
+    const year = selectedMonthDate.getFullYear();
+    const lastDay = new Date(year, monthIndex + 1, 0).getDate();
+    const monthName = getMonthName(monthIndex).toUpperCase();
+    const periodText = `01 - ${String(lastDay).padStart(2, '0')} ${monthName} ${year}`;
+
+    // Header Title
+    doc.font(fontBold).fontSize(14).fillColor('#000000').text('LAPORAN SIMPANAN', margin, y, { align: 'center', width: contentWidth });
+    y += 18;
+    doc.font(fontBold).fontSize(13).text(branchName.toUpperCase(), margin, y, { align: 'center', width: contentWidth });
+    y += 24;
+
+    // Period and Working Days
+    doc.fontSize(9).font(fontBold).text('PER TANGGAL', margin, y);
+    doc.text(':', margin + 180, y);
+    doc.font(fontRegular).text(periodText, margin + 200, y);
+    y += 14;
+
+    doc.fontSize(9).font(fontBold).text('JUMLAH HARI KERJA', margin, y);
+    doc.text(':', margin + 180, y);
+    doc.font(fontRegular).text(`${workingDays || 30} HARI`, margin + 200, y);
+    y += 18;
+
+    // Double Divider Line at top
+    doc.strokeColor('#000000').lineWidth(2).moveTo(margin, y).lineTo(margin + contentWidth, y).stroke();
+    y += 3;
+    doc.strokeColor('#000000').lineWidth(1).moveTo(margin, y).lineTo(margin + contentWidth, y).stroke();
+    y += 14;
+
+    const categories = reportData.categories || [];
+
+    for (let i = 0; i < categories.length; i++) {
+        const cat = categories[i];
+        
+        // Calculate needed minimum height for banner + basic rows
+        checkNewPage(110);
+
+        // 1. Green Header Banner
+        const bannerHeight = 18;
+        doc.rect(margin, y, contentWidth, bannerHeight).fillColor('#cbe8c7').fill();
+        doc.fillColor('#000000').font(fontBold).fontSize(9.5).text(cat.name.toUpperCase(), margin + 6, y + 4);
+        y += bannerHeight + 8;
+
+        // 2. Saldo Awal
+        doc.fillColor('#000000').font(fontBold).fontSize(9).text('Saldo Awal', margin + 6, y);
+        doc.text('Rp', margin + contentWidth - 120, y);
+        doc.text(formatCurrencyForPDF(cat.saldoAwal), margin + contentWidth - 95, y, { align: 'right', width: 95 });
+        y += 16;
+
+        // 3. Penambahan Simpanan
+        const penambahan = Number(cat.penambahan) || 0;
+        let penambahanLabel = 'Penambahan Simpanan';
+        if (workingDays > 0 && penambahan > 0) {
+            const daily = Math.round(penambahan / workingDays);
+            penambahanLabel = `Penambahan Simpanan ( ${formatCurrencyForPDF(daily)} x ${workingDays} hari )`;
+        }
+        doc.font(fontBold).fontSize(9).text(penambahanLabel, margin + 6, y);
+        doc.text('Rp', margin + contentWidth - 120, y);
+        doc.text(penambahan > 0 ? formatCurrencyForPDF(penambahan) : '-', margin + contentWidth - 95, y, { align: 'right', width: 95 });
+        y += 16;
+
+        // 4. Bunga Bank (if applicable)
+        if (cat.bungaBank !== undefined && cat.bungaBank !== null) {
+            doc.font(fontBold).fontSize(9).text('Bunga Bank', margin + 6, y);
+            doc.text('Rp', margin + contentWidth - 120, y);
+            doc.text(cat.bungaBank > 0 ? formatCurrencyForPDF(cat.bungaBank) : '-', margin + contentWidth - 95, y, { align: 'right', width: 95 });
+            y += 16;
+        }
+
+        // 5. Rincian Pengeluaran
+        doc.font(fontBold).fontSize(9).text('Rincian Pengeluaran', margin + 6, y);
+        y += 14;
+
+        const expenses = cat.expenses || [];
+        if (expenses.length === 0) {
+            doc.font(fontRegular).fontSize(9).text('-', margin + 20, y);
+            doc.text('=', margin + contentWidth - 180, y);
+            doc.text('Rp', margin + contentWidth - 155, y);
+            doc.text('-', margin + contentWidth - 95, y, { align: 'right', width: 95 });
+            y += 16;
+        } else {
+            const noteWidth = contentWidth - 235;
+
+            for (let j = 0; j < expenses.length; j++) {
+                const exp = expenses[j];
+                const cleanNote = String(exp.note || '-').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+                
+                doc.font(fontRegular).fontSize(8.5);
+                const noteHeight = doc.heightOfString(cleanNote, { width: noteWidth });
+                const rowHeight = Math.max(15, noteHeight + 3);
+
+                checkNewPage(rowHeight + 2);
+
+                // Small green marker / flag
+                doc.save();
+                doc.fillColor('#16a34a');
+                doc.polygon([margin + 8, y + 2.5], [margin + 14, y + 5.5], [margin + 8, y + 8.5]).fill();
+                doc.restore();
+
+                // Day
+                doc.font(fontRegular).fontSize(8.5).fillColor('#000000').text(exp.day, margin + 20, y);
+
+                // Note with multiline support
+                doc.text(cleanNote, margin + 42, y, { width: noteWidth });
+
+                // = Rp Amount (aligned to top of the row)
+                doc.text('=', margin + contentWidth - 180, y);
+                doc.text('Rp', margin + contentWidth - 155, y);
+                doc.text(formatCurrencyForPDF(exp.amount), margin + contentWidth - 95, y, { align: 'right', width: 95 });
+
+                y += rowHeight;
+            }
+        }
+
+        // Total Biaya Pengeluaran
+        checkNewPage(45);
+        const totalPengeluaran = Number(cat.totalPengeluaran) || 0;
+        doc.font(fontBold).fontSize(9).text('Total Biaya Pengeluaran', margin + contentWidth - 290, y, { align: 'right', width: 140 });
+        doc.text('Rp', margin + contentWidth - 120, y);
+        doc.text(totalPengeluaran > 0 ? formatCurrencyForPDF(totalPengeluaran) : '-', margin + contentWidth - 95, y, { align: 'right', width: 95 });
+        y += 18;
+
+        // 6. Saldo Akhir with Green Highlight Box
+        doc.strokeColor('#000000').lineWidth(0.75).moveTo(margin, y).lineTo(margin + contentWidth, y).stroke();
+        y += 2;
+
+        const boxHeight = 18;
+        const boxWidth = 120;
+        doc.rect(margin + contentWidth - boxWidth, y, boxWidth, boxHeight).fillColor('#cbe8c7').fill();
+
+        doc.fillColor('#000000').font(fontBold).fontSize(9.5).text('Saldo Akhir', margin + 6, y + 4);
+        doc.text('Rp', margin + contentWidth - boxWidth + 8, y + 4);
+        doc.text(formatCurrencyForPDF(cat.saldoAkhir), margin + contentWidth - 95, y + 4, { align: 'right', width: 90 });
+        y += boxHeight + 2;
+
+        // Category Box Border / Solid separator line
+        doc.strokeColor('#000000').lineWidth(2).moveTo(margin, y).lineTo(margin + contentWidth, y).stroke();
+        y += 14;
+    }
+
+    doc.end();
+
+    return new Promise((resolve, reject) => {
+        writeStream.on('finish', () => resolve(filepath));
+        writeStream.on('error', reject);
+        doc.on('error', reject);
+    });
+}
+
 module.exports = {
     exportToPDF,
     exportBukuKasToPDF,
     exportCategoryToPDF,
     exportFinancialReportToPDF,
-    exportBagiHasilToPDF
+    exportBagiHasilToPDF,
+    exportSavingsReportToPDF
 };

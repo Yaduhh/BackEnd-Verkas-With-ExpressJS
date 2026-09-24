@@ -16,10 +16,26 @@ async function callOpenRouter(messages) {
   };
   let body = {
     messages: messages,
-    temperature: 0.1 // Low temperature for factual consistency
+    temperature: 0.1, // Low temperature for factual consistency
+    stream: false
   };
 
-  if (provider === 'groq') {
+  if (provider === 'router' || provider === '9router' || provider === 'custom' || provider === 'openai') {
+    const baseUrl = process.env.AI_BASE_URL || 'https://9router.ngodein.com/v1';
+    const apiKey = process.env.AI_API_KEY;
+    const modelName = process.env.AI_MODEL || 'ag/gemini-3.7-flash-high';
+
+    if (!apiKey) {
+      throw new Error('AI_API_KEY is not defined in .env file.');
+    }
+
+    url = baseUrl.endsWith('/chat/completions')
+      ? baseUrl
+      : `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
+
+    headers['Authorization'] = `Bearer ${apiKey}`;
+    body.model = modelName;
+  } else if (provider === 'groq') {
     const apiKey = process.env.GROQ_API_KEY;
     const modelName = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 
@@ -59,7 +75,27 @@ async function callOpenRouter(messages) {
     throw new Error(`AI API error (${provider}): ${response.status} ${response.statusText} - ${errorText}`);
   }
 
-  const data = await response.json();
+  const rawText = await response.text();
+  let data;
+  try {
+    data = JSON.parse(rawText);
+  } catch (e) {
+    // Fallback: If returned in SSE stream format like `data: {"id"...}`
+    const lines = rawText.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('data:') && trimmed !== 'data: [DONE]') {
+        try {
+          const parsedChunk = JSON.parse(trimmed.replace(/^data:\s*/, ''));
+          if (parsedChunk.choices && parsedChunk.choices[0]?.message?.content) {
+            return parsedChunk.choices[0].message.content;
+          }
+        } catch {}
+      }
+    }
+    throw new Error(`AI API (${provider}) returned unparseable response: ${rawText.slice(0, 200)}`);
+  }
+
   if (!data.choices || data.choices.length === 0) {
     throw new Error(`AI API (${provider}) returned empty choices`);
   }

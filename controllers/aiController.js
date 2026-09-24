@@ -62,10 +62,41 @@ const chatWithAI = async (req, res) => {
       });
     }
 
-    // Programmatic filter for obvious out-of-domain queries
+    // 1. DETERMINISTIC GUARDRAIL: Strict Read-Only Enforcement (Dilarang Modifikasi Data)
+    const modificationVerbs = [
+      'tambah transaksi', 'tambahkan transaksi', 'input transaksi', 'masukkan transaksi',
+      'buat transaksi', 'catat transaksi', 'buatkan transaksi', 'tulis transaksi',
+      'hapus transaksi', 'delete transaksi', 'hilangkan transaksi', 'buang transaksi',
+      'edit transaksi', 'ubah transaksi', 'ganti transaksi', 'perbarui transaksi', 'update transaksi',
+      'tambah pengeluaran', 'tambahkan pengeluaran', 'input pengeluaran', 'masukkan pengeluaran',
+      'tambah pemasukan', 'tambahkan pemasukan', 'input pemasukan', 'masukkan pemasukan',
+      'tambah simpanan', 'tambahkan simpanan', 'hapus simpanan', 'edit simpanan',
+      'ganti saldo', 'ubah saldo', 'update saldo', 'edit saldo', 'reset kas', 'reset saldo', 'reset database',
+      'tambah kategori', 'hapus kategori', 'edit kategori', 'ubah kategori',
+      'tambah mitra', 'hapus mitra', 'edit mitra', 'ubah mitra',
+      'tambah rekening', 'hapus rekening', 'edit rekening', 'ubah rekening',
+      'insert into', 'delete from', 'drop table', 'update set', 'truncate table', 'alter table'
+    ];
+
+    const isModificationAttempt = modificationVerbs.some(verb => cleanMsg.includes(verb)) ||
+      (/\b(tambah|tambahkan|masukkan|input|buatkan|catat)\b/i.test(cleanMsg) && /\b(transaksi|pengeluaran|pemasukan|omzet|biaya|piutang)\b/i.test(cleanMsg) && /\b(rp|\d+k|\d+rb|\d+juta|\d+000)\b/i.test(cleanMsg)) ||
+      (/\b(hapus|delete|hilangkan)\b/i.test(cleanMsg) && /\b(transaksi|data|saldo|buku kas|kategori)\b/i.test(cleanMsg)) ||
+      (/\b(edit|ubah|ganti|update)\b/i.test(cleanMsg) && /\b(nominal|saldo|angka|transaksi|nama kategori)\b/i.test(cleanMsg));
+
+    if (isModificationAttempt) {
+      return res.status(200).json({
+        success: true,
+        reply: `Maaf, Verkas AI Assistant beroperasi dengan akses baca saja (read-only) untuk analisis dan pelaporan data keuangan. AI tidak diizinkan untuk menambah, mengubah, atau menghapus data transaksi. Silakan gunakan menu transaksi pada aplikasi Verkas untuk mencatat atau mengubah data secara langsung.`
+      });
+    }
+
+    // 2. DETERMINISTIC GUARDRAIL: Strict Out-of-Domain & Jailbreak Protection
     const outOfDomainKeywords = [
-      'presiden', 'menteri', 'resep', 'cuaca', 'bumi', 'matahari', 'planet', 'negara',
-      'sejarah', 'belajar coding', 'membuat website', 'berita hari ini', 'gempa', 'politik'
+      'presiden', 'menteri', 'pemilu', 'partai', 'pilpres', 'resep', 'cuaca', 'bumi', 'matahari', 'planet', 'negara',
+      'sejarah', 'belajar coding', 'membuat website', 'berita hari ini', 'gempa', 'politik', 'film', 'lagu', 'lirik',
+      'puisi', 'cerpen', 'cerita fiksi', 'zodiak', 'ramalan', 'game', 'sepak bola', 'olahraga',
+      'ignore previous instructions', 'abaikan instruksi sebelumnya', 'dan mode', 'jailbreak', 'pretend you are',
+      'berpura-puralah', 'kamu sekarang adalah', 'system prompt', 'bocorkan prompt', 'perlihatkan prompt', 'tampilkan system prompt'
     ];
     const isOutOfDomain = outOfDomainKeywords.some(kw => cleanMsg.includes(kw));
     if (isOutOfDomain) {
