@@ -44,14 +44,6 @@ function isGeneralMonthlyQuery(message, chatHistory) {
     }
   }
 
-  // Keywords indicating a monthly or current period query
-  const months = Object.keys(GLOBAL_MONTH_MAP);
-
-  const hasMonth = months.some(m => msg.includes(m));
-  const hasThisMonth = msg.includes('bulan ini') || msg.includes('hari ini') || msg.includes('sekarang');
-
-  if (!hasMonth && !hasThisMonth) return false;
-
   // General summary indicators
   const generalKeywords = [
     'laporan', 'ringkasan', 'keuangan',
@@ -59,11 +51,12 @@ function isGeneralMonthlyQuery(message, chatHistory) {
     'pemasukan', 'pengeluaran', 'belanja',
     'saldo', 'laba bersih', 'laba', 'keuntungan', 'netto',
     'pb1', 'pajak',
-    'kas berjalan', 'total kas',
+    'kas berjalan', 'total kas', 'kondisi kas', 'kas toko',
     'pemasukan lain-lain', 'pemasukan lain', 'pemasukan lainnya'
   ];
 
   const hasGeneralKeyword = generalKeywords.some(kw => msg.includes(kw)) || inheritedTopic !== '';
+  if (!hasGeneralKeyword) return false;
 
   // Exclude specific category/repayment queries that require dynamic SQL
   const specificExclusions = [
@@ -79,7 +72,7 @@ function isGeneralMonthlyQuery(message, chatHistory) {
   ].some(w => msg.includes(w));
   if (hasDetailedOrSorted) return false;
 
-  return hasGeneralKeyword && !isSpecific;
+  return true;
 }
 
 // Direct resolver for Verkas packages / subscriptions
@@ -794,26 +787,17 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada ${m2
       targetMonth = prevDate.getMonth() + 1;
       year = prevDate.getFullYear();
       targetMonthName = prevDate.toLocaleDateString('id-ID', { month: 'long' });
-    } else if (msg.includes('bulan ini') || msg.includes('hari ini') || msg.includes('sekarang')) {
+    } else {
+      // Default to current month (bulan berjalan)
       targetMonth = now.getMonth() + 1;
+      year = now.getFullYear();
       targetMonthName = now.toLocaleDateString('id-ID', { month: 'long' });
     }
   }
 
-  // If no specific topic OR month was requested in the message (and not inherited), do not hijack as monthly summary!
-  if (!topic) return null;
-  if (targetMonth === null) return null;
-
-  // Only return direct monthly summary if the CURRENT message actually asks for a financial metric or period
-  const hasCurrentMonthOrPeriod = Object.keys(GLOBAL_MONTH_MAP).some(m => msg.includes(m)) ||
-    msg.includes('bulan ini') || msg.includes('bulan lalu') || msg.includes('bulan kemarin') || msg.includes('sekarang');
-  const hasCurrentFinancialTopic = [
-    'omzet', 'omset', 'pengeluaran', 'belanja', 'biaya', 'pemasukan', 'saldo', 'laba', 'untung', 'bersih',
-    'kas berjalan', 'pb1', 'pajak', 'laporan', 'ringkasan', 'rata', 'average'
-  ].some(w => msg.includes(w));
-
-  if (!hasCurrentMonthOrPeriod && !hasCurrentFinancialTopic) {
-    return null;
+  // If no specific topic was requested in the message (and not inherited), default to summary
+  if (!topic) {
+    topic = 'summary';
   }
 
   const monthStr = `${year}-${String(targetMonth).padStart(2, '0')}`;
@@ -958,11 +942,18 @@ Terjadi ${trend} saldo kas bersih sebesar ${formatIDR(Math.abs(diff))} pada ${m2
   }
 
   if (topic === 'saldo') {
-    return `Total Saldo Kas Berjalan (Bersih) bulan ${targetMonthName} ${year} saat ini ada di angka ${formatIDR(saldoNetto)}.`;
+    const surplusDefisit = saldoNetto >= 0 ? 'Surplus' : 'Defisit';
+    return `Untuk buku kas "${branchName}" di periode ${targetMonthName} ${year}, kondisi saldo Kas Berjalan kamu saat ini dalam posisi ${surplusDefisit} sebesar ${formatIDR(saldoNetto)}.\n\n` +
+           `Berikut rincian ringkasnya:\n` +
+           `- Total Omzet (Bersih): ${formatIDR(totalOmzet)}\n` +
+           `- Pemasukan Lain-Lain: ${formatIDR(pemasukanLain)}\n` +
+           `- Pelunasan Piutang Periode Lalu: ${formatIDR(summary.pelunasan_piutang_lalu || 0)}\n` +
+           `- Total Pengeluaran: ${formatIDR(pengeluaran)}\n` +
+           `- Sisa Saldo Kas Berjalan: ${formatIDR(saldoNetto)}`;
   }
 
   if (topic === 'pemasukan') {
-    return `Total Pemasukan (Bersih) pada Kas Berjalan bulan ${targetMonthName} ${year} adalah ${formatIDR(pemasukanBersih)}.`;
+    return `Total Pemasukan (Bersih) pada Kas Berjalan bulan ${targetMonthName} ${year} adalah ${formatIDR(pemasukanBersih)} (terdiri dari Omzet Bersih ${formatIDR(totalOmzet)}, Pemasukan Lain-Lain ${formatIDR(pemasukanLain)}, dan Pelunasan Piutang Periode Lalu ${formatIDR(summary.pelunasan_piutang_lalu || 0)}).`;
   }
 
   return null;

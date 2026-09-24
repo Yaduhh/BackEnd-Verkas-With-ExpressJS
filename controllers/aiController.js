@@ -662,17 +662,13 @@ Contoh Kueri SQL yang benar:
       }
     }
 
-    // Load Verkas guide
+    // Load Master Verkas guide & system knowledge
     let verkasGuide = '';
-    const msgLower = message.toLowerCase();
-    const needsGuide = ['cara', 'bagaimana', 'tutorial', 'fitur', 'halaman', 'screen', 'menu', 'upload', 'lampiran', 'buat', 'tambah', 'edit', 'mitra', 'piutang'].some(word => msgLower.includes(word));
-    if (needsGuide) {
-      try {
-        const fs = require('fs');
-        verkasGuide = fs.readFileSync(path.join(__dirname, '../config/verkas_guide.txt'), 'utf8');
-      } catch (err) {
-        console.error('[AI-Service] Failed to load verkas_guide.txt:', err);
-      }
+    try {
+      const fs = require('fs');
+      verkasGuide = fs.readFileSync(path.join(__dirname, '../config/verkas_guide.txt'), 'utf8');
+    } catch (err) {
+      console.error('[AI-Service] Failed to load verkas_guide.txt:', err);
     }
 
     // Assemble final system prompt
@@ -682,10 +678,8 @@ Aplikasi Verkas ini dikembangkan oleh Vega Anggara Saputra (seorang developer ya
 Kamu ditenagai oleh model AI Gemini 3.7 Flash via 9Router yang dioptimalkan khusus untuk analisis buku kas & keuangan Verkas.
 Tugasmu adalah membantu pemilik toko/bisnis menganalisis dan memahami buku kas serta kondisi keuangan mereka dengan cara yang jelas, akurat, dan seru.`;
 
-    if (needsGuide && verkasGuide) {
-      systemPrompt += `\n\n### PANDUAN PENGGUNAAN FITUR APLIKASI VERKAS (INTEGRITAS):
-Berikut adalah petunjuk operasional cara menambah, mengedit, mengunggah lampiran, atau melakukan transaksi di aplikasi Verkas. Gunakan ini untuk memandu pengguna langkah demi langkah jika mereka bertanya tentang tutorial/cara operasional aplikasi:
-${verkasGuide}\n`;
+    if (verkasGuide) {
+      systemPrompt += `\n\n### MASTER KNOWLEDGE SISTEM & FITUR VERKAS:\n${verkasGuide}\n`;
     }
 
     systemPrompt += `
