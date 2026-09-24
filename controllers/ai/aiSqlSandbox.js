@@ -20,9 +20,8 @@ function sanitizeAndSandboxSQL(sql, branchId) {
   let cleanSql = sql.replace(/`/g, '').trim();
   cleanSql = cleanSql.replace(/^SELECTDISTINCT\b/i, 'SELECT DISTINCT');
   cleanSql = cleanSql.replace(/^SELECT\s*DISTINCT/i, 'SELECT DISTINCT');
-  const upper = cleanSql.toUpperCase();
-
-  if (!upper.startsWith('SELECT')) {
+  const cleanForCheck = cleanSql.replace(/^\s*\(+\s*/, '').toUpperCase();
+  if (!cleanForCheck.startsWith('SELECT') && !cleanForCheck.startsWith('WITH')) {
     throw new Error('Kueri tidak diizinkan: Hanya SELECT kueri yang diperbolehkan.');
   }
 

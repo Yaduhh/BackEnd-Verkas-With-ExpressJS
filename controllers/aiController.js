@@ -229,6 +229,9 @@ Contoh Kueri SQL yang benar:
 - Mencari data laporan manual (stok, bagi hasil, hari kerja) pada periode tertentu:
   SELECT stok_awal, stok_akhir, working_days, bagi_hasil, sales_channels, expense_adjustments FROM branch_reports WHERE month = 6 AND year = 2026
   
+- Mencari pengeluaran / pemasukan terbesar dari rentang beberapa bulan (misal 3 bulan terakhir):
+  SELECT MONTH(t.transaction_date) as bulan, YEAR(t.transaction_date) as tahun, t.amount, t.note, t.transaction_date, c.name as category_name FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.type = 'expense' AND t.is_umum = 1 AND DATE(t.transaction_date) BETWEEN '2026-07-01' AND '2026-09-30' ORDER BY t.amount DESC LIMIT 15
+
 - Mencari saldo masing-masing/setiap kas simpanan:
   SELECT cat.name, SUM(CASE WHEN t.type = 'income' OR (t.is_umum = 1 AND t.type = 'expense') THEN amount_val ELSE -amount_val END) as saldo FROM (SELECT id, type, is_umum, amount as amount_val, category_id, transaction_date FROM transactions WHERE status_deleted = 0 UNION ALL SELECT t.id, t.type, t.is_umum, tsd.amount as amount_val, tsd.category_id, t.transaction_date FROM transaction_savings_details tsd JOIN transactions t ON tsd.transaction_id = t.id WHERE t.status_deleted = 0) as t JOIN categories cat ON t.category_id = cat.id WHERE cat.parent_id IS NOT NULL AND (cat.name LIKE '%Simpanan%' OR cat.name = 'Packaging') GROUP BY cat.id, cat.name`;
 
@@ -256,16 +259,17 @@ Contoh Kueri SQL yang benar:
 
         const response = await callOpenRouter(openRouterMessages);
 
-        // Robust extraction of SQL query to handle chatty models (like Gemma)
+        // Robust extraction of SQL query to handle markdown and chatty models
         const markdownMatch = response.match(/```sql([\s\S]*?)```/i);
         if (markdownMatch) {
           aiSqlResponse = markdownMatch[1].trim();
         } else {
-          const sqlMatch = response.match(/\bSELECT\b[\s\S]+/i);
+          let cleanResp = response.replace(/```sql/gi, '').replace(/```/g, '').trim();
+          const sqlMatch = cleanResp.match(/(\(?\s*SELECT\b[\s\S]+)/i);
           if (sqlMatch) {
-            aiSqlResponse = sqlMatch[0].replace(/```/g, '').trim();
+            aiSqlResponse = sqlMatch[1].trim();
           } else {
-            aiSqlResponse = response.replace(/```sql/gi, '').replace(/```/g, '').trim();
+            aiSqlResponse = cleanResp;
           }
         }
       } catch (err) {
@@ -716,7 +720,7 @@ Berikut adalah baseline ringkasan keuangan bulanan Buku Kas "${branchName || 'Ka
     });
 
     // Append Mitra Receivables ONLY if asked
-    const hasMitraQuery = msgLower.includes('mitra') || msgLower.includes('piutang');
+    const hasMitraQuery = msg.includes('mitra') || msg.includes('piutang');
     if (hasMitraQuery && mitraSummary.length > 0) {
       systemPrompt += `\n### SALDO PIUTANG MITRA PELANGGAN (SEMUA WAKTU):\n`;
       mitraSummary.forEach(m => {

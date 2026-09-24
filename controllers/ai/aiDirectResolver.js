@@ -22,6 +22,23 @@ const GLOBAL_MONTH_NAMES_INDO = ['', 'Januari', 'Februari', 'Maret', 'April', 'M
 function isGeneralMonthlyQuery(message, chatHistory) {
   const msg = message.toLowerCase();
 
+  // If query is a conversational follow-up or nuanced question, DO NOT treat as static generic monthly query
+  const followUpKeywords = [
+    'gada', 'ada ga', 'kenapa', 'mengapa', 'bagaimana', 'gimana', 'kok', 'masa',
+    'terus', 'lalu', 'kalau', 'kalo', 'apa lagi', 'sebelumnya', 'berikutnya', 'selain itu',
+    'kenpa', 'beneran', 'serius', 'apa aja', 'apa saja', 'yg mana', 'yang mana', 'dimana',
+    'kapan', 'siapa', 'detail', 'rincian', 'kenapa bisa', 'kok bisa'
+  ];
+  if (followUpKeywords.some(kw => msg.includes(kw))) return false;
+
+  // If query mentions multi-period, comparative, or extreme keywords, let LLM handle it with dynamic SQL
+  const multiPeriodKeywords = [
+    '3 bulan', 'tiga bulan', '2 bulan', 'dua bulan', 'beberapa bulan', 'tiap bulan', 'setiap bulan',
+    'masing-masing', 'ketiga bulan', 'semua bulan', 'dari 3', 'dari 2', 'dari ketiga', 'rentang',
+    'terbesar', 'terbanyak', 'terkecil', 'tersedikit', 'paling'
+  ];
+  if (multiPeriodKeywords.some(kw => msg.includes(kw))) return false;
+
   // Inherit topic from chatHistory if it's a follow-up query
   let inheritedTopic = '';
   if (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0) {
@@ -63,6 +80,7 @@ function isGeneralMonthlyQuery(message, chatHistory) {
     'biaya lain', 'pendapatan lain', 'bahan baku', 'operasional', 'gaji', 'marketplace', 'grab', 'go food', 'shopee', 'tokopedia', 'lazada', 'toko', 'sewa', 'gathering'
   ];
   const isSpecific = specificExclusions.some(ex => msg.includes(ex));
+  if (isSpecific) return false;
 
   // Exclude detailed/sorting/extreme/creator queries that need SQL query execution
   const hasDetailedOrSorted = [
@@ -117,6 +135,15 @@ async function tryResolveExtremeTransactionQueryDirectly(message, branchId) {
   const hasSmallest = msg.includes('terkecil') || msg.includes('paling kecil') || msg.includes('minimal') || msg.includes('tersedikit');
   
   if (!hasLargest && !hasSmallest) return null;
+
+  // If query mentions multiple months, comparisons, or follow-ups, let LLM handle it with dynamic SQL!
+  const multiOrFollowUp = [
+    '3 bulan', 'tiga bulan', '2 bulan', 'dua bulan', 'beberapa bulan', 'tiap bulan', 'setiap bulan',
+    'masing-masing', 'ketiga bulan', 'semua bulan', 'dari 3', 'dari 2', 'dari ketiga', 'rentang',
+    'gada', 'ada ga', 'kenapa', 'mengapa', 'bagaimana', 'gimana', 'kok', 'masa', 'sebelumnya', 'lalu',
+    'dan', 'serta'
+  ];
+  if (multiOrFollowUp.some(kw => msg.includes(kw))) return null;
   
   // check if it's about transactions
   const hasTxKeyword = ['transaksi', 'pembayaran', 'belanja', 'pemasukan', 'pemasuka', 'pengeluaran', 'pengeluara', 'keluar', 'masuk', 'omzet', 'omset', 'biaya'].some(kw => msg.includes(kw));
@@ -362,6 +389,15 @@ async function tryResolveMonthlyQueryDirectly(message, monthlySummaries, branchN
 
   const isSavingsQuery = ['simpanan', 'simpaan', 'tabungan', 'cadangan', 'pribadi'].some(w => msg.includes(w));
   if (isSavingsQuery) return null;
+
+  // If query is a conversational follow-up or nuanced question, DO NOT hijack as monthly summary!
+  const followUpKeywords = [
+    'gada', 'ada ga', 'kenapa', 'mengapa', 'bagaimana', 'gimana', 'kok', 'masa',
+    'terus', 'lalu', 'kalau', 'kalo', 'apa lagi', 'sebelumnya', 'berikutnya', 'selain itu',
+    'kenpa', 'beneran', 'serius', 'apa aja', 'apa saja', 'yg mana', 'yang mana', 'dimana',
+    'kapan', 'siapa', 'detail', 'rincian', 'kenapa bisa', 'kok bisa'
+  ];
+  if (followUpKeywords.some(kw => msg.includes(kw))) return null;
 
   // If query is asking about creator/user, specific details, notes, categories, attachments, reasons, or specific single transactions, DO NOT hijack as monthly summary!
   const isDetailOrAttributeQuery = [
