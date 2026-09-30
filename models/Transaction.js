@@ -1319,8 +1319,8 @@ class Transaction {
         const totalPiutangMitra = parseFloat(mitraPiutangRes[0]?.total_piutang || 0);
 
         const totalPemasukan = omzetNetSum + lainNetSum + pelunasanPiutangBulanLalu;
-        const totalPengeluaran = folderPengeluaran + totalPiutangMitra;
-        const saldo = totalPemasukan - totalPengeluaran;
+        const totalPengeluaran = folderPengeluaran;
+        const saldo = totalPemasukan - totalPengeluaran - totalPiutangMitra;
         const totalPb1 = omzetTaxSum + lainTaxSum;
 
         return {
