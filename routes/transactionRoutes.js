@@ -20,7 +20,9 @@ const {
   getHistory,
   createRepayment,
   updateRepayment,
-  deleteRepayment
+  deleteRepayment,
+  createRefund,
+  deleteRefund
 } = require('../controllers/transactionController');
 const { authenticate, authorize } = require('../middleware/auth');
 const { optionalBranchContext } = require('../middleware/branchContext');
@@ -99,6 +101,10 @@ router.post('/:id/reject-delete', rejectDelete);
 router.post('/:id/repayment', createRepayment);
 router.put('/:id/repayment/:repaymentId', updateRepayment);
 router.delete('/:id/repayment/:repaymentId', deleteRepayment);
+
+// Refund
+router.post('/:id/refund', createRefund);
+router.delete('/:id/refund/:refundId', deleteRefund);
 
 module.exports = router;
 

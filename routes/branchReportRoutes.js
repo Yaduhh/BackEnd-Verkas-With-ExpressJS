@@ -1,9 +1,26 @@
 const express = require('express');
 const router = express.Router();
-const { getReport, updateReport, exportPdf, exportBagiHasilPdf, exportSavingsPdf, exportImage } = require('../controllers/branchReportController');
+const {
+    getReport,
+    updateReport,
+    exportPdf,
+    exportBagiHasilPdf,
+    exportSavingsPdf,
+    exportImage,
+    getBagiHasilTemplates,
+    createBagiHasilTemplate,
+    updateBagiHasilTemplate,
+    deleteBagiHasilTemplate
+} = require('../controllers/branchReportController');
 const { authenticate } = require('../middleware/auth');
 
 router.use(authenticate);
+
+// Bagi Hasil Templates routes
+router.get('/:branchId/bagi-hasil-templates', getBagiHasilTemplates);
+router.post('/:branchId/bagi-hasil-templates', createBagiHasilTemplate);
+router.put('/:branchId/bagi-hasil-templates/:templateId', updateBagiHasilTemplate);
+router.delete('/:branchId/bagi-hasil-templates/:templateId', deleteBagiHasilTemplate);
 
 // GET /api/branch-reports/:branchId?month=2&year=2026
 router.get('/:branchId', getReport);

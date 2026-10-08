@@ -18,6 +18,7 @@ module.exports = {
 
   // Format Specific Functions
   exportToExcel: excel.exportToExcel,
+  exportCategoryToExcel: excel.exportCategoryToExcel,
   exportToCSV: csv.exportToCSV,
   exportToPDF: pdf.exportToPDF,
   exportBukuKasToPDF: pdf.exportBukuKasToPDF,

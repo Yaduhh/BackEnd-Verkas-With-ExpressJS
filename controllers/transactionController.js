@@ -1,11 +1,13 @@
 // TRACER: 2026-02-28 11:26
 const Transaction = require('../models/Transaction');
 const TransactionRepayment = require('../models/TransactionRepayment');
+const TransactionRefund = require('../models/TransactionRefund');
 const TransactionEdit = require('../models/TransactionEdit');
 const Category = require('../models/Category');
 const LockedPeriod = require('../models/LockedPeriod');
 const LogService = require('../services/logService');
 const config = require('../config/config');
+const { query } = require('../config/database');
 
 // Helper: Convert lampiran paths to full URLs using BASE_URL from config
 const formatLampiran = (lampiran, req) => {
@@ -263,7 +265,7 @@ const getById = async (req, res, next) => {
 
 const create = async (req, res, next) => {
   try {
-    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_savings, mitra_details, savings_details, income_details, is_pb1_payment } = req.body;
+    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_savings, mitra_details, savings_details, income_details, sales_channel_details, is_pb1_payment } = req.body;
 
     // Get branch_id from header or middleware
     const branchId = req.branchId || req.headers['x-branch-id'];
@@ -404,6 +406,7 @@ const create = async (req, res, next) => {
       mitraDetails: mitra_details || [],
       savingsDetails: savings_details || [],
       incomeDetails: income_details || [],
+      salesChannelDetails: sales_channel_details || [],
       isPb1Payment: is_pb1_payment === true || is_pb1_payment === 'true' || is_pb1_payment === 1
     });
 
@@ -426,7 +429,8 @@ const create = async (req, res, next) => {
         paid_amount: transaction.paid_amount,
         remaining_debt: transaction.remaining_debt,
         savings_details: transaction.savings_details,
-        income_details: transaction.income_details
+        income_details: transaction.income_details,
+        sales_channel_details: transaction.sales_channel_details
       },
       status: 'approved'
     }).catch(err => console.error('Error creating creation history:', err));
@@ -472,7 +476,7 @@ const create = async (req, res, next) => {
 const update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, mitra_details, savings_details, income_details, is_pb1_payment } = req.body;
+    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, mitra_details, savings_details, income_details, sales_channel_details, is_pb1_payment } = req.body;
 
     // Check if transaction exists and belongs to user
     const existing = await Transaction.findById(id);
@@ -617,6 +621,10 @@ const update = async (req, res, next) => {
       updateData.incomeDetails = income_details;
     }
 
+    if (sales_channel_details !== undefined) {
+      updateData.salesChannelDetails = sales_channel_details;
+    }
+
     // Pass debt payment fields to model
     if (is_debt_payment !== undefined) {
       updateData.isDebtPayment = is_debt_payment === true || is_debt_payment === 'true' || is_debt_payment === 1;
@@ -725,7 +733,8 @@ const update = async (req, res, next) => {
         mitra_piutang_id: existing.mitra_piutang_id,
         is_pb1_payment: existing.is_pb1_payment,
         savings_details: existing.savings_details,
-        income_details: existing.income_details
+        income_details: existing.income_details,
+        sales_channel_details: existing.sales_channel_details
       },
       newData: {
         type: transaction.type,
@@ -742,7 +751,8 @@ const update = async (req, res, next) => {
         mitra_piutang_id: transaction.mitra_piutang_id,
         is_pb1_payment: transaction.is_pb1_payment,
         savings_details: transaction.savings_details,
-        income_details: transaction.income_details
+        income_details: transaction.income_details,
+        sales_channel_details: transaction.sales_channel_details
       },
       status: 'approved'
     });
@@ -2117,6 +2127,235 @@ const rejectDelete = async (req, res, next) => {
   }
 };
 
+const createRefund = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { amount, refund_date, date, note, lampiran } = req.body;
+    const finalDate = refund_date || date;
+
+    if (!amount || !finalDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nominal dan tanggal refund wajib diisi'
+      });
+    }
+
+    const refundAmount = parseFloat(amount);
+    if (isNaN(refundAmount) || refundAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nominal refund harus lebih besar dari 0'
+      });
+    }
+
+    const transaction = await Transaction.findById(id);
+    if (!transaction) {
+      return res.status(404).json({ success: false, message: 'Transaksi tidak ditemukan' });
+    }
+
+    // Verify branch access
+    const Branch = require('../models/Branch');
+    const hasAccess = await Branch.userHasAccess(req.userId, transaction.branch_id, req.user.role);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'Akses ditolak' });
+    }
+
+    // Check locked period for transaction and refund date
+    const txDate = new Date(transaction.date);
+    const isTxLocked = await LockedPeriod.isLocked(transaction.branch_id, txDate.getMonth() + 1, txDate.getFullYear());
+    if (isTxLocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Tidak dapat melakukan refund: Periode bulan transaksi asli sudah ditutup buku (Locked)'
+      });
+    }
+
+    const refDateObj = new Date(finalDate);
+    const isRefundLocked = await LockedPeriod.isLocked(transaction.branch_id, refDateObj.getMonth() + 1, refDateObj.getFullYear());
+    if (isRefundLocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Tidak dapat melakukan refund: Periode tanggal refund sudah ditutup buku (Locked)'
+      });
+    }
+
+    // Check capping against remaining amount in transaction
+    const currentAmount = Math.abs(parseFloat(transaction.amount || 0));
+    const maxRefundable = currentAmount;
+
+    const existingRefunds = await TransactionRefund.findByTransactionId(id);
+    const totalExistingRefund = existingRefunds.reduce((sum, r) => sum + parseFloat(r.amount || 0), 0);
+
+    if (refundAmount > maxRefundable + 0.01) {
+      return res.status(400).json({
+        success: false,
+        message: `Nominal refund (Rp ${refundAmount.toLocaleString('id-ID')}) melebihi sisa nominal transaksi yang dapat di-refund (Rp ${maxRefundable.toLocaleString('id-ID')})`
+      });
+    }
+
+    const lampiranValue = Array.isArray(lampiran) ? JSON.stringify(lampiran) : (typeof lampiran === 'string' ? lampiran : null);
+
+    const refundId = await TransactionRefund.create({
+      transactionId: id,
+      userId: req.userId,
+      amount: refundAmount,
+      refundDate: finalDate,
+      note: note || null,
+      lampiran: lampiranValue
+    });
+
+    // Update transactions.amount directly in DB
+    const newAmount = Math.max(0, currentAmount - refundAmount);
+    await query('UPDATE transactions SET amount = ? WHERE id = ?', [newAmount, id]);
+
+    const createdRefund = await TransactionRefund.findById(refundId);
+
+    // Log activity
+    try {
+      LogService.logActivity({
+        userId: req.userId,
+        branchId: transaction.branch_id,
+        action: 'TRANSACTION_REFUND_CREATE',
+        entityType: 'transaction_refund',
+        entityId: refundId,
+        metadata: {
+          transaction_id: id,
+          amount: refundAmount,
+          refund_date: finalDate,
+          description: `Mencatat refund Rp ${refundAmount.toLocaleString('id-ID')} pada transaksi #${id}`
+        }
+      });
+    } catch (e) {
+      console.error('Error logging refund create:', e);
+    }
+
+    // Add to transaction history (Audit Trail)
+    try {
+      await TransactionEdit.create({
+        transactionId: id,
+        requesterId: req.userId,
+        reason: 'Refund Baru',
+        oldData: { total_refund: totalExistingRefund, net_amount: maxRefundable },
+        newData: {
+          refund_id: refundId,
+          refund_amount: refundAmount,
+          refund_date: finalDate,
+          total_refund: totalExistingRefund + refundAmount,
+          net_amount: maxRefundable - refundAmount,
+          note: note || null,
+          lampiran: lampiranValue
+        },
+        status: 'approved'
+      });
+    } catch (e) {
+      console.error('Error creating edit history:', e);
+    }
+
+    const updatedTransaction = await Transaction.findById(id);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Refund berhasil dicatat',
+      data: {
+        refund: createdRefund,
+        transaction: updatedTransaction
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const deleteRefund = async (req, res, next) => {
+  try {
+    const { id, refundId } = req.params;
+
+    const transaction = await Transaction.findById(id);
+    if (!transaction) {
+      return res.status(404).json({ success: false, message: 'Transaksi tidak ditemukan' });
+    }
+
+    // Verify branch access
+    const Branch = require('../models/Branch');
+    const hasAccess = await Branch.userHasAccess(req.userId, transaction.branch_id, req.user.role);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'Akses ditolak' });
+    }
+
+    const refund = await TransactionRefund.findById(refundId);
+    if (!refund) {
+      return res.status(404).json({ success: false, message: 'Data refund tidak ditemukan' });
+    }
+
+    // Check locked period
+    const refDateObj = new Date(refund.refund_date);
+    const isRefundLocked = await LockedPeriod.isLocked(transaction.branch_id, refDateObj.getMonth() + 1, refDateObj.getFullYear());
+    if (isRefundLocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Tidak dapat menghapus refund: Periode tanggal refund sudah ditutup buku (Locked)'
+      });
+    }
+
+    const refundAmount = parseFloat(refund.amount || 0);
+    // Restore transactions.amount directly in DB
+    await query('UPDATE transactions SET amount = amount + ? WHERE id = ?', [refundAmount, id]);
+    await TransactionRefund.delete(refundId);
+
+    // Log activity
+    try {
+      LogService.logActivity({
+        userId: req.userId,
+        branchId: transaction.branch_id,
+        action: 'TRANSACTION_REFUND_DELETE',
+        entityType: 'transaction_refund',
+        entityId: refundId,
+        metadata: {
+          transaction_id: id,
+          amount: refund.amount,
+          refund_date: refund.refund_date,
+          description: `Menghapus refund Rp ${parseFloat(refund.amount).toLocaleString('id-ID')} pada transaksi #${id}`
+        }
+      });
+    } catch (e) {
+      console.error('Error logging refund delete:', e);
+    }
+
+    // Add to transaction history (Audit Trail)
+    try {
+      await TransactionEdit.create({
+        transactionId: id,
+        requesterId: req.userId,
+        reason: 'Hapus Refund',
+        oldData: {
+          refund_id: refundId,
+          refund_amount: refund.amount,
+          refund_date: refund.refund_date
+        },
+        newData: {
+          action: 'delete_refund',
+          deleted_refund_id: refundId
+        },
+        status: 'approved'
+      });
+    } catch (e) {
+      console.error('Error creating delete refund history:', e);
+    }
+
+    const updatedTransaction = await Transaction.findById(id);
+
+    return res.json({
+      success: true,
+      message: 'Refund berhasil dibatalkan/dihapus',
+      data: {
+        transaction: updatedTransaction
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAll,
   getSummary,
@@ -2136,6 +2375,9 @@ module.exports = {
   getHistory,
   createRepayment,
   updateRepayment,
-  deleteRepayment
+  deleteRepayment,
+  createRefund,
+  deleteRefund
 };
+
 

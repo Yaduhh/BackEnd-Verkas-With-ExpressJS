@@ -35,7 +35,8 @@ function formatSection(date, items, transactions, req) {
         return sum + (parseFloat(t.pb1) || 0);
       }
       
-      return sum + val;
+      const ref = parseFloat(t.total_refund || 0);
+      return sum + Math.max(0, val - ref);
     }, 0);
 
   // If for PB1, round the total income tax at the end
@@ -46,7 +47,8 @@ function formatSection(date, items, transactions, req) {
     .reduce((sum, t) => {
       // If for PB1, only count setoran pajak
       if (req.query.has_pb1 === 'true' && !t.is_pb1_payment) return sum;
-      return sum + parseFloat(t.amount);
+      const ref = parseFloat(t.total_refund || 0);
+      return sum + Math.max(0, parseFloat(t.amount) - ref);
     }, 0);
 
   // Get base URL from config (prioritize config over req)
@@ -113,6 +115,8 @@ function formatSection(date, items, transactions, req) {
         category: item.category_name || '-',
         note: item.note || '',
         amount: displayAmount,
+        total_refund: item.total_refund !== undefined ? parseFloat(item.total_refund) : 0,
+        net_amount: item.net_amount !== undefined ? parseFloat(item.net_amount) : (Math.max(0, Math.abs(parseFloat(item.amount || 0)) - parseFloat(item.total_refund || 0))),
         pb1: item.pb1 ? parseFloat(item.pb1) : null,
         lampiran: lampiran, // Always array or null with full URLs
         user_name: item.user_name || null,

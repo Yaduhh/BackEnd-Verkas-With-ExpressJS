@@ -2,6 +2,7 @@ const Branch = require('../models/Branch');
 const BranchReport = require('../models/BranchReport');
 const Category = require('../models/Category');
 const Transaction = require('../models/Transaction');
+const BagiHasilTemplate = require('../models/BagiHasilTemplate');
 const { query } = require('../config/database');
 
 /**
@@ -270,6 +271,66 @@ const getReport = async (req, res, next) => {
 
         const finalProfit = finalOmzetTotal - systemPengeluaran;
 
+        // 6. Aggregate Sales Channels from recorded transactions in this period
+        const systemSalesChannelsResult = await query(
+            `SELECT 
+                sc.id as sales_channel_id,
+                sc.name as name,
+                COALESCE(SUM(tsc.amount), 0) as amount
+             FROM sales_channels sc
+             JOIN transaction_sales_channels tsc ON sc.id = tsc.sales_channel_id
+             JOIN transactions t ON tsc.transaction_id = t.id
+             WHERE t.branch_id = ?
+               AND t.transaction_date BETWEEN ? AND ?
+               AND t.status_deleted = false
+               AND t.is_umum = true
+               AND t.type = 'income'
+             GROUP BY sc.id, sc.name
+             HAVING amount > 0
+             ORDER BY amount DESC, sc.name ASC`,
+            [branchId, startDate, endDate]
+        );
+
+        // Fetch active master sales channels for dropdown/selection
+        const masterSalesChannelsResult = await query(
+            `SELECT id, name, is_active FROM sales_channels
+             WHERE (branch_id = ? OR branch_id IS NULL)
+               AND status_deleted = 0
+               AND is_active = 1
+             ORDER BY name ASC`,
+            [branchId]
+        );
+
+        // Calculate omzet transactions without recorded sales channel details
+        const omzetWithoutChannelsResult = await query(
+            `SELECT 
+                SUM(
+                    CASE 
+                        WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
+                        ELSE t.amount 
+                    END
+                ) as total_without_channel
+             FROM transactions t
+             LEFT JOIN categories c ON t.category_id = c.id
+             WHERE t.branch_id = ?
+               AND t.type = 'income'
+               AND t.transaction_date BETWEEN ? AND ?
+               AND t.status_deleted = false
+               AND t.is_umum = true
+               AND (c.name LIKE '%OMZET%' OR c.name LIKE '%OMSET%')
+               AND t.id NOT IN (
+                   SELECT DISTINCT transaction_id FROM transaction_sales_channels
+               )`,
+            [branchId, startDate, endDate]
+        );
+        const omzetWithoutChannels = parseFloat(omzetWithoutChannelsResult[0]?.total_without_channel) || 0;
+
+        const systemSalesChannels = systemSalesChannelsResult.map(s => ({
+            sales_channel_id: s.sales_channel_id,
+            name: s.name,
+            amount: parseFloat(s.amount) || 0
+        }));
+
         return res.json({
             success: true,
             data: {
@@ -279,7 +340,10 @@ const getReport = async (req, res, next) => {
                     pelunasan_piutang_bulan_lalu: pelunasanPiutangBulanLalu,
                     prev_month_label: prevMonthName,
                     income_breakdown: incomeBreakdown,
-                    expense_breakdown: expenseBreakdown // Use raw breakdown from query
+                    expense_breakdown: expenseBreakdown,
+                    system_sales_channels: systemSalesChannels,
+                    master_sales_channels: masterSalesChannelsResult,
+                    unallocated_omzet: omzetWithoutChannels
                 },
             },
         });
@@ -451,6 +515,34 @@ const updateReport = async (req, res, next) => {
 
         const finalProfit = finalOmzetTotal - systemPengeluaran;
 
+        // Fetch system sales channels
+        const systemSalesChannelsResult = await query(
+            `SELECT 
+                sc.id as sales_channel_id,
+                sc.name as name,
+                COALESCE(SUM(tsc.amount), 0) as amount
+             FROM sales_channels sc
+             JOIN transaction_sales_channels tsc ON sc.id = tsc.sales_channel_id
+             JOIN transactions t ON tsc.transaction_id = t.id
+             WHERE t.branch_id = ?
+               AND t.transaction_date BETWEEN ? AND ?
+               AND t.status_deleted = false
+               AND t.is_umum = true
+               AND t.type = 'income'
+             GROUP BY sc.id, sc.name
+             HAVING amount > 0
+             ORDER BY amount DESC, sc.name ASC`,
+            [branchId, startDate, endDate]
+        );
+
+        const masterSalesChannelsResult = await query(
+            `SELECT id, name, is_active FROM sales_channels
+             WHERE (branch_id = ? OR branch_id IS NULL)
+               AND status_deleted = 0
+               AND is_active = 1
+             ORDER BY name ASC`,
+            [branchId]
+        );
 
         return res.json({
             success: true,
@@ -460,7 +552,13 @@ const updateReport = async (req, res, next) => {
                     ...updated,
                     omzet_total: finalOmzetTotal,
                     profit: finalProfit,
-                    pelunasan_piutang_bulan_lalu: pelunasanPiutangBulanLalu
+                    pelunasan_piutang_bulan_lalu: pelunasanPiutangBulanLalu,
+                    system_sales_channels: systemSalesChannelsResult.map(s => ({
+                        sales_channel_id: s.sales_channel_id,
+                        name: s.name,
+                        amount: parseFloat(s.amount) || 0
+                    })),
+                    master_sales_channels: masterSalesChannelsResult
                 },
             },
         });
@@ -805,8 +903,33 @@ const exportPdf = async (req, res, next) => {
             }
         });
 
+        let exportSalesChannels = report.sales_channels;
+        if (!exportSalesChannels || exportSalesChannels.length === 0) {
+            const systemSalesChannelsResult = await query(
+                `SELECT 
+                    sc.name,
+                    COALESCE(SUM(tsc.amount), 0) as amount
+                 FROM sales_channels sc
+                 JOIN transaction_sales_channels tsc ON sc.id = tsc.sales_channel_id
+                 JOIN transactions t ON tsc.transaction_id = t.id
+                 WHERE t.branch_id = ?
+                   AND t.transaction_date BETWEEN ? AND ?
+                   AND t.status_deleted = false
+                   AND t.is_umum = true
+                   AND t.type = 'income'
+                 GROUP BY sc.id, sc.name
+                 HAVING amount > 0
+                 ORDER BY amount DESC, sc.name ASC`,
+                [branchId, startDate, endDate]
+            );
+            if (systemSalesChannelsResult.length > 0) {
+                exportSalesChannels = systemSalesChannelsResult.map(s => ({ name: s.name, amount: parseFloat(s.amount) || 0 }));
+            }
+        }
+
         const dataForPdf = {
             ...report,
+            sales_channels: exportSalesChannels,
             omzet_total: finalOmzetTotal,
             pengeluaran_total: systemPengeluaran,
             profit: finalProfit,
@@ -1203,8 +1326,33 @@ const exportImage = async (req, res, next) => {
             }
         });
 
+        let exportSalesChannels = report.sales_channels;
+        if (!exportSalesChannels || exportSalesChannels.length === 0) {
+            const systemSalesChannelsResult = await query(
+                `SELECT 
+                    sc.name,
+                    COALESCE(SUM(tsc.amount), 0) as amount
+                 FROM sales_channels sc
+                 JOIN transaction_sales_channels tsc ON sc.id = tsc.sales_channel_id
+                 JOIN transactions t ON tsc.transaction_id = t.id
+                 WHERE t.branch_id = ?
+                   AND t.transaction_date BETWEEN ? AND ?
+                   AND t.status_deleted = false
+                   AND t.is_umum = true
+                   AND t.type = 'income'
+                 GROUP BY sc.id, sc.name
+                 HAVING amount > 0
+                 ORDER BY amount DESC, sc.name ASC`,
+                [branchId, startDate, endDate]
+            );
+            if (systemSalesChannelsResult.length > 0) {
+                exportSalesChannels = systemSalesChannelsResult.map(s => ({ name: s.name, amount: parseFloat(s.amount) || 0 }));
+            }
+        }
+
         const dataForPdf = {
             ...report,
+            sales_channels: exportSalesChannels,
             omzet_total: finalOmzetTotal,
             pengeluaran_total: systemPengeluaran,
             profit: finalProfit,
@@ -1456,4 +1604,122 @@ const exportSavingsPdf = async (req, res, next) => {
     }
 };
 
-module.exports = { getReport, updateReport, exportPdf, exportBagiHasilPdf, exportSavingsPdf, exportImage };
+const getBagiHasilTemplates = async (req, res, next) => {
+    try {
+        const { branchId } = req.params;
+        const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
+        if (!hasAccess) {
+            return res.status(403).json({ success: false, message: 'Akses ditolak' });
+        }
+
+        const templates = await BagiHasilTemplate.findByBranchId(parseInt(branchId));
+        return res.json({ success: true, data: templates });
+    } catch (error) {
+        next(error);
+    }
+};
+
+const createBagiHasilTemplate = async (req, res, next) => {
+    try {
+        const { branchId } = req.params;
+        const { name, templateData, isDefault } = req.body;
+
+        const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
+        if (!hasAccess) {
+            return res.status(403).json({ success: false, message: 'Akses ditolak' });
+        }
+
+        if (!name || !name.trim()) {
+            return res.status(400).json({ success: false, message: 'Nama template wajib diisi' });
+        }
+
+        if (!templateData || !Array.isArray(templateData) || templateData.length === 0) {
+            return res.status(400).json({ success: false, message: 'Data template tidak boleh kosong' });
+        }
+
+        const template = await BagiHasilTemplate.create({
+            branchId: parseInt(branchId),
+            name: name.trim(),
+            templateData,
+            isDefault: Boolean(isDefault)
+        });
+
+        return res.status(201).json({
+            success: true,
+            message: 'Template bagi hasil berhasil disimpan',
+            data: template
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+const updateBagiHasilTemplate = async (req, res, next) => {
+    try {
+        const { branchId, templateId } = req.params;
+        const { name, templateData, isDefault } = req.body;
+
+        const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
+        if (!hasAccess) {
+            return res.status(403).json({ success: false, message: 'Akses ditolak' });
+        }
+
+        const template = await BagiHasilTemplate.findById(parseInt(templateId));
+        if (!template || template.branch_id !== parseInt(branchId)) {
+            return res.status(404).json({ success: false, message: 'Template tidak ditemukan' });
+        }
+
+        const updated = await BagiHasilTemplate.update(parseInt(templateId), {
+            name: name ? name.trim() : undefined,
+            templateData,
+            isDefault: isDefault !== undefined ? Boolean(isDefault) : undefined
+        });
+
+        return res.json({
+            success: true,
+            message: 'Template berhasil diperbarui',
+            data: updated
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+const deleteBagiHasilTemplate = async (req, res, next) => {
+    try {
+        const { branchId, templateId } = req.params;
+
+        const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
+        if (!hasAccess) {
+            return res.status(403).json({ success: false, message: 'Akses ditolak' });
+        }
+
+        const template = await BagiHasilTemplate.findById(parseInt(templateId));
+        if (!template || template.branch_id !== parseInt(branchId)) {
+            return res.status(404).json({ success: false, message: 'Template tidak ditemukan' });
+        }
+
+        await BagiHasilTemplate.delete(parseInt(templateId));
+
+        return res.json({
+            success: true,
+            message: 'Template berhasil dihapus'
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+module.exports = {
+    getReport,
+    updateReport,
+    exportPdf,
+    exportBagiHasilPdf,
+    exportSavingsPdf,
+    exportImage,
+    getBagiHasilTemplates,
+    createBagiHasilTemplate,
+    updateBagiHasilTemplate,
+    deleteBagiHasilTemplate
+};
+

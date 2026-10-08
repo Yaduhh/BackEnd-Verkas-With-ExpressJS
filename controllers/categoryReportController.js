@@ -1,6 +1,10 @@
 const Transaction = require('../models/Transaction');
+const Branch = require('../models/Branch');
+const BranchReport = require('../models/BranchReport');
 const {
     exportCategoryToPDF,
+    exportCategoryToExcel,
+    exportToCSV,
     generateFilename,
     getMimeType
 } = require('../utils/exportHelper');
@@ -17,6 +21,8 @@ const exportCategoryReport = async (req, res, next) => {
             from_date,
             to_date,
             category,
+            type,
+            working_days,
             format = 'PDF'
         } = source;
 
@@ -30,15 +36,7 @@ const exportCategoryReport = async (req, res, next) => {
             });
         }
 
-        if (!category) {
-            return res.status(400).json({
-                success: false,
-                message: 'Category is required for category report.'
-            });
-        }
-
         // Verify branch access
-        const Branch = require('../models/Branch');
         const hasAccess = await Branch.userHasAccess(userId, parseInt(branchId), req.user.role);
         if (!hasAccess) {
             return res.status(403).json({
@@ -52,46 +50,78 @@ const exportCategoryReport = async (req, res, next) => {
             branchId: parseInt(branchId),
             startDate: from_date,
             endDate: to_date,
-            category: category,
-            sort: 'terbaru',
+            sort: 'terlama', // Oldest first (01 -> 31) to match standard daily statement
             page: 1,
             limit: 10000
         };
 
-        // Get transactions for this specific category
-        const transactions = await Transaction.findAll(queryParams);
+        if (category && category !== 'Semua Kategori' && category !== 'all') {
+            queryParams.category = category;
+        }
+
+        // Apply type filter if specified (income / expense)
+        if (type && (type === 'income' || type === 'expense')) {
+            queryParams.type = type;
+        }
+
+        // Get transactions for this specific category / filter
+        let transactions = await Transaction.findAll(queryParams);
+
+        // Filter out transactions with zero or invalid nominal
+        transactions = transactions.filter(t => {
+            const val = Math.abs(parseFloat(t.net_amount !== undefined ? t.net_amount : t.amount || 0));
+            return val > 0.001;
+        });
 
         if (transactions.length === 0) {
             return res.status(400).json({
                 success: false,
-                message: 'No transactions found for the selected period and category'
+                message: 'Tidak ada transaksi dengan nominal valid yang ditemukan untuk periode dan filter yang dipilih'
             });
         }
 
         // Generate filename
-        const filename = generateFilename(format, title || `Laporan_${category.replace(/\s+/g, '_')}`);
+        const cleanCatName = (category && category !== 'Semua Kategori') ? category.replace(/\s+/g, '_') : 'Transaksi';
+        const filename = generateFilename(format, title || `Laporan_${cleanCatName}`);
+
+        // Get branch info
+        const branch = await Branch.findById(parseInt(branchId));
+        const branchName = branch ? branch.name : 'Branch';
+
+        // Resolve working days
+        let resolvedWorkingDays = working_days ? parseInt(working_days) : null;
+        if (!resolvedWorkingDays) {
+            const selectedDate = from_date ? new Date(from_date) : new Date();
+            const reportInDb = await BranchReport.findByBranchAndPeriod(
+                parseInt(branchId),
+                selectedDate.getMonth() + 1,
+                selectedDate.getFullYear()
+            );
+            resolvedWorkingDays = reportInDb?.working_days || 25;
+        }
+
+        const exportOptions = {
+            fromDate: from_date,
+            toDate: to_date,
+            title: title || `Laporan ${category || 'Transaksi'}`,
+            categoryName: (category && category !== 'Semua Kategori') ? category : 'SEMUA KATEGORI',
+            type: type || 'all',
+            workingDays: resolvedWorkingDays
+        };
 
         let filepath;
+        const fmtUpper = format.toUpperCase();
 
-        // Only PDF is requested for this specific feature as per user context
-        // But we can support others if needed. For now, focus on PDF.
-        if (format.toUpperCase() === 'PDF') {
-            // Get branch info
-            const branch = await Branch.findById(parseInt(branchId));
-            const branchName = branch ? branch.name : 'Branch';
-
-            const selectedDate = from_date ? new Date(from_date) : new Date();
-
-            filepath = await exportCategoryToPDF(transactions, filename, branchName, {
-                fromDate: from_date,
-                toDate: to_date,
-                title: title || `Laporan ${category}`,
-                categoryName: category
-            });
+        if (fmtUpper === 'PDF') {
+            filepath = await exportCategoryToPDF(transactions, filename, branchName, exportOptions);
+        } else if (fmtUpper === 'XLS' || fmtUpper === 'XLSX') {
+            filepath = await exportCategoryToExcel(transactions, filename, branchName, exportOptions);
+        } else if (fmtUpper === 'CSV') {
+            filepath = await exportToCSV(transactions, filename);
         } else {
             return res.status(400).json({
                 success: false,
-                message: 'Only PDF format is currently supported for category reports.'
+                message: `Format ${format} tidak didukung untuk laporan kategori.`
             });
         }
 

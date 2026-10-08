@@ -51,6 +51,16 @@ class Transaction {
     );
     transaction.income_details = incomeDetails;
 
+    // Fetch sales channel details
+    const salesChannelDetails = await query(
+      `SELECT tsc.*, sc.name as sales_channel_name
+       FROM transaction_sales_channels tsc
+       JOIN sales_channels sc ON tsc.sales_channel_id = sc.id
+       WHERE tsc.transaction_id = ?`,
+      [id]
+    );
+    transaction.sales_channel_details = salesChannelDetails;
+
     // SYNC: If it's a debt payment but has no multi-mitra details,
     // synthesize a virtual detail from the main transaction fields
     // to ensure Repayment (Pelunasan) and UI logic work as expected.
@@ -76,6 +86,21 @@ class Transaction {
       [id]
     );
     transaction.repayments = repayments;
+
+    // Fetch refunds
+    const refunds = await query(
+      `SELECT tr.*, COALESCE(u.name, u.email) as user_name
+       FROM transaction_refunds tr
+       LEFT JOIN users u ON tr.user_id = u.id
+       WHERE tr.transaction_id = ?
+       ORDER BY tr.refund_date DESC, tr.created_at DESC`,
+      [id]
+    );
+    transaction.refunds = refunds;
+    const totalRefund = refunds.reduce((sum, r) => sum + parseFloat(r.amount || 0), 0);
+    transaction.total_refund = totalRefund;
+    transaction.original_amount = parseFloat(transaction.amount || 0) + totalRefund;
+    transaction.net_amount = parseFloat(transaction.amount || 0);
 
     return transaction;
   }
@@ -122,6 +147,8 @@ class Transaction {
              tr_notif.transaction_id as parent_transaction_id,
              t_parent.transaction_date as parent_transaction_date,
              COALESCE(tr_sum.total_repayment, 0) as total_repayment,
+              COALESCE(t_ref.total_refund, 0) as total_refund,
+              GREATEST(0, ABS(t.amount) - COALESCE(t_ref.total_refund, 0)) as net_amount,
              /* Standardized dynamic PB1 calculation (10/110) - Using ROUND to match Report logic */
              CASE 
                WHEN t.type = 'income' THEN 
@@ -167,6 +194,11 @@ class Transaction {
         FROM transaction_repayments 
         GROUP BY transaction_id
       ) tr_sum ON t.id = tr_sum.transaction_id
+      LEFT JOIN (
+        SELECT transaction_id, SUM(amount) as total_refund 
+        FROM transaction_refunds 
+        GROUP BY transaction_id
+      ) t_ref ON t.id = t_ref.transaction_id
       ${joinDetails}
       WHERE 1=1
     `;
@@ -451,7 +483,7 @@ class Transaction {
     return results[0].total;
   }
 
-  static async create({ userId, branchId, type, categoryId, amount, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, isSavings = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, bankAccountId = null, mitraDetails = [], savingsDetails = [], incomeDetails = [], isPb1Payment = false }) {
+  static async create({ userId, branchId, type, categoryId, amount, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, isSavings = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, bankAccountId = null, mitraDetails = [], savingsDetails = [], incomeDetails = [], salesChannelDetails = [], isPb1Payment = false }) {
     const transactionId = await dbTransaction(async (conn) => {
       const [result] = await conn.execute(
         `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, bank_account_id, status_deleted)
@@ -500,6 +532,19 @@ class Transaction {
         }
       }
 
+      // Insert sales channel details
+      if (salesChannelDetails && salesChannelDetails.length > 0) {
+        for (const detail of salesChannelDetails) {
+          if (detail.sales_channel_id && parseFloat(detail.amount || 0) > 0) {
+            await conn.execute(
+              `INSERT INTO transaction_sales_channels (transaction_id, sales_channel_id, amount)
+               VALUES (?, ?, ?)`,
+              [newId, parseInt(detail.sales_channel_id), parseFloat(detail.amount || 0)]
+            );
+          }
+        }
+      }
+
       return newId;
     });
 
@@ -507,7 +552,7 @@ class Transaction {
   }
 
   // Update transaction
-  static async update(id, { type, categoryId, amount, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, incomeDetails, isPb1Payment }) {
+  static async update(id, { type, categoryId, amount, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, incomeDetails, salesChannelDetails, isPb1Payment }) {
     await dbTransaction(async (conn) => {
       // Get old transaction data first to reverse allocation
       const [oldRows] = await conn.execute(
@@ -710,6 +755,22 @@ class Transaction {
                VALUES (?, ?, ?, ?, ?, ?)`,
               [id, detail.payment_method_id, detail.bank_account_id || null, detail.amount_app || 0, detail.amount_cashier || 0, rowLampiran]
             );
+          }
+        }
+      }
+
+      // Handle sales channel details
+      if (salesChannelDetails !== undefined) {
+        await conn.execute(`DELETE FROM transaction_sales_channels WHERE transaction_id = ?`, [id]);
+        if (salesChannelDetails && salesChannelDetails.length > 0) {
+          for (const detail of salesChannelDetails) {
+            if (detail.sales_channel_id && parseFloat(detail.amount || 0) > 0) {
+              await conn.execute(
+                `INSERT INTO transaction_sales_channels (transaction_id, sales_channel_id, amount)
+                 VALUES (?, ?, ?)`,
+                [id, parseInt(detail.sales_channel_id), parseFloat(detail.amount || 0)]
+              );
+            }
           }
         }
       }
@@ -1059,7 +1120,7 @@ class Transaction {
         END), 0) as pelunasan_piutang_lalu,
 
         COALESCE(SUM(CASE 
-          WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryConditionForExpense}) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN t.amount + COALESCE(t.pb1, 0)
+          WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryConditionForExpense}) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN GREATEST(0, t.amount - COALESCE(t_ref.total_refund, 0)) + COALESCE(t.pb1, 0)
           ELSE 0 
         END), 0) as pengeluaran,
 
@@ -1087,6 +1148,11 @@ class Transaction {
       ) tr_sum ON t.id = tr_sum.transaction_id
       LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id
       LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
+      LEFT JOIN (
+        SELECT transaction_id, SUM(amount) as total_refund 
+        FROM transaction_refunds 
+        GROUP BY transaction_id
+      ) t_ref ON t.id = t_ref.transaction_id
       ${joinDetails}
       WHERE 1=1
     `;
