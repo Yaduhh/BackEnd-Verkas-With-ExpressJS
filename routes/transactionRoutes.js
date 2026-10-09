@@ -22,6 +22,7 @@ const {
   updateRepayment,
   deleteRepayment,
   createRefund,
+  updateRefund,
   deleteRefund
 } = require('../controllers/transactionController');
 const { authenticate, authorize } = require('../middleware/auth');
@@ -104,6 +105,7 @@ router.delete('/:id/repayment/:repaymentId', deleteRepayment);
 
 // Refund
 router.post('/:id/refund', createRefund);
+router.put('/:id/refund/:refundId', updateRefund);
 router.delete('/:id/refund/:refundId', deleteRefund);
 
 module.exports = router;

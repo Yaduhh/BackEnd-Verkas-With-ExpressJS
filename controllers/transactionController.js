@@ -2266,6 +2266,169 @@ const createRefund = async (req, res, next) => {
   }
 };
 
+const updateRefund = async (req, res, next) => {
+  try {
+    const { id, refundId } = req.params;
+    const { amount, refund_date, date, note, lampiran } = req.body;
+    const finalDate = refund_date || date;
+
+    if (!amount || !finalDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nominal dan tanggal refund wajib diisi'
+      });
+    }
+
+    const newRefundAmount = parseFloat(amount);
+    if (isNaN(newRefundAmount) || newRefundAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nominal refund harus lebih besar dari 0'
+      });
+    }
+
+    const transaction = await Transaction.findById(id);
+    if (!transaction) {
+      return res.status(404).json({ success: false, message: 'Transaksi tidak ditemukan' });
+    }
+
+    // Verify branch access
+    const Branch = require('../models/Branch');
+    const hasAccess = await Branch.userHasAccess(req.userId, transaction.branch_id, req.user.role);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'Akses ditolak' });
+    }
+
+    const refund = await TransactionRefund.findById(refundId);
+    if (!refund) {
+      return res.status(404).json({ success: false, message: 'Data refund tidak ditemukan' });
+    }
+
+    // User check: Only the refund creator or owner/co-owner can edit this refund
+    const isOwner = req.user.role === 'owner' || req.user.role === 'co-owner' || req.user.role === 'master';
+    if (!isOwner && refund.user_id !== req.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses ditolak: Anda hanya dapat mengedit refund yang Anda buat sendiri'
+      });
+    }
+
+    // Check locked period for transaction and refund dates
+    const txDate = new Date(transaction.date);
+    const isTxLocked = await LockedPeriod.isLocked(transaction.branch_id, txDate.getMonth() + 1, txDate.getFullYear());
+    if (isTxLocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Tidak dapat mengedit refund: Periode bulan transaksi asli sudah ditutup buku (Locked)'
+      });
+    }
+
+    const oldRefDateObj = new Date(refund.refund_date);
+    const isOldRefundLocked = await LockedPeriod.isLocked(transaction.branch_id, oldRefDateObj.getMonth() + 1, oldRefDateObj.getFullYear());
+    if (isOldRefundLocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Tidak dapat mengedit refund: Periode tanggal refund sebelumnya sudah ditutup buku (Locked)'
+      });
+    }
+
+    const newRefDateObj = new Date(finalDate);
+    const isNewRefundLocked = await LockedPeriod.isLocked(transaction.branch_id, newRefDateObj.getMonth() + 1, newRefDateObj.getFullYear());
+    if (isNewRefundLocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Tidak dapat mengedit refund: Periode tanggal refund baru sudah ditutup buku (Locked)'
+      });
+    }
+
+    const oldRefundAmount = parseFloat(refund.amount || 0);
+    const currentAmount = Math.abs(parseFloat(transaction.amount || 0));
+    const maxRefundable = currentAmount + oldRefundAmount;
+
+    if (newRefundAmount > maxRefundable + 0.01) {
+      return res.status(400).json({
+        success: false,
+        message: `Nominal refund (Rp ${newRefundAmount.toLocaleString('id-ID')}) melebihi sisa nominal transaksi yang dapat di-refund (Rp ${maxRefundable.toLocaleString('id-ID')})`
+      });
+    }
+
+    let lampiranValue = lampiran !== undefined ? lampiran : refund.lampiran;
+    if (Array.isArray(lampiranValue)) lampiranValue = JSON.stringify(lampiranValue);
+
+    await TransactionRefund.update(refundId, {
+      amount: newRefundAmount,
+      refundDate: finalDate,
+      note: note || null,
+      lampiran: lampiranValue
+    });
+
+    const diff = newRefundAmount - oldRefundAmount;
+    const newTxAmount = Math.max(0, currentAmount - diff);
+    await query('UPDATE transactions SET amount = ? WHERE id = ?', [newTxAmount, id]);
+
+    const updatedRefund = await TransactionRefund.findById(refundId);
+
+    // Log activity
+    try {
+      LogService.logActivity({
+        userId: req.userId,
+        branchId: transaction.branch_id,
+        action: 'TRANSACTION_REFUND_UPDATE',
+        entityType: 'transaction_refund',
+        entityId: refundId,
+        metadata: {
+          transaction_id: id,
+          old_amount: oldRefundAmount,
+          new_amount: newRefundAmount,
+          refund_date: finalDate,
+          description: `Memperbarui refund Rp ${newRefundAmount.toLocaleString('id-ID')} pada transaksi #${id}`
+        }
+      });
+    } catch (e) {
+      console.error('Error logging refund update:', e);
+    }
+
+    // Add to transaction history (Audit Trail)
+    try {
+      await TransactionEdit.create({
+        transactionId: id,
+        requesterId: req.userId,
+        reason: 'Edit Refund',
+        oldData: {
+          refund_id: refundId,
+          refund_amount: oldRefundAmount,
+          refund_date: refund.refund_date,
+          note: refund.note,
+          lampiran: refund.lampiran
+        },
+        newData: {
+          refund_id: refundId,
+          refund_amount: newRefundAmount,
+          refund_date: finalDate,
+          note: note || null,
+          lampiran: lampiranValue
+        },
+        status: 'approved'
+      });
+    } catch (e) {
+      console.error('Error creating edit refund history:', e);
+    }
+
+    const updatedTransaction = await Transaction.findById(id);
+
+    return res.json({
+      success: true,
+      message: 'Refund berhasil diperbarui',
+      data: {
+        refund: updatedRefund,
+        transaction: updatedTransaction
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const deleteRefund = async (req, res, next) => {
   try {
     const { id, refundId } = req.params;
@@ -2285,6 +2448,15 @@ const deleteRefund = async (req, res, next) => {
     const refund = await TransactionRefund.findById(refundId);
     if (!refund) {
       return res.status(404).json({ success: false, message: 'Data refund tidak ditemukan' });
+    }
+
+    // User check: Only the refund creator or owner/co-owner can delete this refund
+    const isOwner = req.user.role === 'owner' || req.user.role === 'co-owner' || req.user.role === 'master';
+    if (!isOwner && refund.user_id !== req.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses ditolak: Anda hanya dapat menghapus refund yang Anda buat sendiri'
+      });
     }
 
     // Check locked period
@@ -2377,6 +2549,7 @@ module.exports = {
   updateRepayment,
   deleteRepayment,
   createRefund,
+  updateRefund,
   deleteRefund
 };
 
