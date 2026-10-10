@@ -971,7 +971,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         // Sub-items for Simpanan (Soft Peach background #faebe5)
         simpananExpenses.forEach((sx, sIdx) => {
             checkNewPage(rowH);
-            const subCode = `${simpananLetter}${sIdx + 1}`;
+            const subCode = `${simpananLetter.toLowerCase()}${sIdx + 1}`;
             const sAmt = Number(sx.total) || 0;
             const sPerc = formatPercent(sAmt, totalPemasukanFinal);
 
