@@ -823,7 +823,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     // Subheader
     const subHeaderH = 18;
     drawCell(margin, y, wNo, subHeaderH, { bg: '#ffffff', text: 'No', font: fontBold, fontSize: 8.5, align: 'center' });
-    drawCell(margin + wNo, y, wName, subHeaderH, { bg: '#ffffff', text: 'Sales Chanel', font: fontBold, fontSize: 8.5, align: 'center' });
+    drawCell(margin + wNo, y, wName, subHeaderH, { bg: '#ffffff', text: 'Sales Channel', font: fontBold, fontSize: 8.5, align: 'center' });
     drawCell(margin + wNo + wName, y, wAmount, subHeaderH, { bg: '#ffffff', text: 'Jumlah', font: fontBold, fontSize: 8.5, align: 'center' });
     drawCell(margin + wNo + wName + wAmount, y, wPerc, subHeaderH, { bg: '#ffffff', text: 'Persentase', font: fontBold, fontSize: 8.5, align: 'center' });
     y += subHeaderH;
@@ -963,7 +963,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         // Parent Row for Simpanan (Bold, white background)
         checkNewPage(rowH);
         drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: simpananLetter, font: fontBold, fontSize: 8.5, align: 'center' });
-        drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: 'Total Simpanan Simpanan', font: fontBold, fontSize: 8.5, paddingLeft: 8 });
+        drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: 'Total Simpanan', font: fontBold, fontSize: 8.5, paddingLeft: 8 });
         drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(totalSimpananAmt), font: fontBold, fontSize: 8.5 });
         drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: totalSimpananPerc, font: fontBold, fontSize: 8.5, align: 'center' });
         y += rowH;
@@ -1027,35 +1027,11 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#d9e2f3', text: profitPerc, font: fontBold, fontSize: 8.5, align: 'center' });
     y += rowH;
 
-    // 5. NILAI STOK SECTION
-    const stokH = 20;
-    checkNewPage(stokH + rowH * 2 + 10);
-
-    drawCell(margin, y, contentWidth, stokH, {
-        bg: '#5c4777',
-        text: 'NILAI STOK',
-        font: fontBold,
-        fontSize: 9.5,
-        textColor: '#ffffff',
-        paddingLeft: 8
-    });
-    y += stokH;
-
-    // Nilai Stok Awal
-    drawCell(margin, y, wNo + wName, rowH, { bg: '#ffffff', text: 'Nilai Stok Awal', font: fontRegular, fontSize: 8.5, paddingLeft: 8 });
-    drawCell(margin + wNo + wName, y, wAmount + wPerc, rowH, { bg: '#ffffff', rpPrefix: data.stok_awal ? true : false, rpAmount: data.stok_awal ? formatCurrencyForPDF(data.stok_awal) : '-', font: fontRegular, fontSize: 8.5 });
-    y += rowH;
-
-    // Nilai Stok Akhir
-    drawCell(margin, y, wNo + wName, rowH, { bg: '#ffffff', text: 'Nilai Stok Akhir', font: fontRegular, fontSize: 8.5, paddingLeft: 8 });
-    drawCell(margin + wNo + wName, y, wAmount + wPerc, rowH, { bg: '#ffffff', rpPrefix: data.stok_akhir ? true : false, rpAmount: data.stok_akhir ? formatCurrencyForPDF(data.stok_akhir) : '-', font: fontRegular, fontSize: 8.5 });
-    y += rowH;
-
-    // 6. BAGI HASIL SECTION (if exists)
+    // 5. BAGI HASIL SECTION (if exists)
     if (data.bagi_hasil && data.bagi_hasil.length > 0) {
-        checkNewPage(stokH + rowH * 2 + 10);
+        checkNewPage(20 + rowH * 2 + 10);
 
-        drawCell(margin, y, contentWidth, stokH, {
+        drawCell(margin, y, contentWidth, 20, {
             bg: '#356296',
             text: 'BAGI HASIL',
             font: fontBold,
@@ -1063,7 +1039,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
             textColor: '#ffffff',
             paddingLeft: 8
         });
-        y += stokH;
+        y += 20;
 
         data.bagi_hasil.forEach(bh => {
             checkNewPage(rowH);
@@ -1091,6 +1067,30 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
             }
         });
     }
+
+    // 6. NILAI STOK SECTION
+    const stokH = 20;
+    checkNewPage(stokH + rowH * 2 + 10);
+
+    drawCell(margin, y, contentWidth, stokH, {
+        bg: '#5c4777',
+        text: 'NILAI STOK',
+        font: fontBold,
+        fontSize: 9.5,
+        textColor: '#ffffff',
+        paddingLeft: 8
+    });
+    y += stokH;
+
+    // Nilai Stok Awal
+    drawCell(margin, y, wNo + wName, rowH, { bg: '#ffffff', text: 'Nilai Stok Awal', font: fontRegular, fontSize: 8.5, paddingLeft: 8 });
+    drawCell(margin + wNo + wName, y, wAmount + wPerc, rowH, { bg: '#ffffff', rpPrefix: data.stok_awal ? true : false, rpAmount: data.stok_awal ? formatCurrencyForPDF(data.stok_awal) : '-', font: fontRegular, fontSize: 8.5 });
+    y += rowH;
+
+    // Nilai Stok Akhir
+    drawCell(margin, y, wNo + wName, rowH, { bg: '#ffffff', text: 'Nilai Stok Akhir', font: fontRegular, fontSize: 8.5, paddingLeft: 8 });
+    drawCell(margin + wNo + wName, y, wAmount + wPerc, rowH, { bg: '#ffffff', rpPrefix: data.stok_akhir ? true : false, rpAmount: data.stok_akhir ? formatCurrencyForPDF(data.stok_akhir) : '-', font: fontRegular, fontSize: 8.5 });
+    y += rowH;
 
     // Attachment stats info & Footer
     if (data.attachment_stats && data.attachment_stats.total > 0) {
