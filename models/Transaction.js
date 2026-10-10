@@ -148,7 +148,8 @@ class Transaction {
              t_parent.transaction_date as parent_transaction_date,
              COALESCE(tr_sum.total_repayment, 0) as total_repayment,
               COALESCE(t_ref.total_refund, 0) as total_refund,
-              GREATEST(0, ABS(t.amount) - COALESCE(t_ref.total_refund, 0)) as net_amount,
+              (ABS(t.amount) + COALESCE(t_ref.total_refund, 0)) as original_amount,
+              ABS(t.amount) as net_amount,
              /* Standardized dynamic PB1 calculation (10/110) - Using ROUND to match Report logic */
              CASE 
                WHEN t.type = 'income' THEN 
@@ -176,8 +177,8 @@ class Transaction {
                ELSE t.amount 
              END as amount`;
 
-      joinDetails += ` LEFT JOIN transaction_savings_details tsd ON t.id = tsd.transaction_id AND EXISTS (SELECT 1 FROM categories c2 WHERE c2.id = tsd.category_id AND c2.name = ?)`;
-      params.push(categoryName);
+      joinDetails += ` LEFT JOIN transaction_savings_details tsd ON t.id = tsd.transaction_id AND EXISTS (SELECT 1 FROM categories c2 WHERE c2.id = tsd.category_id AND (c2.name = ? OR c2.parent_id IN (SELECT id FROM categories WHERE name = ?)))`;
+      params.push(categoryName, categoryName);
     }
 
     let sql = `
@@ -234,8 +235,12 @@ class Transaction {
     }
 
     if (category && typeof category === 'string' && category.trim() !== '') {
-      sql += ` AND (c.name = ? OR EXISTS (SELECT 1 FROM transaction_savings_details tsd JOIN categories c2 ON tsd.category_id = c2.id WHERE tsd.transaction_id = t.id AND c2.name = ?))`;
-      params.push(category.trim(), category.trim());
+      sql += ` AND (
+        c.name = ? 
+        OR c.parent_id IN (SELECT id FROM categories WHERE name = ?)
+        OR EXISTS (SELECT 1 FROM transaction_savings_details tsd JOIN categories c2 ON tsd.category_id = c2.id WHERE tsd.transaction_id = t.id AND (c2.name = ? OR c2.parent_id IN (SELECT id FROM categories WHERE name = ?)))
+      )`;
+      params.push(category.trim(), category.trim(), category.trim(), category.trim());
     }
 
     if (startDate && typeof startDate === 'string' && startDate.trim() !== '') {
