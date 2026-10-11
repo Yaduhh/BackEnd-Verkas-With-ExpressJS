@@ -88,6 +88,24 @@ const exportCategoryReport = async (req, res, next) => {
         const branch = await Branch.findById(parseInt(branchId));
         const branchName = branch ? branch.name : 'Branch';
 
+        // Resolve category code if a specific category is requested
+        let categoryCode = null;
+        if (category && category !== 'Semua Kategori' && category !== 'all') {
+            const { query } = require('../config/database');
+            const catRows = await query(
+                `SELECT code FROM categories 
+                 WHERE name = ? 
+                   AND (branch_id = ? OR branch_id IS NULL) 
+                   AND status_deleted = false 
+                 ORDER BY (branch_id = ?) DESC, id DESC 
+                 LIMIT 1`,
+                [category, parseInt(branchId), parseInt(branchId)]
+            );
+            if (catRows.length > 0 && catRows[0].code) {
+                categoryCode = catRows[0].code.trim();
+            }
+        }
+
         // Resolve working days
         let resolvedWorkingDays = working_days ? parseInt(working_days) : null;
         if (!resolvedWorkingDays) {
@@ -105,8 +123,11 @@ const exportCategoryReport = async (req, res, next) => {
             toDate: to_date,
             title: title || `Laporan ${category || 'Transaksi'}`,
             categoryName: (category && category !== 'Semua Kategori') ? category : 'SEMUA KATEGORI',
+            categoryCode: categoryCode,
             type: type || 'all',
-            workingDays: resolvedWorkingDays
+            workingDays: resolvedWorkingDays,
+            branchCode: branch ? branch.code : null,
+            branchName: branchName
         };
 
         let filepath;

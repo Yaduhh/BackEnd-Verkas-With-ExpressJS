@@ -124,7 +124,11 @@ async function exportCategoryToExcel(data, filename, branchName, options = {}) {
         }
     }
 
-    const categoryTitle = (options.categoryName || 'SEMUA KATEGORI').toUpperCase();
+    const rawCategoryName = (options.categoryName || 'SEMUA KATEGORI').toUpperCase();
+    const categoryCode = options.categoryCode ? options.categoryCode.trim() : '';
+    const categoryTitle = categoryCode
+        ? `${categoryCode}. ${rawCategoryName}`
+        : rawCategoryName;
     const periodText = formatPeriodText(options.fromDate, options.toDate, validData);
     const workingDays = options.workingDays || 25;
 

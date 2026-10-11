@@ -221,7 +221,7 @@ const getReport = async (req, res, next) => {
         // Group them into the display format
         const groupedIncome = {
             'OMZET PENJUALAN': { total_net: 0, total_tax: 0, category_id: null },
-            'Lain-lain': { total_net: 0, total_tax: 0, category_id: null }
+            'Pendapatan Lain-lain': { total_net: 0, total_tax: 0, category_id: null }
         };
         
         incomeBreakdownResult.forEach(item => {
@@ -244,10 +244,10 @@ const getReport = async (req, res, next) => {
                 }
             } else {
                 if ((!item.is_debt_payment || item.is_debt_payment == 0) && !hasExpense) {
-                    groupedIncome['Lain-lain'].total_net += net;
-                    groupedIncome['Lain-lain'].total_tax += tax;
-                    if (!groupedIncome['Lain-lain'].category_id && item.category_id) {
-                        groupedIncome['Lain-lain'].category_id = item.category_id;
+                    groupedIncome['Pendapatan Lain-lain'].total_net += net;
+                    groupedIncome['Pendapatan Lain-lain'].total_tax += tax;
+                    if (!groupedIncome['Pendapatan Lain-lain'].category_id && item.category_id) {
+                        groupedIncome['Pendapatan Lain-lain'].category_id = item.category_id;
                     }
                 }
             }
@@ -744,7 +744,7 @@ const exportPdf = async (req, res, next) => {
 
         const groupedIncome = {
             'OMZET PENJUALAN': 0,
-            'Lain-lain': 0
+            'Pendapatan Lain-lain': 0
         };
 
         incomeBreakdownRaw.forEach(item => {
@@ -764,7 +764,7 @@ const exportPdf = async (req, res, next) => {
             } else {
                 // Original strict logic for Other items:
                 if ((!item.is_debt_payment || item.is_debt_payment == 0) && !hasExpense) {
-                    groupedIncome['Lain-lain'] += net;
+                    groupedIncome['Pendapatan Lain-lain'] += net;
                 }
             }
         });
@@ -948,12 +948,24 @@ const exportPdf = async (req, res, next) => {
         };
 
         const { exportFinancialReportToPDF, generateFilename, getMimeType } = require('../utils/exportHelper');
-        const filename = generateFilename('PDF', `Laporan_Keuangan_${branch.name}`);
+        const branchCodeOrName = (branch.code && branch.code.trim()) ? branch.code.trim() : branch.name;
+        const filename = generateFilename('PDF', `Laporan_Keuangan_${branchCodeOrName}`);
         const selectedMonthDate = new Date(year, month - 1, 1);
 
         try {
             const userName = req.user.name || req.user.email;
-            const filepath = await exportFinancialReportToPDF(dataForPdf, filename, branch.name, selectedMonthDate, report.working_days || workingDays, { printedBy: userName });
+            const filepath = await exportFinancialReportToPDF(
+                dataForPdf, 
+                filename, 
+                branchCodeOrName, 
+                selectedMonthDate, 
+                report.working_days || workingDays, 
+                { 
+                    printedBy: userName,
+                    branchCode: branch.code,
+                    branchName: branch.name
+                }
+            );
 
             const fs = require('fs');
             if (!fs.existsSync(filepath)) {
@@ -1167,7 +1179,7 @@ const exportImage = async (req, res, next) => {
 
         const groupedIncome = {
             'OMZET PENJUALAN': 0,
-            'Lain-lain': 0
+            'Pendapatan Lain-lain': 0
         };
 
         incomeBreakdownRaw.forEach(item => {
@@ -1187,7 +1199,7 @@ const exportImage = async (req, res, next) => {
             } else {
                 // Original strict logic for Other items:
                 if ((!item.is_debt_payment || item.is_debt_payment == 0) && !hasExpense) {
-                    groupedIncome['Lain-lain'] += net;
+                    groupedIncome['Pendapatan Lain-lain'] += net;
                 }
             }
         });
@@ -1371,12 +1383,24 @@ const exportImage = async (req, res, next) => {
         };
 
         const { exportFinancialReportToPDF, exportPDFToJPEG, generateFilename } = require('../utils/exportHelper');
-        const filename = generateFilename('PDF', `Laporan_Keuangan_${branch.name}`);
+        const branchCodeOrName = (branch.code && branch.code.trim()) ? branch.code.trim() : branch.name;
+        const filename = generateFilename('PDF', `Laporan_Keuangan_${branchCodeOrName}`);
         const selectedMonthDate = new Date(year, month - 1, 1);
 
         try {
             const userName = req.user.name || req.user.email;
-            const filepath = await exportFinancialReportToPDF(dataForPdf, filename, branch.name, selectedMonthDate, report.working_days || workingDays, { printedBy: userName });
+            const filepath = await exportFinancialReportToPDF(
+                dataForPdf, 
+                filename, 
+                branchCodeOrName, 
+                selectedMonthDate, 
+                report.working_days || workingDays, 
+                { 
+                    printedBy: userName,
+                    branchCode: branch.code,
+                    branchName: branch.name
+                }
+            );
 
             const fs = require('fs');
             if (!fs.existsSync(filepath)) {
@@ -1424,11 +1448,12 @@ const exportBagiHasilPdf = async (req, res, next) => {
         if (!report) return res.status(404).json({ success: false, message: 'Laporan tidak ditemukan' });
 
         const { exportBagiHasilToPDF, generateFilename, getMimeType } = require('../utils/exportHelper');
-        const filename = generateFilename('PDF', `Bagi_Hasil_${branch.name}`);
+        const branchCodeOrName = (branch.code && branch.code.trim()) ? branch.code.trim() : branch.name;
+        const filename = generateFilename('PDF', `Bagi_Hasil_${branchCodeOrName}`);
         const selectedMonthDate = new Date(year, month - 1, 1);
 
         try {
-            const filepath = await exportBagiHasilToPDF(report, filename, branch.name, selectedMonthDate);
+            const filepath = await exportBagiHasilToPDF(report, filename, branchCodeOrName, selectedMonthDate);
 
             const fs = require('fs');
             res.setHeader('Content-Type', getMimeType('PDF') || 'application/pdf');
@@ -1570,13 +1595,14 @@ const exportSavingsPdf = async (req, res, next) => {
         }
 
         const { exportSavingsReportToPDF, generateFilename, getMimeType } = require('../utils/exportHelper');
-        const filename = generateFilename('PDF', `Laporan_Simpanan_${branch.name}`);
+        const branchCodeOrName = (branch.code && branch.code.trim()) ? branch.code.trim() : branch.name;
+        const filename = generateFilename('PDF', `Laporan_Simpanan_${branchCodeOrName}`);
 
         try {
             const filepath = await exportSavingsReportToPDF(
                 { categories: categoriesData },
                 filename,
-                branch.name,
+                branchCodeOrName,
                 selectedMonthDate,
                 workingDays
             );

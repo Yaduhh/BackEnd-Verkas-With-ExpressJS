@@ -243,7 +243,7 @@ const create = async (req, res, next) => {
       });
     }
 
-    const { name, address, phone, pic_id, pic_ids, team_id, require_edit_approval, require_delete_approval, require_attachment } = req.body;
+    const { name, code, address, phone, pic_id, pic_ids, team_id, require_edit_approval, require_delete_approval, require_attachment } = req.body;
 
     if (!name) {
       return res.status(400).json({
@@ -305,6 +305,7 @@ const create = async (req, res, next) => {
 
     const branch = await Branch.create({
       name,
+      code,
       address,
       phone,
       ownerId: req.userId,
@@ -355,7 +356,7 @@ const update = async (req, res, next) => {
       });
     }
 
-    const { name, address, phone, pic_id, status_active, require_edit_approval, require_delete_approval, require_attachment } = req.body;
+    const { name, code, address, phone, pic_id, status_active, require_edit_approval, require_delete_approval, require_attachment } = req.body;
 
     // Verify PIC if provided
     if (pic_id !== undefined && pic_id !== null) {
@@ -370,6 +371,7 @@ const update = async (req, res, next) => {
 
     const updatedBranch = await Branch.update(id, {
       name,
+      code,
       address,
       phone,
       picId: pic_id,

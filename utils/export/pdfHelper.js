@@ -504,7 +504,11 @@ async function exportCategoryToPDF(data, filename, branchName, options = {}) {
         }
     }
 
-    const categoryTitle = (options.categoryName || 'SEMUA KATEGORI').toUpperCase();
+    const rawCategoryName = (options.categoryName || 'SEMUA KATEGORI').toUpperCase();
+    const categoryCode = options.categoryCode ? options.categoryCode.trim() : '';
+    const categoryTitle = categoryCode
+        ? `${categoryCode}. ${rawCategoryName}`
+        : rawCategoryName;
     const periodText = formatPeriodText(options.fromDate, options.toDate, validData);
     const workingDays = options.workingDays || 26;
 
@@ -771,10 +775,14 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     doc.rect(margin, y, contentWidth, headerHeight).fillColor('#0a1c58').fill();
     doc.rect(margin, y, contentWidth, headerHeight).lineWidth(0.5).strokeColor('#000000').stroke();
 
-    // Center Title: LAP. KEU and BRANCH NAME
+    // Center Title: LAP. KEU and BRANCH CODE / NAME
+    const branchLabel = (options.branchCode && options.branchCode.trim())
+        ? options.branchCode.trim()
+        : branchName;
+
     doc.font(fontBold).fontSize(14).fillColor('#ffff00');
     doc.text('LAP. KEU', margin, y + 10, { width: contentWidth, align: 'center' });
-    doc.text(branchName.toUpperCase(), margin, y + 28, { width: contentWidth, align: 'center' });
+    doc.text(branchLabel.toUpperCase(), margin, y + 28, { width: contentWidth, align: 'center' });
 
     // Right Info: Month and Working Days
     const monthShortNames = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
@@ -835,9 +843,9 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     // A) Sales channels
     (data.sales_channels || []).forEach((sc) => {
         checkNewPage(rowH);
-        let scName = sc.name;
-        if (!scName.toLowerCase().startsWith('omzet') && !scName.toLowerCase().startsWith('omset') && !scName.toLowerCase().startsWith('pendapatan')) {
-            scName = `Omzet ${sc.name}`;
+        let scName = sc.name || sc.channel_name || '';
+        if (scName && !scName.toLowerCase().startsWith('omzet') && !scName.toLowerCase().startsWith('omset') && !scName.toLowerCase().startsWith('pendapatan')) {
+            scName = `Omzet ${scName}`;
         }
         const amt = Number(sc.amount) || 0;
         const percStr = formatPercent(amt, totalPemasukanFinal);
@@ -858,9 +866,12 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         checkNewPage(rowH);
         const amt = Number(it.total) || 0;
         const percStr = formatPercent(amt, totalPemasukanFinal);
+        const displayName = (it.category_name || '').toLowerCase().includes('lain')
+            ? 'Pendapatan Lain-lain'
+            : it.category_name;
 
         drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
-        drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: it.category_name, font: fontBold, fontSize: 8.5, paddingLeft: 8 });
+        drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: displayName, font: fontBold, fontSize: 8.5, paddingLeft: 8 });
         drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(amt), font: fontBold, fontSize: 8.5 });
         drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
         y += rowH;

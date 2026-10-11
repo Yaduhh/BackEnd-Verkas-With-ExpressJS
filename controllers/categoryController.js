@@ -62,7 +62,7 @@ const getById = async (req, res, next) => {
 // Create category
 const create = async (req, res, next) => {
   try {
-    const { name, type = 'both', is_folder, parent_id, min_attachment } = req.body;
+    const { name, code, type = 'both', is_folder, parent_id, min_attachment } = req.body;
 
     // Get branchId from header or middleware (optional for categories)
     const branchId = req.branchId || req.headers['x-branch-id'] || null;
@@ -84,6 +84,7 @@ const create = async (req, res, next) => {
 
     const category = await Category.create({
       name,
+      code,
       type,
       userId: req.userId,
       branchId: branchId ? parseInt(branchId) : null,
@@ -104,6 +105,7 @@ const create = async (req, res, next) => {
         branchId: parseInt(branchId),
         newValues: {
           name: category.name,
+          code: category.code,
           is_folder: category.is_folder,
           parent_id: category.parent_id,
           min_attachment: category.min_attachment,
@@ -135,7 +137,7 @@ const create = async (req, res, next) => {
 const update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, type, is_folder, parent_id, min_attachment } = req.body;
+    const { name, code, type, is_folder, parent_id, min_attachment } = req.body;
 
     const existing = await Category.findById(id);
     if (!existing) {
@@ -160,6 +162,7 @@ const update = async (req, res, next) => {
 
     const category = await Category.update(id, {
       name,
+      code,
       type,
       is_folder: is_folder !== undefined ? (is_folder === 1 || is_folder === true) : undefined,
       parent_id: parent_id !== undefined ? (parent_id ? parseInt(parent_id) : null) : undefined,
@@ -170,6 +173,9 @@ const update = async (req, res, next) => {
     const changes = {};
     if (name !== undefined && existing.name !== name) {
       changes.name = { old: existing.name, new: name };
+    }
+    if (code !== undefined && existing.code !== code) {
+      changes.code = { old: existing.code, new: code };
     }
     if (type !== undefined && existing.type !== type) {
       changes.type = { old: existing.type, new: type };
@@ -192,11 +198,13 @@ const update = async (req, res, next) => {
         branchId: existing.branch_id,
         oldValues: {
           name: existing.name,
+          code: existing.code,
           is_folder: existing.is_folder,
           min_attachment: existing.min_attachment,
         },
         newValues: {
           name: category.name,
+          code: category.code,
           is_folder: category.is_folder,
           parent_id: category.parent_id,
           min_attachment: category.min_attachment,
