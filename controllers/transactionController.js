@@ -126,7 +126,8 @@ const getAll = async (req, res, next) => {
       has_pb1,
       payment_method_id,
       payment_method_category_id,
-      include_income_details
+      include_income_details,
+      is_draft
     } = req.query;
 
     // Get branch_id from header or middleware
@@ -156,7 +157,11 @@ const getAll = async (req, res, next) => {
       });
     }
 
+    const isDraftFilter = is_draft !== undefined ? (is_draft === 'true' || is_draft === true) : undefined;
+    const filterUserId = isDraftFilter ? req.userId : undefined;
+
     const transactions = await Transaction.findAll({
+      userId: filterUserId,
       branchId: validBranchId,
       type: type || undefined,
       category: category || undefined,
@@ -175,10 +180,12 @@ const getAll = async (req, res, next) => {
       hasPb1: has_pb1 === 'true',
       paymentMethodId: payment_method_id || undefined,
       paymentMethodCategoryId: payment_method_category_id || undefined,
-      includeIncomeDetails: include_income_details === 'true'
+      includeIncomeDetails: include_income_details === 'true',
+      isDraft: isDraftFilter
     });
 
     const total = await Transaction.count({
+      userId: filterUserId,
       branchId: parseInt(branchId),
       type,
       category,
@@ -191,7 +198,8 @@ const getAll = async (req, res, next) => {
       isUmum: is_umum,
       mitraPiutangId: mitra_piutang_id || undefined,
       paymentMethodId: payment_method_id || undefined,
-      paymentMethodCategoryId: payment_method_category_id || undefined
+      paymentMethodCategoryId: payment_method_category_id || undefined,
+      isDraft: isDraftFilter
     });
 
     // Format lampiran paths to full URLs for all transactions
@@ -265,7 +273,9 @@ const getById = async (req, res, next) => {
 
 const create = async (req, res, next) => {
   try {
-    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_savings, mitra_details, savings_details, income_details, sales_channel_details, is_pb1_payment } = req.body;
+    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_savings, mitra_details, savings_details, income_details, sales_channel_details, product_items, is_pb1_payment, is_draft } = req.body;
+
+    const isDraft = is_draft === true || is_draft === 'true' || is_draft === 1;
 
     // Get branch_id from header or middleware
     const branchId = req.branchId || req.headers['x-branch-id'];
@@ -295,20 +305,21 @@ const create = async (req, res, next) => {
       });
     }
 
-    // Check if attachment is required
+    // Check if attachment is required (skipped for drafts)
     const isLampiranEmpty = !lampiran || 
       (Array.isArray(lampiran) && lampiran.length === 0) || 
       (typeof lampiran === 'string' && (lampiran.trim() === '' || lampiran === '[]'));
       
-    if (branchData.require_attachment === 1 && isLampiranEmpty) {
+    if (!isDraft && branchData.require_attachment === 1 && isLampiranEmpty) {
       return res.status(400).json({
         success: false,
         message: 'Bukti transaksi (lampiran) wajib diunggah untuk cabang ini.'
       });
     }
 
-    // Check if the period is locked
-    const transactionDateObj = new Date(date);
+    // Check if the period is locked (only if date is valid)
+    const txDate = date || new Date().toISOString().split('T')[0];
+    const transactionDateObj = new Date(txDate);
     const txMonth = transactionDateObj.getMonth() + 1;
     const txYear = transactionDateObj.getFullYear();
     const isLocked = await LockedPeriod.isLocked(branchId, txMonth, txYear);
@@ -320,18 +331,28 @@ const create = async (req, res, next) => {
       });
     }
 
-    // Find category by name
-    const categoryRecord = await Category.findAll({
-      type,
-      userId: req.userId,
-      branchId: parseInt(branchId)
-    });
-    const foundCategory = categoryRecord.find(c => c.name === category);
+    // Find category by name (optional for drafts)
+    let foundCategoryId = null;
+    if (category) {
+      const categoryRecord = await Category.findAll({
+        type: type || 'pengeluaran',
+        userId: req.userId,
+        branchId: parseInt(branchId)
+      });
+      const foundCategory = categoryRecord.find(c => c.name === category);
 
-    if (!foundCategory) {
-      return res.status(404).json({
+      if (foundCategory) {
+        foundCategoryId = foundCategory.id;
+      } else if (!isDraft) {
+        return res.status(404).json({
+          success: false,
+          message: 'Category not found'
+        });
+      }
+    } else if (!isDraft) {
+      return res.status(400).json({
         success: false,
-        message: 'Category not found'
+        message: 'Kategori wajib diisi'
       });
     }
 
@@ -362,8 +383,8 @@ const create = async (req, res, next) => {
     if (isDebtPayment) {
       if (paid_amount !== undefined && paid_amount !== null) {
         paidAmount = parseFloat(paid_amount);
-        // Validate: paid_amount should not exceed amount
-        if (paidAmount > parseFloat(amount)) {
+        // Validate: paid_amount should not exceed amount (skip strict validation on draft if amount is 0 or unset)
+        if (!isDraft && paidAmount > parseFloat(amount || 0)) {
           return res.status(400).json({
             success: false,
             message: 'Jumlah yang dibayar tidak boleh lebih dari nominal'
@@ -385,16 +406,18 @@ const create = async (req, res, next) => {
       }
     }
 
+    const finalAmount = amount !== undefined && amount !== null && amount !== '' ? parseFloat(amount) : 0;
+
     // Create transaction
     const transaction = await Transaction.create({
       userId: req.userId,
       branchId: parseInt(branchId),
-      type,
-      categoryId: foundCategory.id,
-      amount: parseFloat(amount),
+      type: type || 'pengeluaran',
+      categoryId: foundCategoryId,
+      amount: isNaN(finalAmount) ? 0 : finalAmount,
       pb1: pb1 ? parseFloat(pb1) : null,
       note: note || null,
-      transactionDate: date,
+      transactionDate: txDate,
       lampiran: lampiranValue,
       isUmum: (is_pb1_payment === true || is_pb1_payment === 'true' || is_pb1_payment === 1) ? false : isUmum,
       isDebtPayment,
@@ -407,14 +430,16 @@ const create = async (req, res, next) => {
       savingsDetails: savings_details || [],
       incomeDetails: income_details || [],
       salesChannelDetails: sales_channel_details || [],
-      isPb1Payment: is_pb1_payment === true || is_pb1_payment === 'true' || is_pb1_payment === 1
+      productItems: product_items || [],
+      isPb1Payment: is_pb1_payment === true || is_pb1_payment === 'true' || is_pb1_payment === 1,
+      isDraft
     });
 
     // Log to history table (Audit Trail) - Non-blocking
     TransactionEdit.create({
       transactionId: transaction.id,
       requesterId: req.userId,
-      reason: 'Transaksi Dibuat',
+      reason: isDraft ? 'Draft Transaksi Dibuat' : 'Transaksi Dibuat',
       oldData: {},
       newData: {
         type: transaction.type,
@@ -430,7 +455,9 @@ const create = async (req, res, next) => {
         remaining_debt: transaction.remaining_debt,
         savings_details: transaction.savings_details,
         income_details: transaction.income_details,
-        sales_channel_details: transaction.sales_channel_details
+        sales_channel_details: transaction.sales_channel_details,
+        product_items: transaction.product_items,
+        is_draft: isDraft
       },
       status: 'approved'
     }).catch(err => console.error('Error creating creation history:', err));
@@ -476,7 +503,7 @@ const create = async (req, res, next) => {
 const update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, mitra_details, savings_details, income_details, sales_channel_details, is_pb1_payment } = req.body;
+    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, mitra_details, savings_details, income_details, sales_channel_details, product_items, is_pb1_payment, is_draft } = req.body;
 
     // Check if transaction exists and belongs to user
     const existing = await Transaction.findById(id);
@@ -505,8 +532,12 @@ const update = async (req, res, next) => {
       });
     }
 
-    // 1. Approval requirement for Admin
-    if (req.user.role === 'admin' && branchData.require_edit_approval === 1) {
+    const targetIsDraft = is_draft !== undefined 
+      ? (is_draft === true || is_draft === 'true' || is_draft === 1) 
+      : Boolean(existing.is_draft);
+
+    // 1. Approval requirement for Admin (skipped if editing an unpublished draft)
+    if (!existing.is_draft && req.user.role === 'admin' && branchData.require_edit_approval === 1) {
       if (existing.edit_accepted !== 2) {
         return res.status(403).json({
           success: false,
@@ -515,38 +546,43 @@ const update = async (req, res, next) => {
       }
     }
 
-    // 2. Attachment requirement
+    // 2. Attachment requirement (skipped for drafts)
     const finalLampiran = lampiran !== undefined ? lampiran : existing.lampiran;
     const isLampiranEmpty = !finalLampiran || 
       (Array.isArray(finalLampiran) && finalLampiran.length === 0) || 
       (typeof finalLampiran === 'string' && (finalLampiran.trim() === '' || finalLampiran === '[]'));
       
-    if (branchData.require_attachment === 1 && isLampiranEmpty) {
+    if (!targetIsDraft && branchData.require_attachment === 1 && isLampiranEmpty) {
       return res.status(400).json({
         success: false,
         message: 'Bukti transaksi (lampiran) wajib diunggah untuk cabang ini.'
       });
     }
 
-    // Check if existing transaction's period is locked
-    const oldDateObj = new Date(existing.transaction_date);
-    const oldMonth = oldDateObj.getMonth() + 1;
-    const oldYear = oldDateObj.getFullYear();
-    const isOldLocked = await LockedPeriod.isLocked(existing.branch_id, oldMonth, oldYear);
-    
-    if (isOldLocked) {
-      return res.status(403).json({
-        success: false,
-        message: 'Akses Ditolak: Transaksi ini berada di periode yang sudah dikunci.'
-      });
+    // Check if existing transaction's period is locked (only for published transactions)
+    if (!existing.is_draft) {
+      const oldDateObj = new Date(existing.transaction_date);
+      const oldMonth = oldDateObj.getMonth() + 1;
+      const oldYear = oldDateObj.getFullYear();
+      const isOldLocked = await LockedPeriod.isLocked(existing.branch_id, oldMonth, oldYear);
+      
+      if (isOldLocked) {
+        return res.status(403).json({
+          success: false,
+          message: 'Akses Ditolak: Transaksi ini berada di periode yang sudah dikunci.'
+        });
+      }
     }
 
     // Check if new transaction's period is locked
     const finalReqDate = transaction_date || date;
-    if (finalReqDate) {
+    if (finalReqDate && !targetIsDraft) {
       const newDateObj = new Date(finalReqDate);
       const newMonth = newDateObj.getMonth() + 1;
       const newYear = newDateObj.getFullYear();
+      const oldDateObj = new Date(existing.transaction_date);
+      const oldMonth = oldDateObj.getMonth() + 1;
+      const oldYear = oldDateObj.getFullYear();
       if (newMonth !== oldMonth || newYear !== oldYear) {
         const isNewLocked = await LockedPeriod.isLocked(existing.branch_id, newMonth, newYear);
         if (isNewLocked) {
@@ -599,14 +635,14 @@ const update = async (req, res, next) => {
       });
       const foundCategory = categoryRecord.find(c => c.name === category);
 
-      if (!foundCategory) {
+      if (!foundCategory && !targetIsDraft) {
         return res.status(404).json({
           success: false,
           message: 'Category not found'
         });
       }
 
-      updateData.categoryId = foundCategory.id;
+      updateData.categoryId = foundCategory ? foundCategory.id : null;
     }
 
     if (mitra_details !== undefined) {
@@ -623,6 +659,10 @@ const update = async (req, res, next) => {
 
     if (sales_channel_details !== undefined) {
       updateData.salesChannelDetails = sales_channel_details;
+    }
+
+    if (product_items !== undefined) {
+      updateData.productItems = product_items;
     }
 
     // Pass debt payment fields to model
@@ -645,6 +685,10 @@ const update = async (req, res, next) => {
 
     if (is_pb1_payment !== undefined) {
       updateData.isPb1Payment = is_pb1_payment === true || is_pb1_payment === 'true' || is_pb1_payment === 1;
+    }
+
+    if (is_draft !== undefined) {
+      updateData.isDraft = is_draft === true || is_draft === 'true' || is_draft === 1;
     }
 
     // Guarantee PB1 setoran payments NEVER get saved with is_umum = true (Kas Berjalan)
@@ -734,7 +778,8 @@ const update = async (req, res, next) => {
         is_pb1_payment: existing.is_pb1_payment,
         savings_details: existing.savings_details,
         income_details: existing.income_details,
-        sales_channel_details: existing.sales_channel_details
+        sales_channel_details: existing.sales_channel_details,
+        product_items: existing.product_items
       },
       newData: {
         type: transaction.type,
@@ -752,7 +797,8 @@ const update = async (req, res, next) => {
         is_pb1_payment: transaction.is_pb1_payment,
         savings_details: transaction.savings_details,
         income_details: transaction.income_details,
-        sales_channel_details: transaction.sales_channel_details
+        sales_channel_details: transaction.sales_channel_details,
+        product_items: transaction.product_items
       },
       status: 'approved'
     });
@@ -835,8 +881,8 @@ const softDelete = async (req, res, next) => {
       });
     }
 
-    // Check if delete approval is required for Admin role
-    if (req.user.role === 'admin' && branchData.require_delete_approval === 1) {
+    // Check if delete approval is required for Admin role (skipped for drafts)
+    if (!existing.is_draft && req.user.role === 'admin' && branchData.require_delete_approval === 1) {
       if (existing.delete_accepted !== 2) {
         return res.status(403).json({
           success: false,
@@ -845,17 +891,19 @@ const softDelete = async (req, res, next) => {
       }
     }
 
-    // Check if existing transaction's period is locked
-    const txDateObj = new Date(existing.transaction_date);
-    const txMonth = txDateObj.getMonth() + 1;
-    const txYear = txDateObj.getFullYear();
-    const isLocked = await LockedPeriod.isLocked(existing.branch_id, txMonth, txYear);
-    
-    if (isLocked) {
-      return res.status(403).json({
-        success: false,
-        message: 'Akses Ditolak: Transaksi ini berada di periode yang sudah dikunci.'
-      });
+    // Check if existing transaction's period is locked (skipped for drafts)
+    if (!existing.is_draft) {
+      const txDateObj = new Date(existing.transaction_date);
+      const txMonth = txDateObj.getMonth() + 1;
+      const txYear = txDateObj.getFullYear();
+      const isLocked = await LockedPeriod.isLocked(existing.branch_id, txMonth, txYear);
+      
+      if (isLocked) {
+        return res.status(403).json({
+          success: false,
+          message: 'Akses Ditolak: Transaksi ini berada di periode yang sudah dikunci.'
+        });
+      }
     }
 
     const result = await Transaction.softDelete(id);
@@ -1497,7 +1545,7 @@ const createRepayment = async (req, res, next) => {
   const { transaction: dbTransaction, query } = require('../config/database');
   try {
     const { id } = req.params; // ID Transaksi Piutang Induk
-    const { mitra_piutang_id, transaction_mitra_detail_id, amount, date, note, lampiran } = req.body;
+    const { mitra_piutang_id, transaction_mitra_detail_id, amount, date, note, lampiran, bank_account_id } = req.body;
 
     if (!mitra_piutang_id || !amount || !date) {
       return res.status(400).json({
@@ -1591,9 +1639,9 @@ const createRepayment = async (req, res, next) => {
       const repaymentNote = note || `Pelunasan Piutang: ${mitraDetail.mitra_nama} (Ref: #${id})`;
 
       const [incomeResult] = await conn.execute(
-        `INSERT INTO transactions (user_id, branch_id, type, amount, note, transaction_date, lampiran, is_umum, is_debt_payment, paid_amount, remaining_debt, status_deleted, category_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, false, NULL)`,
-        [req.userId, transaction.branch_id, 'income', repaymentAmount, repaymentNote, date, lampiranValue, true, repaymentAmount]
+        `INSERT INTO transactions (user_id, branch_id, type, amount, note, transaction_date, lampiran, is_umum, is_debt_payment, paid_amount, remaining_debt, status_deleted, category_id, bank_account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, false, NULL, ?)`,
+        [req.userId, transaction.branch_id, 'income', repaymentAmount, repaymentNote, date, lampiranValue, true, repaymentAmount, bank_account_id ? parseInt(bank_account_id) : null]
       );
       incomeTransactionId = incomeResult.insertId;
 
@@ -1644,7 +1692,7 @@ const updateRepayment = async (req, res, next) => {
   const { transaction: dbTransaction } = require('../config/database');
   try {
     const { id, repaymentId } = req.params;
-    const { amount, date, note, lampiran } = req.body;
+    const { amount, date, note, lampiran, bank_account_id } = req.body;
 
     const repayment = await TransactionRepayment.findById(repaymentId);
     if (!repayment) {
@@ -1700,10 +1748,18 @@ const updateRepayment = async (req, res, next) => {
 
       // 3. Update associated income transaction if exists
       if (repayment.income_transaction_id) {
-        await conn.execute(
-          `UPDATE transactions SET amount = ?, paid_amount = ?, note = ?, transaction_date = ?, lampiran = ? WHERE id = ?`,
-          [newAmount, newAmount, `Pelunasan Piutang (Update): ${mitraDetail.mitra_nama} (Ref: #${id})`, date, lampiranValue, repayment.income_transaction_id]
-        );
+        if (bank_account_id !== undefined) {
+          const bankIdVal = bank_account_id ? parseInt(bank_account_id) : null;
+          await conn.execute(
+            `UPDATE transactions SET amount = ?, paid_amount = ?, note = ?, transaction_date = ?, lampiran = ?, bank_account_id = ? WHERE id = ?`,
+            [newAmount, newAmount, `Pelunasan Piutang (Update): ${mitraDetail.mitra_nama} (Ref: #${id})`, date, lampiranValue, bankIdVal, repayment.income_transaction_id]
+          );
+        } else {
+          await conn.execute(
+            `UPDATE transactions SET amount = ?, paid_amount = ?, note = ?, transaction_date = ?, lampiran = ? WHERE id = ?`,
+            [newAmount, newAmount, `Pelunasan Piutang (Update): ${mitraDetail.mitra_nama} (Ref: #${id})`, date, lampiranValue, repayment.income_transaction_id]
+          );
+        }
       }
 
       // 4. Update repayment record

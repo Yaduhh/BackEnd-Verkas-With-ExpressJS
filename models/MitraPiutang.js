@@ -11,13 +11,16 @@ class MitraPiutang {
                 FROM transactions t
                 WHERE t.mitra_piutang_id = mp.id 
                 AND t.status_deleted = false
+                AND (t.is_draft = false OR t.is_draft IS NULL)
                 AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
               ) + (
                 SELECT COALESCE(SUM(tmd.remaining_debt), 0)
                 FROM transaction_mitra_details tmd
                 JOIN transactions t ON tmd.transaction_id = t.id
                 WHERE tmd.mitra_piutang_id = mp.id AND t.status_deleted = false
-              ) as total_piutang
+                AND (t.is_draft = false OR t.is_draft IS NULL)
+              ) + GREATEST(0, COALESCE(mp.initial_balance, 0) - COALESCE(mp.initial_balance_paid, 0)) as total_piutang,
+              GREATEST(0, COALESCE(mp.initial_balance, 0) - COALESCE(mp.initial_balance_paid, 0)) as initial_balance_remaining
        FROM mitra_piutang mp
        LEFT JOIN users u ON mp.created_by = u.id
        WHERE mp.id = ? AND mp.branch_id = ? AND mp.deleted_at IS NULL`,
@@ -64,6 +67,7 @@ class MitraPiutang {
                FROM transactions t
                WHERE t.mitra_piutang_id = mp.id 
                AND t.status_deleted = false
+               AND (t.is_draft = false OR t.is_draft IS NULL)
                AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
                ${dateFilterSql}
              ) + (
@@ -71,8 +75,10 @@ class MitraPiutang {
                FROM transaction_mitra_details tmd
                JOIN transactions t ON tmd.transaction_id = t.id
                WHERE tmd.mitra_piutang_id = mp.id AND t.status_deleted = false
+               AND (t.is_draft = false OR t.is_draft IS NULL)
                ${dateFilterSql}
-             ) as total_piutang
+             ) + GREATEST(0, COALESCE(mp.initial_balance, 0) - COALESCE(mp.initial_balance_paid, 0)) as total_piutang,
+             GREATEST(0, COALESCE(mp.initial_balance, 0) - COALESCE(mp.initial_balance_paid, 0)) as initial_balance_remaining
       FROM mitra_piutang mp
       LEFT JOIN users u ON mp.created_by = u.id
       WHERE mp.branch_id = ?
@@ -96,23 +102,39 @@ class MitraPiutang {
   }
 
   // Create
-  static async create({ branchId, nama, createdBy }) {
+  static async create({ branchId, nama, createdBy, initialBalance = 0, initialBalanceDate = null, initialBalanceNote = null }) {
     const result = await query(
-      `INSERT INTO mitra_piutang (branch_id, nama, created_by)
-       VALUES (?, ?, ?)`,
-      [branchId, nama, createdBy]
+      `INSERT INTO mitra_piutang (branch_id, nama, created_by, initial_balance, initial_balance_date, initial_balance_note, initial_balance_paid)
+       VALUES (?, ?, ?, ?, ?, ?, 0.00)`,
+      [branchId, nama, createdBy, parseFloat(initialBalance) || 0, initialBalanceDate || null, initialBalanceNote || null]
     );
     return await this.findById(result.insertId, branchId);
   }
 
   // Update
-  static async update(id, branchId, { nama }) {
+  static async update(id, branchId, { nama, initialBalance, initialBalanceDate, initialBalanceNote, initialBalancePaid }) {
     const updates = [];
     const params = [];
 
     if (nama !== undefined) {
       updates.push('nama = ?');
       params.push(nama);
+    }
+    if (initialBalance !== undefined) {
+      updates.push('initial_balance = ?');
+      params.push(parseFloat(initialBalance) || 0);
+    }
+    if (initialBalanceDate !== undefined) {
+      updates.push('initial_balance_date = ?');
+      params.push(initialBalanceDate || null);
+    }
+    if (initialBalanceNote !== undefined) {
+      updates.push('initial_balance_note = ?');
+      params.push(initialBalanceNote || null);
+    }
+    if (initialBalancePaid !== undefined) {
+      updates.push('initial_balance_paid = ?');
+      params.push(parseFloat(initialBalancePaid) || 0);
     }
 
     if (updates.length === 0) return await this.findById(id, branchId);

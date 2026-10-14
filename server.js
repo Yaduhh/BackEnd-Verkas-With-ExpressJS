@@ -25,6 +25,7 @@ const branchReportRoutes = require('./routes/branchReportRoutes');
 const appConfigRoutes = require('./routes/appConfigRoutes');
 const assistantRoutes = require('./routes/assistantRoutes');
 const salesChannelRoutes = require('./routes/salesChannelRoutes');
+const productRoutes = require('./routes/productRoutes');
 
 // Initialize app
 const app = express();
@@ -317,6 +318,7 @@ app.use('/api/branch-reports', branchReportRoutes);
 app.use('/api/app-config', appConfigRoutes);
 app.use('/api/assistant', assistantRoutes);
 app.use('/api/sales-channels', salesChannelRoutes);
+app.use('/api/products', productRoutes);
 
 // 404 handler
 app.use(notFound);

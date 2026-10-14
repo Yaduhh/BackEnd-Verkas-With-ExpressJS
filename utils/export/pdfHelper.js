@@ -2,6 +2,8 @@ const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
 const { EXPORTS_DIR, formatCurrency, getMonthName } = require('./commonHelper');
+const sharp = require('sharp');
+
 
 // Export to PDF (Professional Format)
 async function exportToPDF(data, filename, title) {
@@ -413,6 +415,14 @@ async function exportCategoryToPDF(data, filename, branchName, options = {}) {
         return val > 0.001;
     });
 
+    // Sort transactions chronologically (oldest first: 1 -> 31)
+    validData.sort((a, b) => {
+        const d1 = new Date(a.transaction_date).getTime();
+        const d2 = new Date(b.transaction_date).getTime();
+        if (d1 !== d2) return d1 - d2;
+        return (a.id || 0) - (b.id || 0);
+    });
+
     const pageWidth = doc.page.width;
     const pageHeight = doc.page.height;
     const contentWidth = pageWidth - 2 * margin;
@@ -425,6 +435,7 @@ async function exportCategoryToPDF(data, filename, branchName, options = {}) {
         'JANUARI', 'FEBRUARI', 'MARET', 'APRIL', 'MEI', 'JUNI',
         'JULI', 'AGUSTUS', 'SEPTEMBER', 'OKTOBER', 'NOVEMBER', 'DESEMBER'
     ];
+    const INDONESIAN_DAYS = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
 
     const formatPeriodText = (fromDate, toDate, items) => {
         if (fromDate && toDate) {
@@ -481,17 +492,26 @@ async function exportCategoryToPDF(data, filename, branchName, options = {}) {
 
     const formatIndoHeaderTotal = (num) => {
         const val = Math.abs(Number(num) || 0);
-        return Number.isInteger(val)
-            ? new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(val)
-            : new Intl.NumberFormat('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(val);
+        return new Intl.NumberFormat('id-ID', {
+            minimumFractionDigits: 0,
+            maximumFractionDigits: 0
+        }).format(val);
     };
 
+    const formatIndoPercent = (val) => {
+        if (val === null || val === undefined || isNaN(val)) return '0,00%';
+        return Number(val).toFixed(2).replace('.', ',') + '%';
+    };
+
+    // Determine if sales channels are present
+    const hasSalesChannels = !!(options.hasSalesChannels && options.salesChannels && options.salesChannels.length > 0);
+
     // Determine Type / Lampiran Name
-    let lampiranType = 'PEMASUKAN';
-    if (options.type === 'expense') {
-        lampiranType = 'PENGELUARAN';
-    } else if (options.type === 'income') {
+    let lampiranType = 'PENGELUARAN';
+    if (hasSalesChannels || options.type === 'income') {
         lampiranType = 'PEMASUKAN';
+    } else if (options.type === 'expense') {
+        lampiranType = 'PENGELUARAN';
     } else {
         const incomeCount = validData.filter(t => t.type === 'income').length;
         const expenseCount = validData.filter(t => t.type === 'expense').length;
@@ -504,62 +524,216 @@ async function exportCategoryToPDF(data, filename, branchName, options = {}) {
         }
     }
 
+    const isExpense = lampiranType === 'PENGELUARAN';
+    const softBg = isExpense ? '#FDECEB' : '#EEF4E8';
+
     const rawCategoryName = (options.categoryName || 'SEMUA KATEGORI').toUpperCase();
-    const categoryCode = options.categoryCode ? options.categoryCode.trim() : '';
-    const categoryTitle = categoryCode
-        ? `${categoryCode}. ${rawCategoryName}`
-        : rawCategoryName;
+    let categoryTitle = (options.categoryTitle || (options.categoryCode ? `${options.categoryCode}. ${rawCategoryName}` : rawCategoryName)).toUpperCase();
+
+    if (hasSalesChannels) {
+        const channelCount = options.salesChannels.length;
+        const nums = [];
+        for (let i = 1; i <= channelCount; i++) {
+            nums.push(i + '.');
+        }
+        let prefix = '';
+        if (nums.length === 1) {
+            prefix = nums[0];
+        } else {
+            prefix = nums.slice(0, -1).join(' ') + ' & ' + nums[nums.length - 1];
+        }
+        const cleanCat = rawCategoryName.replace(/^(\d+[\.\s\-]+|&|\s)+/i, '').trim();
+        categoryTitle = `${prefix} ${cleanCat}`.toUpperCase();
+    }
+
     const periodText = formatPeriodText(options.fromDate, options.toDate, validData);
     const workingDays = options.workingDays || 26;
 
-    // Calculate total amount
-    const totalAmount = validData.reduce((sum, t) => sum + Math.abs(parseFloat(t.net_amount !== undefined ? t.net_amount : t.amount || 0)), 0);
+    // Resolve Total column header (e.g. "Total BB" for Bahan Baku, "Total Oz" for Omzet)
+    function resolveTotalColHeader(title, name) {
+        const full = `${title || ''} ${name || ''}`.toUpperCase();
+        if (hasSalesChannels || full.includes('OMZET') || full.includes('OMSET')) {
+            return 'Total Oz';
+        }
+        if (full.includes('BAHAN BAKU') || full.includes('BB')) {
+            return 'Total BB';
+        }
+        if (full.includes('OPERASIONAL') || full.includes('OPS')) {
+            return 'Total Ops';
+        }
+        if (full.includes('GAJI')) {
+            return 'Total Gaji';
+        }
+        if (full.includes('PACKAGING') || full.includes('PKG')) {
+            return 'Total PKG';
+        }
+        if (full.includes('MARKETPLACE')) {
+            return 'Total Market';
+        }
+        const clean = (name || '').trim();
+        if (clean && clean.length <= 10 && clean !== 'Semua Kategori' && clean !== 'SEMUA KATEGORI') {
+            return `Total ${clean}`;
+        }
+        return 'Total Harian';
+    }
 
-    // Column Widths
+    const totalColHeader = resolveTotalColHeader(categoryTitle, options.categoryName);
+
+    // Group transactions by Date
+    const parseDateComponents = (dateVal) => {
+        if (!dateVal) return { key: 'unknown', dayNumber: 1, dayName: 'Senin' };
+        const s = String(dateVal).split('T')[0];
+        const parts = s.split('-');
+        let year = 2026, month = 0, day = 1;
+        if (parts.length === 3) {
+            year = parseInt(parts[0], 10);
+            month = parseInt(parts[1], 10) - 1;
+            day = parseInt(parts[2], 10);
+        }
+        const d = new Date(year, month, day);
+        return {
+            key: `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+            dayNumber: day,
+            dayName: INDONESIAN_DAYS[d.getDay()] || 'Senin'
+        };
+    };
+
+    const groups = [];
+    const groupMap = new Map();
+
+    for (const item of validData) {
+        const dateInfo = parseDateComponents(item.transaction_date);
+        let group = groupMap.get(dateInfo.key);
+        if (!group) {
+            group = {
+                key: dateInfo.key,
+                dayNumber: dateInfo.dayNumber,
+                dayName: dateInfo.dayName,
+                rawItems: [],
+                items: [],
+                dayTotal: 0
+            };
+            groupMap.set(dateInfo.key, group);
+            groups.push(group);
+        }
+        const itemAmt = Math.abs(parseFloat(item.net_amount !== undefined ? item.net_amount : item.amount || 0));
+        group.rawItems.push(item);
+        group.dayTotal += itemAmt;
+    }
+
+    if (hasSalesChannels) {
+        const catPrefix = (options.categoryCode || '1').trim();
+        for (const group of groups) {
+            const channelSums = new Map();
+            let totalFromDetails = 0;
+
+            for (const t of group.rawItems) {
+                if (t.sales_channel_details && Array.isArray(t.sales_channel_details)) {
+                    for (const scd of t.sales_channel_details) {
+                        const scId = scd.sales_channel_id;
+                        const amt = Math.abs(parseFloat(scd.amount || 0));
+                        channelSums.set(scId, (channelSums.get(scId) || 0) + amt);
+                        totalFromDetails += amt;
+                    }
+                }
+            }
+
+            const fallbackToFirst = (totalFromDetails === 0 && group.dayTotal > 0);
+
+            group.items = options.salesChannels.map((channel, idx) => {
+                let amt = channelSums.get(channel.id) || 0;
+                if (fallbackToFirst && idx === 0) {
+                    amt = group.dayTotal;
+                }
+                const cleanName = (channel.name || '').replace(/^[\d\.\s\-]+/, '').trim();
+                const note = `${catPrefix}.${idx + 1} ${cleanName}`;
+                return {
+                    id: channel.id,
+                    note: note,
+                    amount: amt,
+                    channel_name: channel.name,
+                    is_sales_channel: true
+                };
+            });
+
+            const recalculatedDayTotal = group.items.reduce((s, it) => s + it.amount, 0);
+            if (recalculatedDayTotal > 0 || group.dayTotal === 0) {
+                group.dayTotal = recalculatedDayTotal;
+            }
+        }
+    } else {
+        for (const group of groups) {
+            group.items = group.rawItems;
+        }
+    }
+
+    // Calculate grand total across the whole report
+    const grandTotal = groups.reduce((sum, g) => sum + g.dayTotal, 0);
+
+    // Column Widths (A4 Portrait content width: 559.28)
     const colWidths = {
-        tgl: 52,
-        nominal: 145,
-        note: contentWidth - 52 - 145
+        tgl: 46,
+        note: 205,
+        nominalAmount: 98,
+        itemPerc: 42,
+        totalDay: 116,
+        dayPerc: 52.28
     };
 
     // Header dimensions
-    const headerHeight = 98;
+    const headerHeight = 92;
     const headerBg = '#001b54'; // Deep navy blue
-    const headerTextColor = '#FFEE00'; // Bright gold yellow
+    const headerTextColor = '#FFFFFF'; // Clean white
 
     // 1. Draw Navy Header Container
     doc.rect(margin, y, contentWidth, headerHeight).fillColor(headerBg).fill();
 
-    // Top subtle accent bar based on lampiran type
-    const accentBarColor = lampiranType === 'PENGELUARAN' ? '#991b1b' : (lampiranType === 'PEMASUKAN' ? '#004b23' : '#1e3a8a');
+    // Top accent bar
+    const accentBarColor = isExpense ? '#991b1b' : (lampiranType === 'PEMASUKAN' ? '#004b23' : '#1e3a8a');
     doc.rect(margin, y, contentWidth, 2.5).fillColor(accentBarColor).fill();
 
-    // 2. Left side Header Texts (Exact vertical line spacing)
-    doc.fillColor(headerTextColor).font(fontBold).fontSize(11);
+    // 2. Left side Header Texts
+    doc.fillColor(headerTextColor).font(fontBold).fontSize(10.5);
     const leftPadding = margin + 12;
-    doc.text(`NAMA LAMPIRAN : ${lampiranType}`, leftPadding, y + 12);
-    doc.text(`NAMA KATEGORI : ${categoryTitle}`, leftPadding, y + 33);
-    doc.text(`TANGGAL : ${periodText}`, leftPadding, y + 54);
-    doc.text(`BUKA : ${workingDays} HARI`, leftPadding, y + 75);
+    doc.text(`NAMA LAMPIRAN : ${lampiranType}`, leftPadding, y + 10);
+    doc.text(`NAMA KATEGORI : ${categoryTitle}`, leftPadding, y + 29);
+    doc.text(`TANGGAL : ${periodText}`, leftPadding, y + 48);
+    doc.text(`BUKA : ${workingDays} HARI`, leftPadding, y + 67);
 
-    // 3. Right side Total Box (Seamlessly aligned with Nominal column)
-    const totalBoxX = margin + contentWidth - colWidths.nominal;
-    const totalBoxY = y + 66;
-    const totalBoxWidth = colWidths.nominal;
-    const totalBoxHeight = headerHeight - 66;
+    // 3. Right side Total Box (Seamlessly aligned with Total BB/Oz & % columns)
+    const totalBoxX = margin + colWidths.tgl + colWidths.note + colWidths.nominalAmount + colWidths.itemPerc;
+    const totalBoxY = y + 58;
+    const totalBoxWidth = colWidths.totalDay + colWidths.dayPerc;
+    const totalBoxHeight = headerHeight - 58;
 
-    // Draw total box border with yellow
+    // Draw total box border with white outline
     doc.rect(totalBoxX, totalBoxY, totalBoxWidth, totalBoxHeight)
-        .strokeColor(headerTextColor)
+        .strokeColor('#FFFFFF')
         .lineWidth(1.2)
         .stroke();
 
-    doc.font(fontBold).fontSize(12).fillColor(headerTextColor).text('Rp', totalBoxX + 8, totalBoxY + 9);
-    doc.font(fontBold).fontSize(13).fillColor(headerTextColor).text(
-        formatIndoHeaderTotal(totalAmount),
-        totalBoxX + 32,
-        totalBoxY + 8,
-        { width: totalBoxWidth - 40, align: 'right' }
+    // Vertical divider between Total Oz and %
+    const dividerX = totalBoxX + colWidths.totalDay;
+    doc.moveTo(dividerX, totalBoxY).lineTo(dividerX, totalBoxY + totalBoxHeight)
+        .strokeColor('#FFFFFF')
+        .lineWidth(1.2)
+        .stroke();
+
+    // Left sub-box: Rp & Grand Total
+    doc.font(fontBold).fontSize(11).fillColor('#FFFFFF').text('Rp', totalBoxX + 6, totalBoxY + 11);
+    doc.font(fontBold).fontSize(11.5).fillColor('#FFFFFF').text(
+        formatIndoHeaderTotal(grandTotal),
+        totalBoxX + 22,
+        totalBoxY + 10,
+        { width: colWidths.totalDay - 28, align: 'right' }
+    );
+
+    // Right sub-box: 100%
+    doc.font(fontBold).fontSize(12).fillColor('#FFFFFF').text(
+        '100%',
+        dividerX,
+        totalBoxY + 10,
+        { width: colWidths.dayPerc, align: 'center' }
     );
 
     y += headerHeight;
@@ -575,107 +749,196 @@ async function exportCategoryToPDF(data, filename, branchName, options = {}) {
         doc.strokeColor('#000000').lineWidth(0.8).rect(margin, curY, contentWidth, tableHeaderHeight).stroke();
 
         // Column Dividers
-        doc.moveTo(margin + colWidths.tgl, curY).lineTo(margin + colWidths.tgl, curY + tableHeaderHeight).stroke();
-        doc.moveTo(margin + colWidths.tgl + colWidths.note, curY).lineTo(margin + colWidths.tgl + colWidths.note, curY + tableHeaderHeight).stroke();
+        const x1 = margin + colWidths.tgl;
+        const x2 = x1 + colWidths.note;
+        const x3 = x2 + colWidths.nominalAmount + colWidths.itemPerc;
+        const x4 = x3 + colWidths.totalDay;
+
+        doc.moveTo(x1, curY).lineTo(x1, curY + tableHeaderHeight).stroke();
+        doc.moveTo(x2, curY).lineTo(x2, curY + tableHeaderHeight).stroke();
+        doc.moveTo(x3, curY).lineTo(x3, curY + tableHeaderHeight).stroke();
+        doc.moveTo(x4, curY).lineTo(x4, curY + tableHeaderHeight).stroke();
 
         // Header Texts
         doc.fillColor('#000000').font(fontBold).fontSize(10);
         doc.text('TGL', margin, curY + 7.5, { width: colWidths.tgl, align: 'center' });
-        doc.text('Keterangan', margin + colWidths.tgl, curY + 7.5, { width: colWidths.note, align: 'center' });
-        doc.text('Nominal', margin + colWidths.tgl + colWidths.note, curY + 7.5, { width: colWidths.nominal, align: 'center' });
+        doc.text('Keterangan', x1, curY + 7.5, { width: colWidths.note, align: 'center' });
+        doc.text('Nominal', x2, curY + 7.5, { width: colWidths.nominalAmount + colWidths.itemPerc, align: 'center' });
+        doc.text(totalColHeader, x3, curY + 7.5, { width: colWidths.totalDay, align: 'center' });
+        doc.text('%', x4, curY + 7.5, { width: colWidths.dayPerc, align: 'center' });
 
         return curY + tableHeaderHeight;
     };
 
     y = drawTableHeader(y);
 
-    // Function to check page overflow
-    const checkNewPage = (requiredHeight) => {
-        if (y + requiredHeight > pageHeight - margin - 15) {
-            doc.addPage({ margin: margin, size: 'A4' });
-            y = margin;
-            y = drawTableHeader(y);
-            return true;
-        }
-        return false;
-    };
+    // Draw Data Rows grouped by date with smooth pagination
+    for (const group of groups) {
+        const isSingleItemInGroup = group.items.length === 1;
+        const itemHeights = group.items.map(item => {
+            const rawNote = item.note || item.category_name || '-';
+            const noteText = sanitizePDFText(rawNote);
+            doc.font(fontRegular).fontSize(9);
+            const textHeight = doc.heightOfString(noteText, { width: colWidths.note - 12 });
+            const minH = isSingleItemInGroup ? 29 : 20;
+            return Math.max(minH, textHeight + 8);
+        });
 
-    // Draw Data Rows
-    validData.forEach((item, index) => {
-        // Parse date for Day display
-        let dayStr = '-';
-        if (item.transaction_date) {
-            const dateObj = new Date(item.transaction_date);
-            if (!isNaN(dateObj.getTime())) {
-                dayStr = String(dateObj.getDate()).padStart(2, '0');
-            } else {
-                dayStr = String(item.transaction_date).slice(8, 10) || '-';
+        let itemIndex = 0;
+        const totalItemsInGroup = group.items.length;
+        const totalGroupHeight = itemHeights.reduce((a, b) => a + b, 0);
+
+        while (itemIndex < totalItemsInGroup) {
+            // Check remaining space on current page
+            const remainingPageSpace = (pageHeight - margin - 20) - y;
+
+            // If the entire group can fit on a clean page, and doesn't fit on current page, break page cleanly
+            if (itemIndex === 0 && totalGroupHeight <= (pageHeight - 2 * margin - 50) && remainingPageSpace < totalGroupHeight) {
+                doc.addPage({ margin: margin, size: 'A4' });
+                y = margin;
+                y = drawTableHeader(y);
+            } else if (remainingPageSpace < 25) {
+                doc.addPage({ margin: margin, size: 'A4' });
+                y = margin;
+                y = drawTableHeader(y);
+            }
+
+            // Determine how many items fit in the current page
+            const chunkItems = [];
+            const chunkHeights = [];
+            let chunkHeight = 0;
+
+            while (itemIndex < totalItemsInGroup) {
+                const h = itemHeights[itemIndex];
+                if (y + chunkHeight + h > pageHeight - margin - 20 && chunkItems.length > 0) {
+                    break;
+                }
+                chunkItems.push(group.items[itemIndex]);
+                chunkHeights.push(h);
+                chunkHeight += h;
+                itemIndex++;
+            }
+
+            const groupStartY = y;
+            const middleX = margin + colWidths.tgl;
+            const middleW = colWidths.note + colWidths.nominalAmount + colWidths.itemPerc;
+
+            // Draw middle columns per item in this chunk
+            chunkItems.forEach((item, idx) => {
+                const rowH = chunkHeights[idx];
+                const isEven = idx % 2 === 0;
+                const rowBg = isEven ? '#FFFFFF' : softBg;
+                const itemAmt = Math.abs(parseFloat(item.amount !== undefined ? item.amount : (item.net_amount !== undefined ? item.net_amount : 0)));
+                const rawNote = item.note || item.category_name || '-';
+                const noteText = sanitizePDFText(rawNote);
+
+                // Middle background
+                doc.rect(middleX, y, middleW, rowH).fillColor(rowBg).fill();
+
+                // Borders
+                doc.strokeColor('#000000').lineWidth(0.5);
+                doc.moveTo(middleX, y).lineTo(middleX + middleW, y).stroke();
+                doc.moveTo(middleX, y + rowH).lineTo(middleX + middleW, y + rowH).stroke();
+
+                // Divider between Note and Nominal Amount
+                doc.moveTo(middleX + colWidths.note, y).lineTo(middleX + colWidths.note, y + rowH).stroke();
+                // Divider between Nominal Amount and Item %
+                doc.moveTo(middleX + colWidths.note + colWidths.nominalAmount, y).lineTo(middleX + colWidths.note + colWidths.nominalAmount, y + rowH).stroke();
+
+                // Text in Note
+                doc.font(fontRegular).fontSize(9).fillColor('#000000');
+                const noteTextH = doc.heightOfString(noteText, { width: colWidths.note - 12 });
+                const notePaddingY = y + Math.max(4.5, (rowH - noteTextH) / 2);
+                doc.text(noteText, middleX + 6, notePaddingY, {
+                    width: colWidths.note - 12,
+                    align: 'left'
+                });
+
+                // Text in Nominal Amount
+                const textY = y + (rowH - 9) / 2;
+                doc.font(fontRegular).fontSize(8.5).fillColor('#000000');
+                doc.text('Rp', middleX + colWidths.note + 4, textY);
+                doc.font(fontRegular).fontSize(9).fillColor('#000000');
+                doc.text(
+                    formatIndoNominal(itemAmt),
+                    middleX + colWidths.note + 18,
+                    textY,
+                    { width: colWidths.nominalAmount - 22, align: 'right' }
+                );
+
+                // Text in Item %
+                const itemPerc = group.dayTotal > 0 ? (itemAmt / group.dayTotal * 100) : 0;
+                const itemPercText = hasSalesChannels ? `${Math.round(itemPerc)}%` : formatIndoPercent(itemPerc);
+                doc.font(fontBold).fontSize(9).fillColor('#000000');
+                doc.text(
+                    itemPercText,
+                    middleX + colWidths.note + colWidths.nominalAmount,
+                    textY,
+                    { width: colWidths.itemPerc - 5, align: 'right' }
+                );
+
+                y += rowH;
+            });
+
+            // Draw merged TGL column for this chunk
+            const tglX = margin;
+            const tglW = colWidths.tgl;
+            doc.rect(tglX, groupStartY, tglW, chunkHeight).fillColor(softBg).fill();
+            doc.strokeColor('#000000').lineWidth(0.5).rect(tglX, groupStartY, tglW, chunkHeight).stroke();
+
+            const dayNumH = 11;
+            const dayNameH = 9;
+            const lineGap = 1.5;
+            const totalTextH = dayNumH + dayNameH + lineGap;
+            const tglCenterY = groupStartY + Math.max(3, (chunkHeight - totalTextH) / 2);
+
+            doc.font(fontBold).fontSize(10).fillColor('#000000');
+            doc.text(String(group.dayNumber), tglX, tglCenterY, { width: tglW, align: 'center', lineBreak: false });
+            doc.font(fontRegular).fontSize(8.5).fillColor('#000000');
+            doc.text(group.dayName, tglX, tglCenterY + dayNumH + lineGap, { width: tglW, align: 'center', lineBreak: false });
+
+            // Draw merged Total BB/Oz column for this chunk
+            const totX = margin + colWidths.tgl + colWidths.note + colWidths.nominalAmount + colWidths.itemPerc;
+            const totW = colWidths.totalDay;
+            doc.rect(totX, groupStartY, totW, chunkHeight).fillColor('#FFFFFF').fill();
+            doc.strokeColor('#000000').lineWidth(0.5).rect(totX, groupStartY, totW, chunkHeight).stroke();
+
+            const totCenterY = groupStartY + (chunkHeight - 11) / 2;
+            doc.font(fontBold).fontSize(9).fillColor('#000000');
+            doc.text('Rp', totX + 5, totCenterY);
+            doc.font(fontBold).fontSize(9.5).fillColor('#000000');
+            doc.text(
+                formatIndoNominal(group.dayTotal),
+                totX + 22,
+                totCenterY,
+                { width: totW - 27, align: 'right' }
+            );
+
+            // Draw merged % column for this chunk
+            const percX = totX + totW;
+            const percW = colWidths.dayPerc;
+            doc.rect(percX, groupStartY, percW, chunkHeight).fillColor(softBg).fill();
+            doc.strokeColor('#000000').lineWidth(0.5).rect(percX, groupStartY, percW, chunkHeight).stroke();
+
+            const dayPerc = grandTotal > 0 ? (group.dayTotal / grandTotal * 100) : 0;
+            const dayPercText = hasSalesChannels ? `${Math.round(dayPerc)}%` : formatIndoPercent(dayPerc);
+            const percCenterY = groupStartY + (chunkHeight - 11) / 2;
+            doc.font(fontBold).fontSize(9.5).fillColor('#000000');
+            doc.text(
+                dayPercText,
+                percX,
+                percCenterY,
+                { width: percW - 6, align: 'right' }
+            );
+
+            // If there are more items in this group, add page for next iteration
+            if (itemIndex < totalItemsInGroup) {
+                doc.addPage({ margin: margin, size: 'A4' });
+                y = margin;
+                y = drawTableHeader(y);
             }
         }
-
-        const rawNote = item.note || item.category_name || '-';
-        const noteText = sanitizePDFText(rawNote);
-        const itemAmt = Math.abs(parseFloat(item.net_amount !== undefined ? item.net_amount : item.amount || 0));
-        const formattedAmount = formatIndoNominal(itemAmt);
-
-        // Measure note height
-        doc.font(fontRegular).fontSize(9.5);
-        const noteTextHeight = doc.heightOfString(noteText, { width: colWidths.note - 16 });
-        const rowHeight = Math.max(23, noteTextHeight + 9);
-
-        checkNewPage(rowHeight);
-
-        // Determine item type: expense vs income
-        const isExpense = item.type === 'expense' || (lampiranType === 'PENGELUARAN' && !item.type);
-
-        // Dynamic alternating row colors:
-        // Expense: Soft Red (#FDECEB) & White (#FFFFFF)
-        // Income: Soft Green (#EEF4E8) & White (#FFFFFF)
-        const softBg = isExpense ? '#FDECEB' : '#EEF4E8';
-        const rowBg = index % 2 === 0 ? softBg : '#FFFFFF';
-
-        doc.rect(margin, y, contentWidth, rowHeight).fillColor(rowBg).fill();
-
-        // Cell borders (full grid lines)
-        doc.strokeColor('#000000').lineWidth(0.5);
-        doc.rect(margin, y, contentWidth, rowHeight).stroke();
-        doc.moveTo(margin + colWidths.tgl, y).lineTo(margin + colWidths.tgl, y + rowHeight).stroke();
-        doc.moveTo(margin + colWidths.tgl + colWidths.note, y).lineTo(margin + colWidths.tgl + colWidths.note, y + rowHeight).stroke();
-
-        // Row Text
-        const textPaddingY = y + (rowHeight - 9.5) / 2;
-
-        // TGL
-        doc.fillColor('#000000').font(fontRegular).fontSize(9.5).text(
-            dayStr,
-            margin,
-            textPaddingY,
-            { width: colWidths.tgl, align: 'center' }
-        );
-
-        // Keterangan
-        doc.fillColor('#000000').font(fontRegular).fontSize(9.5).text(
-            noteText,
-            margin + colWidths.tgl + 8,
-            y + 4.5,
-            { width: colWidths.note - 16, align: 'left' }
-        );
-
-        // Nominal (Split Rp on left, Amount on right)
-        doc.fillColor('#000000').font(fontRegular).fontSize(9.5).text(
-            'Rp',
-            margin + colWidths.tgl + colWidths.note + 8,
-            textPaddingY
-        );
-        doc.fillColor('#000000').font(fontRegular).fontSize(9.5).text(
-            formattedAmount,
-            margin + colWidths.tgl + colWidths.note + 26,
-            textPaddingY,
-            { width: colWidths.nominal - 34, align: 'right' }
-        );
-
-        y += rowHeight;
-    });
+    }
 
     doc.end();
 
@@ -798,7 +1061,13 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     y += headerHeight;
 
     // 2. PEMASUKAN SECTION
-    const totalPemasukanFinal = Number(data.omzet_total) || 0;
+    const omzetItemsInitial = (data.income_breakdown || []).filter(it => {
+        const n = (it.category_name || '').toLowerCase();
+        return (n.includes('omzet') || n.includes('omset')) && !n.includes('lain');
+    });
+    const totalOmzetNetInitial = omzetItemsInitial.reduce((sum, it) => sum + (Number(it.total) || 0), 0);
+    const totalOtherIncomeInitial = (data.income_breakdown || []).filter(it => !(it.category_name || '').toLowerCase().includes('omzet') && !(it.category_name || '').toLowerCase().includes('omset')).reduce((sum, it) => sum + (Number(it.total) || 0), 0);
+    const totalPemasukanFinal = Number(data.omzet_total) || (totalOmzetNetInitial + totalOtherIncomeInitial + Number(data.pelunasan_piutang_bulan_lalu || 0));
 
     // Header bar (Forest Green)
     const pemHeaderH = 22;
@@ -840,22 +1109,55 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     const rowH = 18;
     let pemIdx = 1;
 
-    // A) Sales channels
-    (data.sales_channels || []).forEach((sc) => {
-        checkNewPage(rowH);
-        let scName = sc.name || sc.channel_name || '';
-        if (scName && !scName.toLowerCase().startsWith('omzet') && !scName.toLowerCase().startsWith('omset') && !scName.toLowerCase().startsWith('pendapatan')) {
-            scName = `Omzet ${scName}`;
-        }
-        const amt = Number(sc.amount) || 0;
-        const percStr = formatPercent(amt, totalPemasukanFinal);
-
-        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
-        drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: scName, font: fontBold, fontSize: 8.5, paddingLeft: 8 });
-        drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(amt), font: fontBold, fontSize: 8.5 });
-        drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
-        y += rowH;
+    // Calculate total net omzet from income breakdown
+    const omzetItems = (data.income_breakdown || []).filter(it => {
+        const n = (it.category_name || '').toLowerCase();
+        return (n.includes('omzet') || n.includes('omset')) && !n.includes('lain');
     });
+    const totalOmzetNet = omzetItems.reduce((sum, it) => sum + (Number(it.total) || 0), 0);
+
+    const salesChannelsList = data.sales_channels || [];
+    const totalSalesChannels = salesChannelsList.reduce((sum, sc) => sum + (Number(sc.amount) || 0), 0);
+
+    // A) Sales channels
+    if (salesChannelsList.length === 0) {
+        if (totalOmzetNet > 0) {
+            checkNewPage(rowH);
+            const percStr = formatPercent(totalOmzetNet, totalPemasukanFinal);
+            drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
+            drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: 'Omzet Penjualan', font: fontBold, fontSize: 8.5, paddingLeft: 8 });
+            drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(totalOmzetNet), font: fontBold, fontSize: 8.5 });
+            drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
+            y += rowH;
+        }
+    } else {
+        salesChannelsList.forEach((sc) => {
+            checkNewPage(rowH);
+            let scName = (sc.name || sc.channel_name || '').trim();
+            // Remove redundant 'Omzet' / 'Omset' prefix if present so channel names like 'Oz Dine In' remain clean
+            scName = scName.replace(/^(omzet|omset)\s+/i, '');
+            const amt = Number(sc.amount) || 0;
+            const percStr = formatPercent(amt, totalPemasukanFinal);
+
+            drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
+            drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: scName, font: fontBold, fontSize: 8.5, paddingLeft: 8 });
+            drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(amt), font: fontBold, fontSize: 8.5 });
+            drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
+            y += rowH;
+        });
+
+        // If there is unallocated omzet not covered by the channels
+        const unallocatedOmzet = totalOmzetNet - totalSalesChannels;
+        if (unallocatedOmzet >= 1) {
+            checkNewPage(rowH);
+            const percStr = formatPercent(unallocatedOmzet, totalPemasukanFinal);
+            drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
+            drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: 'Omzet Belum Teralokasi Channel', font: fontBold, fontSize: 8.5, paddingLeft: 8 });
+            drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(unallocatedOmzet), font: fontBold, fontSize: 8.5 });
+            drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
+            y += rowH;
+        }
+    }
 
     // B) Other Income Categories (Lain-lain or other categories that are not the main Omzet)
     const otherIncomes = (data.income_breakdown || []).filter(it => {
@@ -892,7 +1194,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     }
 
     // 3. PENGELUARAN SECTION
-    const totalPengeluaran = Number(data.pengeluaran_total) || 0;
+    const totalPengeluaran = Number(data.pengeluaran_total) || Number(data.total_pengeluaran) || (data.expense_breakdown || []).reduce((s, x) => s + (Number(x.total) || 0), 0);
     const totalExpPerc = formatPercent(totalPengeluaran, totalPemasukanFinal);
 
     // Header bar (Red)
@@ -995,7 +1297,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
                 }
             }
 
-            drawCell(margin, y, wNo, rowH, { bg: '#faebe5', text: subCode, font: fontBold, fontSize: 8, align: 'center' });
+            drawCell(margin, y, wNo, rowH, { bg: '#faebe5', text: subCode, font: fontRegular, fontSize: 8, align: 'center' });
             drawCell(margin + wNo, y, wName, rowH, { bg: '#faebe5', text: sTitle, font: fontRegular, fontSize: 8, paddingLeft: 8 });
             drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#faebe5', rpPrefix: true, rpAmount: formatCurrencyForPDF(sAmt), font: fontRegular, fontSize: 8 });
             drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#faebe5', text: sPerc, font: fontRegular, fontSize: 8, align: 'center' });
@@ -1081,7 +1383,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
     // 6. NILAI STOK SECTION
     const stokH = 20;
-    checkNewPage(stokH + rowH * 2 + 10);
+    checkNewPage(stokH + rowH * 3 + 10);
 
     drawCell(margin, y, contentWidth, stokH, {
         bg: '#5c4777',
@@ -1101,6 +1403,25 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     // Nilai Stok Akhir
     drawCell(margin, y, wNo + wName, rowH, { bg: '#ffffff', text: 'Nilai Stok Akhir', font: fontRegular, fontSize: 8.5, paddingLeft: 8 });
     drawCell(margin + wNo + wName, y, wAmount + wPerc, rowH, { bg: '#ffffff', rpPrefix: data.stok_akhir ? true : false, rpAmount: data.stok_akhir ? formatCurrencyForPDF(data.stok_akhir) : '-', font: fontRegular, fontSize: 8.5 });
+    y += rowH;
+
+    // Selisih Nilai Stok
+    const stokAwalNum = parseFloat(data.stok_awal) || 0;
+    const stokAkhirNum = parseFloat(data.stok_akhir) || 0;
+    const hasStokData = Boolean(
+        (data.stok_awal !== null && data.stok_awal !== undefined && data.stok_awal !== '') ||
+        (data.stok_akhir !== null && data.stok_akhir !== undefined && data.stok_akhir !== '')
+    );
+    const selisihStok = stokAwalNum - stokAkhirNum;
+
+    drawCell(margin, y, wNo + wName, rowH, { bg: '#ffffff', text: 'Selisih Nilai Stok', font: fontRegular, fontSize: 8.5, paddingLeft: 8 });
+    drawCell(margin + wNo + wName, y, wAmount + wPerc, rowH, { 
+        bg: '#ffffff', 
+        rpPrefix: hasStokData, 
+        rpAmount: hasStokData ? formatCurrencyForPDF(selisihStok) : '-', 
+        font: fontRegular, 
+        fontSize: 8.5 
+    });
     y += rowH;
 
     // Attachment stats info & Footer
@@ -1134,6 +1455,364 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     const footerText = `Laporan ini dicetak pada ${formattedDate} pukul ${formattedTime}${printedByText}`;
 
     doc.fontSize(7.5).font(fontRegular).fillColor('#9ca3af').text(footerText, margin, y, { align: 'center', width: contentWidth });
+
+    // ==========================================
+    // HALAMAN 2: GRAFIK LINGKARAN KEUANGAN (PEMASUKAN & PENGELUARAN DALAM 1 HALAMAN)
+    // ==========================================
+    doc.addPage();
+    const pMargin = 25;
+    const pContentWidth = pageWidth - 2 * pMargin; // 545.28 pt
+    let yP2 = 25;
+
+    // Header Banner Page 2 (Square / Flat borders, no rounded)
+    const headerP2Height = 34;
+    doc.rect(pMargin, yP2, pContentWidth, headerP2Height).fillColor('#0a1c58').fill();
+    doc.rect(pMargin, yP2, pContentWidth, headerP2Height).lineWidth(0.5).strokeColor('#000000').stroke();
+
+    doc.font(fontBold).fontSize(10).fillColor('#ffff00');
+    doc.text('GRAFIK & DIAGRAM KEUANGAN (PEMASUKAN & PENGELUARAN)', pMargin, yP2 + 6, { width: pContentWidth, align: 'center' });
+    doc.fontSize(11).text(branchLabel.toUpperCase(), pMargin, yP2 + 19, { width: pContentWidth, align: 'center' });
+
+    doc.font(fontBold).fontSize(9).fillColor('#ffff00');
+    doc.text(dateLabel, pMargin + pContentWidth - 150, yP2 + 6, { width: 140, align: 'right' });
+    doc.text(openDaysLabel, pMargin + pContentWidth - 150, yP2 + 19, { width: 140, align: 'right' });
+
+    yP2 += headerP2Height + 8;
+
+    // Dimensions for 2 stacked cards on 1 single page
+    const cardHeight = 358;
+    const headerStripHeight = 22;
+    const chartImgHeight = cardHeight - headerStripHeight;
+
+    const SVG_CHART_WIDTH = 2400;
+    const SVG_CHART_HEIGHT = Math.round(SVG_CHART_WIDTH * (chartImgHeight / pContentWidth));
+
+    // Helper: Draw Full Circular Pie Chart with integrated in-slice labels and leader lines (Always Centered, Ultra Sharp, 100% Circular)
+    const generatePiePNG = async (items, totalVal, width = SVG_CHART_WIDTH, height = SVG_CHART_HEIGHT) => {
+        const validItems = items.filter(d => d.amount > 0);
+        const sum = validItems.reduce((acc, cur) => acc + cur.amount, 0);
+
+        const escapeXml = (str) => String(str || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&apos;');
+
+        const cx = width / 2;
+        const cy = height / 2;
+        const r = 520;
+
+        if (validItems.length === 0 || sum === 0) {
+            const svg = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+                <rect width="100%" height="100%" fill="#ffffff" />
+                <circle cx="${cx}" cy="${cy}" r="${r}" fill="#f3f4f6" stroke="#e5e7eb" stroke-width="4" />
+                <text x="${cx}" y="${cy + 14}" fill="#9ca3af" font-family="Arial, Helvetica, sans-serif" font-size="38" text-anchor="middle">Tidak ada data transaksi</text>
+            </svg>`;
+            return await sharp(Buffer.from(svg)).png().toBuffer();
+        }
+
+        if (validItems.length === 1) {
+            const it = validItems[0];
+            const amtStr = 'Rp ' + new Intl.NumberFormat('id-ID').format(it.amount);
+            const svg = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+                <rect width="100%" height="100%" fill="#ffffff" />
+                <circle cx="${cx}" cy="${cy}" r="${r}" fill="${it.color}" stroke="#ffffff" stroke-width="4" />
+                <text x="${cx}" y="${cy - 48}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="46" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${escapeXml(it.name)}</text>
+                <text x="${cx}" y="${cy + 18}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="60" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">100%</text>
+                <text x="${cx}" y="${cy + 76}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="38" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${amtStr}</text>
+            </svg>`;
+            return await sharp(Buffer.from(svg)).png().toBuffer();
+        }
+
+        // Minimum visual angle for tiny slices (e.g. 0.05%) so they are never swallowed by borders
+        const MIN_SLICE_RADIAN = 0.035; // ~2 degrees visual minimum (~21px arc at r=520)
+        let availableAngle = 2 * Math.PI;
+        let largeItemsSum = 0;
+        const prepped = [];
+
+        // Count how many small slices there are
+        const smallCount = validItems.filter(it => (it.amount / sum) * (2 * Math.PI) < MIN_SLICE_RADIAN).length;
+        const effectiveMinRadian = (smallCount * MIN_SLICE_RADIAN > 2 * Math.PI * 0.2)
+            ? (2 * Math.PI * 0.2) / (smallCount || 1)
+            : MIN_SLICE_RADIAN;
+
+        validItems.forEach((item) => {
+            const rawAngle = (item.amount / sum) * (2 * Math.PI);
+            const pct = (item.amount / sum) * 100;
+            if (rawAngle < effectiveMinRadian) {
+                availableAngle -= effectiveMinRadian;
+                prepped.push({ item, pct, isMin: true, visualAngle: effectiveMinRadian });
+            } else {
+                largeItemsSum += item.amount;
+                prepped.push({ item, pct, isMin: false });
+            }
+        });
+
+        // Scale large slices proportionally
+        prepped.forEach(p => {
+            if (!p.isMin) {
+                p.visualAngle = largeItemsSum > 0
+                    ? (p.item.amount / largeItemsSum) * availableAngle
+                    : (2 * Math.PI) / prepped.length;
+            }
+        });
+
+        let currentAngle = -Math.PI / 2;
+        const tempItems = [];
+        prepped.forEach(({ item, pct, visualAngle }) => {
+            const midAngle = currentAngle + visualAngle / 2;
+            const isCallout = pct < 25;
+            const isRight = Math.cos(midAngle) >= 0;
+            tempItems.push({ item, sliceAngle: visualAngle, midAngle, pct, isCallout, isRight });
+            currentAngle += visualAngle;
+        });
+
+        let paths = '';
+        const inSliceLabels = [];
+        const inSlicePercentagesOnly = [];
+        const calloutItems = [];
+        currentAngle = -Math.PI / 2;
+
+        tempItems.forEach(({ item, sliceAngle, midAngle, pct, isCallout, isRight }) => {
+            const endAngle = currentAngle + sliceAngle;
+            const x1 = cx + r * Math.cos(currentAngle);
+            const y1 = cy + r * Math.sin(currentAngle);
+            const x2 = cx + r * Math.cos(endAngle);
+            const y2 = cy + r * Math.sin(endAngle);
+            const largeArc = sliceAngle > Math.PI ? 1 : 0;
+
+            paths += `<path d="M ${cx.toFixed(1)} ${cy.toFixed(1)} L ${x1.toFixed(1)} ${y1.toFixed(1)} A ${r} ${r} 0 ${largeArc} 1 ${x2.toFixed(1)} ${y2.toFixed(1)} Z" fill="${item.color}" stroke="#ffffff" stroke-width="2" stroke-linejoin="round" />\n`;
+
+            const pctStr = pct.toFixed(2).replace('.', ',') + '%';
+            const amtStr = 'Rp ' + new Intl.NumberFormat('id-ID').format(item.amount);
+
+            if (!isCallout) {
+                const inR = pct > 50 ? r * 0.44 : r * 0.55;
+                const tx = cx + inR * Math.cos(midAngle);
+                const ty = cy + inR * Math.sin(midAngle);
+                inSliceLabels.push({
+                    name: item.name,
+                    amtStr,
+                    pctStr,
+                    tx,
+                    ty,
+                    pct
+                });
+            } else {
+                calloutItems.push({
+                    item,
+                    pct,
+                    pctStr,
+                    amtStr,
+                    midAngle,
+                    x_edge: cx + r * Math.cos(midAngle),
+                    y_edge: cy + r * Math.sin(midAngle),
+                    isRight,
+                    initialY: cy + (r + 60) * Math.sin(midAngle)
+                });
+
+                if (pct >= 1.5) {
+                    const textR = pct > 8 ? r * 0.68 : r * 0.77;
+                    const tx = cx + textR * Math.cos(midAngle);
+                    const ty = cy + textR * Math.sin(midAngle);
+                    const fSize = pct > 10 ? 32 : (pct > 5 ? 28 : (pct >= 3.5 ? 24 : 20));
+                    inSlicePercentagesOnly.push({
+                        pctStr,
+                        tx,
+                        ty,
+                        fSize
+                    });
+                }
+            }
+
+            currentAngle = endAngle;
+        });
+
+        const lefts = calloutItems.filter(d => !d.isRight).sort((a, b) => a.initialY - b.initialY);
+        const rights = calloutItems.filter(d => d.isRight).sort((a, b) => a.initialY - b.initialY);
+
+        const minGap = 90;
+        function relax(list) {
+            if (list.length === 0) return;
+            for (let i = 1; i < list.length; i++) {
+                if (list[i].initialY < list[i - 1].initialY + minGap) {
+                    list[i].initialY = list[i - 1].initialY + minGap;
+                }
+            }
+            const maxAllowedY = height - 70;
+            if (list[list.length - 1].initialY > maxAllowedY) {
+                list[list.length - 1].initialY = maxAllowedY;
+                for (let i = list.length - 2; i >= 0; i--) {
+                    if (list[i].initialY > list[i + 1].initialY - minGap) {
+                        list[i].initialY = list[i + 1].initialY - minGap;
+                    }
+                }
+            }
+            const minAllowedY = 70;
+            if (list[0].initialY < minAllowedY) {
+                list[0].initialY = minAllowedY;
+                for (let i = 1; i < list.length; i++) {
+                    if (list[i].initialY < list[i - 1].initialY + minGap) {
+                        list[i].initialY = list[i - 1].initialY + minGap;
+                    }
+                }
+            }
+        }
+
+        relax(lefts);
+        relax(rights);
+
+        let inSliceSvg = '';
+        inSliceLabels.forEach(d => {
+            inSliceSvg += `
+                <text x="${d.tx.toFixed(1)}" y="${(d.ty - 42).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="40" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${escapeXml(d.name)}</text>
+                <text x="${d.tx.toFixed(1)}" y="${(d.ty + 15).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="52" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${d.pctStr}</text>
+                <text x="${d.tx.toFixed(1)}" y="${(d.ty + 68).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="34" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${d.amtStr}</text>
+            `;
+        });
+
+        inSlicePercentagesOnly.forEach(d => {
+            inSliceSvg += `
+                <text x="${d.tx.toFixed(1)}" y="${(d.ty + d.fSize * 0.35).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="${d.fSize}" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.5); stroke-width: 3px;">${d.pctStr}</text>
+            `;
+        });
+
+        let calloutsSvg = '';
+        [...lefts, ...rights].forEach(d => {
+            const yFinal = d.initialY;
+            const isR = d.isRight;
+            const elbowX = isR ? cx + r + 50 : cx - r - 50;
+            const endX = isR ? elbowX + 45 : elbowX - 45;
+            const textAnchor = isR ? 'start' : 'end';
+            const textX = isR ? endX + 14 : endX - 14;
+            let cleanName = d.item.name
+                .replace(/\(\s*Grab,\s*Go\s*Food,\s*Dll\s*\)/i, '(Grab/GoFood/dll)')
+                .replace(/Biaya Marketplace/i, 'Marketplace')
+                .trim();
+            if (cleanName.length > 34) cleanName = cleanName.slice(0, 32) + '...';
+
+            calloutsSvg += `
+                <polyline points="${d.x_edge.toFixed(1)},${d.y_edge.toFixed(1)} ${elbowX.toFixed(1)},${yFinal.toFixed(1)} ${endX.toFixed(1)},${yFinal.toFixed(1)}" fill="none" stroke="${d.item.color}" stroke-width="4" />
+                <circle cx="${d.x_edge.toFixed(1)}" cy="${d.y_edge.toFixed(1)}" r="8" fill="${d.item.color}" stroke="#ffffff" stroke-width="2" />
+                <text x="${textX.toFixed(1)}" y="${(yFinal - 10).toFixed(1)}" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="28" text-anchor="${textAnchor}">${escapeXml(cleanName)}</text>
+                <text x="${textX.toFixed(1)}" y="${(yFinal + 26).toFixed(1)}" fill="#4b5563" font-family="Arial, Helvetica, sans-serif" font-size="24" text-anchor="${textAnchor}">${d.amtStr} <tspan font-weight="bold" fill="${d.item.color}">(${d.pctStr})</tspan></text>
+            `;
+        });
+
+        const svg = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+            <rect width="100%" height="100%" fill="#ffffff" />
+            ${paths}
+            ${inSliceSvg}
+            ${calloutsSvg}
+        </svg>`;
+
+        return await sharp(Buffer.from(svg)).png().toBuffer();
+    };
+
+    // Color palettes
+    const incomeColors = ['#059669', '#2563eb', '#d97706', '#7c3aed', '#0891b2', '#dc2626', '#db2777', '#4b5563', '#65a30d', '#4f46e5'];
+    const expenseColors = ['#2563eb', '#059669', '#d97706', '#dc2626', '#7c3aed', '#db2777', '#4b5563', '#0891b2', '#ea580c', '#65a30d'];
+
+    // Prepare Pemasukan Items
+    const pemChartItems = [];
+    if (salesChannelsList.length === 0) {
+        if (totalOmzetNet > 0) {
+            pemChartItems.push({ name: 'Omzet Penjualan', amount: totalOmzetNet });
+        }
+    } else {
+        salesChannelsList.forEach(sc => {
+            let scName = (sc.name || sc.channel_name || '').trim();
+            scName = scName.replace(/^(omzet|omset)\s+/i, '');
+            const amt = Number(sc.amount) || 0;
+            if (amt > 0) pemChartItems.push({ name: scName, amount: amt });
+        });
+        const unallocatedOmzet = totalOmzetNet - totalSalesChannels;
+        if (unallocatedOmzet >= 1) {
+            pemChartItems.push({ name: 'Omzet Belum Teralokasi Channel', amount: unallocatedOmzet });
+        }
+    }
+
+    otherIncomes.forEach(it => {
+        const amt = Number(it.total) || 0;
+        if (amt > 0) {
+            const displayName = (it.category_name || '').toLowerCase().includes('lain')
+                ? 'Pendapatan Lain-lain'
+                : it.category_name;
+            pemChartItems.push({ name: displayName, amount: amt });
+        }
+    });
+
+    if (data.pelunasan_piutang_bulan_lalu && Number(data.pelunasan_piutang_bulan_lalu) > 0) {
+        pemChartItems.push({
+            name: `Pelunasan Piutang ${data.prev_month_label || 'Bulan Lalu'}`,
+            amount: Number(data.pelunasan_piutang_bulan_lalu)
+        });
+    }
+
+    pemChartItems.sort((a, b) => b.amount - a.amount);
+    pemChartItems.forEach((it, idx) => {
+        it.color = incomeColors[idx % incomeColors.length];
+    });
+
+    // Prepare Pengeluaran Items
+    const expChartItems = [];
+    regularExpenses.forEach(ex => {
+        if (ex.is_adjustment) return;
+        const amt = Number(ex.total) || 0;
+        if (amt > 0) expChartItems.push({ name: ex.category_name, amount: amt });
+    });
+
+    if (simpananExpenses.length > 0) {
+        const totalSimpananAmt = simpananExpenses.reduce((sum, s) => sum + (Number(s.total) || 0), 0);
+        if (totalSimpananAmt > 0) {
+            expChartItems.push({ name: 'Total Simpanan', amount: totalSimpananAmt });
+        }
+    }
+
+    expChartItems.sort((a, b) => b.amount - a.amount);
+    expChartItems.forEach((it, idx) => {
+        it.color = expenseColors[idx % expenseColors.length];
+    });
+
+    // --- KARTU 1: PEMASUKAN ---
+    doc.save();
+    doc.rect(pMargin, yP2, pContentWidth, cardHeight).fillColor('#ffffff').fill();
+    doc.rect(pMargin, yP2, pContentWidth, cardHeight).lineWidth(0.75).strokeColor('#e5e7eb').stroke();
+    doc.rect(pMargin, yP2, pContentWidth, headerStripHeight).fillColor('#257942').fill();
+    doc.rect(pMargin, yP2, pContentWidth, headerStripHeight).lineWidth(0.5).strokeColor('#15803d').stroke();
+    doc.restore();
+
+    doc.font(fontBold).fontSize(9).fillColor('#ffffff');
+    doc.text('GRAFIK LINGKARAN PEMASUKAN', pMargin + 10, yP2 + 6, { lineBreak: false });
+    doc.text(`TOTAL: Rp ${formatCurrencyForPDF(totalPemasukanFinal)}  (100%)`, pMargin, yP2 + 6, { width: pContentWidth - 10, align: 'right', lineBreak: false });
+
+    // Pie chart Pemasukan
+    const pemChartPng = await generatePiePNG(pemChartItems, totalPemasukanFinal);
+    doc.image(pemChartPng, pMargin, yP2 + headerStripHeight, { fit: [pContentWidth, chartImgHeight], align: 'center', valign: 'center' });
+
+    yP2 += cardHeight + 8;
+
+    // --- KARTU 2: PENGELUARAN ---
+    doc.save();
+    doc.rect(pMargin, yP2, pContentWidth, cardHeight).fillColor('#ffffff').fill();
+    doc.rect(pMargin, yP2, pContentWidth, cardHeight).lineWidth(0.75).strokeColor('#e5e7eb').stroke();
+    doc.rect(pMargin, yP2, pContentWidth, headerStripHeight).fillColor('#dc2626').fill();
+    doc.rect(pMargin, yP2, pContentWidth, headerStripHeight).lineWidth(0.5).strokeColor('#b91c1c').stroke();
+    doc.restore();
+
+    doc.font(fontBold).fontSize(9).fillColor('#ffffff');
+    doc.text('GRAFIK LINGKARAN PENGELUARAN', pMargin + 10, yP2 + 6, { lineBreak: false });
+    doc.text(`TOTAL: Rp ${formatCurrencyForPDF(totalPengeluaran)}  (${totalExpPerc})`, pMargin, yP2 + 6, { width: pContentWidth - 10, align: 'right', lineBreak: false });
+
+    // Pie chart Pengeluaran
+    const expChartPng = await generatePiePNG(expChartItems, totalPengeluaran);
+    doc.image(expChartPng, pMargin, yP2 + headerStripHeight, { fit: [pContentWidth, chartImgHeight], align: 'center', valign: 'center' });
+
+    yP2 += cardHeight + 6;
+
+    // Footer Page 2
+    doc.fontSize(7).font(fontRegular).fillColor('#9ca3af').text(footerText, pMargin, yP2, { align: 'center', width: pContentWidth });
 
     doc.end();
 

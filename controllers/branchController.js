@@ -1,5 +1,6 @@
 const Branch = require('../models/Branch');
 const User = require('../models/User');
+const SalesChannel = require('../models/SalesChannel');
 
 // Get all branches user has access to
 const getAll = async (req, res, next) => {
@@ -323,6 +324,9 @@ const create = async (req, res, next) => {
       const updatedBranch = await Branch.findById(branch.id);
       branch.pics = updatedBranch.pics;
     }
+
+    // Seed default sales channels for the new branch
+    await SalesChannel.seedDefaults(branch.id);
 
     res.status(201).json({
       success: true,

@@ -53,13 +53,26 @@ class Transaction {
 
     // Fetch sales channel details
     const salesChannelDetails = await query(
-      `SELECT tsc.*, sc.name as sales_channel_name
+      `SELECT tsc.*, sc.name as sales_channel_name, pm.name as payment_method_name, pm.is_taxable as payment_method_is_taxable
        FROM transaction_sales_channels tsc
        JOIN sales_channels sc ON tsc.sales_channel_id = sc.id
+       LEFT JOIN payment_methods pm ON tsc.payment_method_id = pm.id
        WHERE tsc.transaction_id = ?`,
       [id]
     );
     transaction.sales_channel_details = salesChannelDetails;
+
+    // Fetch product items
+    const productItems = await query(
+      `SELECT tpi.*, p.name as product_name, pb.name as brand_name
+       FROM transaction_product_items tpi
+       JOIN products p ON tpi.product_id = p.id
+       LEFT JOIN product_brands pb ON tpi.brand_id = pb.id
+       WHERE tpi.transaction_id = ?
+       ORDER BY tpi.id ASC`,
+      [id]
+    );
+    transaction.product_items = productItems;
 
     // SYNC: If it's a debt payment but has no multi-mitra details,
     // synthesize a virtual detail from the main transaction fields
@@ -77,10 +90,13 @@ class Transaction {
 
     // Fetch repayments
     const repayments = await query(
-      `SELECT tr.*, mp.nama as mitra_nama, COALESCE(u.name, u.email) as user_name
+      `SELECT tr.*, mp.nama as mitra_nama, COALESCE(u.name, u.email) as user_name,
+              t_inc.bank_account_id, ba.name as bank_account_name
        FROM transaction_repayments tr
        JOIN mitra_piutang mp ON tr.mitra_piutang_id = mp.id
        LEFT JOIN users u ON tr.user_id = u.id
+       LEFT JOIN transactions t_inc ON tr.income_transaction_id = t_inc.id
+       LEFT JOIN bank_accounts ba ON t_inc.bank_account_id = ba.id
        WHERE tr.transaction_id = ?
        ORDER BY tr.payment_date DESC, tr.created_at DESC`,
       [id]
@@ -126,7 +142,9 @@ class Transaction {
     isPb1Payment = undefined,
     paymentMethodId = null,
     paymentMethodCategoryId = null,
-    includeIncomeDetails = false
+    includeIncomeDetails = false,
+    isDraft = undefined,
+    includeDraft = false
   } = {}) {
     let selectFields = `
       SELECT t.*, c.name as category_name, c.min_attachment as category_min_attachment, COALESCE(u.name, u.email) as user_name,
@@ -147,9 +165,10 @@ class Transaction {
              tr_notif.transaction_id as parent_transaction_id,
              t_parent.transaction_date as parent_transaction_date,
              COALESCE(tr_sum.total_repayment, 0) as total_repayment,
-              COALESCE(t_ref.total_refund, 0) as total_refund,
-              (ABS(t.amount) + COALESCE(t_ref.total_refund, 0)) as original_amount,
-              ABS(t.amount) as net_amount,
+             COALESCE(t_ref.total_refund, 0) as total_refund,
+             COALESCE(t_future_ref.total_future_refund, 0) as future_refund,
+             (ABS(t.amount) + COALESCE(t_ref.total_refund, 0)) as original_amount,
+             (ABS(t.amount) + COALESCE(t_future_ref.total_future_refund, 0)) as net_amount,
              /* Standardized dynamic PB1 calculation (10/110) - Using ROUND to match Report logic */
              CASE 
                WHEN t.type = 'income' THEN 
@@ -181,6 +200,47 @@ class Transaction {
       params.push(categoryName, categoryName);
     }
 
+    if (mitraPiutangId !== null && mitraPiutangId !== undefined) {
+      const validMitraId = parseInt(mitraPiutangId);
+      selectFields += `, 
+             /* If filtered by mitra piutang, use the specific amount and remaining debt for this mitra */
+             CASE 
+               WHEN tmd_filter.id IS NOT NULL THEN tmd_filter.amount 
+               ELSE t.amount 
+             END as amount,
+             CASE 
+               WHEN tmd_filter.id IS NOT NULL THEN tmd_filter.remaining_debt 
+               ELSE t.remaining_debt 
+             END as remaining_debt,
+             CASE 
+               WHEN tmd_filter.id IS NOT NULL THEN tmd_filter.paid_amount 
+               ELSE t.paid_amount 
+             END as paid_amount`;
+
+      joinDetails += ` LEFT JOIN transaction_mitra_details tmd_filter ON t.id = tmd_filter.transaction_id AND tmd_filter.mitra_piutang_id = ?`;
+      params.push(validMitraId);
+    }
+
+    let joinFutureRefund = '';
+    if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
+      const parsedEnd = endDate.trim().split(' ')[0].split('T')[0];
+      joinFutureRefund = `
+        LEFT JOIN (
+          SELECT transaction_id, SUM(amount) as total_future_refund 
+          FROM transaction_refunds 
+          WHERE refund_date > ? 
+          GROUP BY transaction_id
+        ) t_future_ref ON t.id = t_future_ref.transaction_id
+      `;
+      params.push(parsedEnd);
+    } else {
+      joinFutureRefund = `
+        LEFT JOIN (
+          SELECT NULL as transaction_id, 0 as total_future_refund
+        ) t_future_ref ON 1=0
+      `;
+    }
+
     let sql = `
       ${selectFields}
       FROM transactions t
@@ -201,6 +261,7 @@ class Transaction {
         GROUP BY transaction_id
       ) t_ref ON t.id = t_ref.transaction_id
       ${joinDetails}
+      ${joinFutureRefund}
       WHERE 1=1
     `;
 
@@ -227,6 +288,12 @@ class Transaction {
       sql += ' AND t.status_deleted = false';
     } else if (onlyDeleted) {
       sql += ' AND t.status_deleted = true';
+    }
+
+    if (isDraft === true || isDraft === 'true') {
+      sql += ' AND t.is_draft = true';
+    } else if (!includeDraft) {
+      sql += ' AND (t.is_draft = false OR t.is_draft IS NULL)';
     }
 
     if (type && typeof type === 'string' && type.trim() !== '') {
@@ -266,8 +333,8 @@ class Transaction {
     }
 
     if (mitraPiutangId !== null && mitraPiutangId !== undefined) {
-      sql += ` AND (t.mitra_piutang_id = ? OR EXISTS (SELECT 1 FROM transaction_mitra_details tmd WHERE tmd.transaction_id = t.id AND tmd.mitra_piutang_id = ?))`;
-      params.push(mitraPiutangId, mitraPiutangId);
+      sql += ` AND (t.mitra_piutang_id = ? OR tmd_filter.id IS NOT NULL)`;
+      params.push(mitraPiutangId);
     }
 
     if (hasPb1) {
@@ -384,7 +451,9 @@ class Transaction {
     hasPb1 = false,
     isPb1Payment = undefined,
     paymentMethodId = null,
-    paymentMethodCategoryId = null
+    paymentMethodCategoryId = null,
+    isDraft = undefined,
+    includeDraft = false
   } = {}) {
     let sql = `
       SELECT COUNT(*) as total
@@ -409,6 +478,12 @@ class Transaction {
       sql += ' AND t.status_deleted = false';
     } else if (onlyDeleted) {
       sql += ' AND t.status_deleted = true';
+    }
+
+    if (isDraft === true || isDraft === 'true') {
+      sql += ' AND t.is_draft = true';
+    } else if (!includeDraft) {
+      sql += ' AND (t.is_draft = false OR t.is_draft IS NULL)';
     }
 
     if (type) {
@@ -488,18 +563,18 @@ class Transaction {
     return results[0].total;
   }
 
-  static async create({ userId, branchId, type, categoryId, amount, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, isSavings = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, bankAccountId = null, mitraDetails = [], savingsDetails = [], incomeDetails = [], salesChannelDetails = [], isPb1Payment = false }) {
+  static async create({ userId, branchId, type, categoryId, amount, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, isSavings = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, bankAccountId = null, mitraDetails = [], savingsDetails = [], incomeDetails = [], salesChannelDetails = [], productItems = [], isPb1Payment = false, isDraft = false }) {
     const transactionId = await dbTransaction(async (conn) => {
       const [result] = await conn.execute(
-        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, bank_account_id, status_deleted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
-        [userId, branchId, type, categoryId, amount, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, isSavings || (savingsDetails && savingsDetails.length > 0) || false, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment, bankAccountId]
+        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, bank_account_id, is_draft, status_deleted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
+        [userId, branchId, type, categoryId, amount, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, isSavings || (savingsDetails && savingsDetails.length > 0) || false, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment, bankAccountId, isDraft ? 1 : 0]
       );
 
       const newId = result.insertId;
 
-      // Automatically adjust savings allocations if this is a savings transaction with a bank account
-      if ((isSavings || (savingsDetails && savingsDetails.length > 0)) && bankAccountId) {
+      // Automatically adjust savings allocations if this is a savings transaction with a bank account (only if not a draft)
+      if (!isDraft && (isSavings || (savingsDetails && savingsDetails.length > 0)) && bankAccountId) {
         await this.adjustSavingsAllocation(conn, categoryId, bankAccountId, type, amount, 1);
       }
 
@@ -526,14 +601,21 @@ class Transaction {
       }
 
       // Insert income details
+      const createdIncomeDetails = [];
       if (incomeDetails && incomeDetails.length > 0) {
-        for (const detail of incomeDetails) {
+        for (let i = 0; i < incomeDetails.length; i++) {
+          const detail = incomeDetails[i];
           const rowLampiran = detail.lampiran ? (Array.isArray(detail.lampiran) ? JSON.stringify(detail.lampiran) : detail.lampiran) : null;
-          await conn.execute(
+          const [res] = await conn.execute(
             `INSERT INTO transaction_income_details (transaction_id, payment_method_id, bank_account_id, amount_app, amount_cashier, lampiran)
              VALUES (?, ?, ?, ?, ?, ?)`,
             [newId, detail.payment_method_id, detail.bank_account_id || null, detail.amount_app || 0, detail.amount_cashier || 0, rowLampiran]
           );
+          createdIncomeDetails.push({
+            id: res.insertId,
+            payment_method_id: detail.payment_method_id,
+            index: i
+          });
         }
       }
 
@@ -541,10 +623,36 @@ class Transaction {
       if (salesChannelDetails && salesChannelDetails.length > 0) {
         for (const detail of salesChannelDetails) {
           if (detail.sales_channel_id && parseFloat(detail.amount || 0) > 0) {
+            let matchedIncomeDetailId = detail.transaction_income_detail_id || null;
+            let matchedPaymentMethodId = detail.payment_method_id || null;
+
+            if (!matchedIncomeDetailId && detail.income_detail_index !== undefined && createdIncomeDetails[detail.income_detail_index]) {
+              matchedIncomeDetailId = createdIncomeDetails[detail.income_detail_index].id;
+              if (!matchedPaymentMethodId) {
+                matchedPaymentMethodId = createdIncomeDetails[detail.income_detail_index].payment_method_id;
+              }
+            } else if (!matchedPaymentMethodId && createdIncomeDetails.length === 1) {
+              matchedIncomeDetailId = createdIncomeDetails[0].id;
+              matchedPaymentMethodId = createdIncomeDetails[0].payment_method_id;
+            }
+
             await conn.execute(
-              `INSERT INTO transaction_sales_channels (transaction_id, sales_channel_id, amount)
-               VALUES (?, ?, ?)`,
-              [newId, parseInt(detail.sales_channel_id), parseFloat(detail.amount || 0)]
+              `INSERT INTO transaction_sales_channels (transaction_id, sales_channel_id, payment_method_id, transaction_income_detail_id, amount)
+               VALUES (?, ?, ?, ?, ?)`,
+              [newId, parseInt(detail.sales_channel_id), matchedPaymentMethodId, matchedIncomeDetailId, parseFloat(detail.amount || 0)]
+            );
+          }
+        }
+      }
+
+      // Insert product items
+      if (productItems && productItems.length > 0) {
+        for (const item of productItems) {
+          if (item.product_id && parseFloat(item.amount || 0) > 0) {
+            await conn.execute(
+              `INSERT INTO transaction_product_items (transaction_id, product_id, brand_id, amount, notes)
+               VALUES (?, ?, ?, ?, ?)`,
+              [newId, parseInt(item.product_id), item.brand_id ? parseInt(item.brand_id) : null, parseFloat(item.amount || 0), item.notes || null]
             );
           }
         }
@@ -557,16 +665,16 @@ class Transaction {
   }
 
   // Update transaction
-  static async update(id, { type, categoryId, amount, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, incomeDetails, salesChannelDetails, isPb1Payment }) {
+  static async update(id, { type, categoryId, amount, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, incomeDetails, salesChannelDetails, productItems, isPb1Payment, isDraft }) {
     await dbTransaction(async (conn) => {
       // Get old transaction data first to reverse allocation
       const [oldRows] = await conn.execute(
-        'SELECT category_id, bank_account_id, type, amount, is_savings FROM transactions WHERE id = ?',
+        'SELECT category_id, bank_account_id, type, amount, is_savings, is_draft FROM transactions WHERE id = ?',
         [id]
       );
       const oldTx = oldRows[0];
 
-      if (oldTx && oldTx.is_savings && oldTx.bank_account_id) {
+      if (oldTx && !oldTx.is_draft && oldTx.is_savings && oldTx.bank_account_id) {
         await this.adjustSavingsAllocation(conn, oldTx.category_id, oldTx.bank_account_id, oldTx.type, oldTx.amount, -1);
       }
 
@@ -637,6 +745,10 @@ class Transaction {
         updates.push('is_pb1_payment = ?');
         params.push(isPb1Payment === true || isPb1Payment === 'true' || isPb1Payment === 1);
       }
+      if (isDraft !== undefined) {
+        updates.push('is_draft = ?');
+        params.push(isDraft === true || isDraft === 'true' || isDraft === 1 ? 1 : 0);
+      }
 
       if (updates.length > 0) {
         params.push(id);
@@ -648,11 +760,11 @@ class Transaction {
 
       // Re-apply savings allocation with updated data
       const [newRows] = await conn.execute(
-        'SELECT category_id, bank_account_id, type, amount, is_savings FROM transactions WHERE id = ?',
+        'SELECT category_id, bank_account_id, type, amount, is_savings, is_draft FROM transactions WHERE id = ?',
         [id]
       );
       const newTx = newRows[0];
-      if (newTx && newTx.is_savings && newTx.bank_account_id) {
+      if (newTx && !newTx.is_draft && newTx.is_savings && newTx.bank_account_id) {
         await this.adjustSavingsAllocation(conn, newTx.category_id, newTx.bank_account_id, newTx.type, newTx.amount, 1);
       }
 
@@ -752,14 +864,21 @@ class Transaction {
         await conn.execute(`DELETE FROM transaction_income_details WHERE transaction_id = ?`, [id]);
 
         // Insert new details
+        const createdIncomeDetails = [];
         if (incomeDetails && incomeDetails.length > 0) {
-          for (const detail of incomeDetails) {
+          for (let i = 0; i < incomeDetails.length; i++) {
+            const detail = incomeDetails[i];
             const rowLampiran = detail.lampiran ? (Array.isArray(detail.lampiran) ? JSON.stringify(detail.lampiran) : detail.lampiran) : null;
-            await conn.execute(
+            const [res] = await conn.execute(
               `INSERT INTO transaction_income_details (transaction_id, payment_method_id, bank_account_id, amount_app, amount_cashier, lampiran)
                VALUES (?, ?, ?, ?, ?, ?)`,
               [id, detail.payment_method_id, detail.bank_account_id || null, detail.amount_app || 0, detail.amount_cashier || 0, rowLampiran]
             );
+            createdIncomeDetails.push({
+              id: res.insertId,
+              payment_method_id: detail.payment_method_id,
+              index: i
+            });
           }
         }
       }
@@ -768,12 +887,54 @@ class Transaction {
       if (salesChannelDetails !== undefined) {
         await conn.execute(`DELETE FROM transaction_sales_channels WHERE transaction_id = ?`, [id]);
         if (salesChannelDetails && salesChannelDetails.length > 0) {
+          let effectiveIncomeDetails = typeof createdIncomeDetails !== 'undefined' ? createdIncomeDetails : [];
+          if (effectiveIncomeDetails.length === 0) {
+            const [existingTids] = await conn.execute(
+              `SELECT id, payment_method_id FROM transaction_income_details WHERE transaction_id = ? ORDER BY id ASC`,
+              [id]
+            );
+            effectiveIncomeDetails = (existingTids || []).map((row, idx) => ({
+              id: row.id,
+              payment_method_id: row.payment_method_id,
+              index: idx
+            }));
+          }
+
           for (const detail of salesChannelDetails) {
             if (detail.sales_channel_id && parseFloat(detail.amount || 0) > 0) {
+              let matchedIncomeDetailId = detail.transaction_income_detail_id || null;
+              let matchedPaymentMethodId = detail.payment_method_id || null;
+
+              if (!matchedIncomeDetailId && detail.income_detail_index !== undefined && effectiveIncomeDetails[detail.income_detail_index]) {
+                matchedIncomeDetailId = effectiveIncomeDetails[detail.income_detail_index].id;
+                if (!matchedPaymentMethodId) {
+                  matchedPaymentMethodId = effectiveIncomeDetails[detail.income_detail_index].payment_method_id;
+                }
+              } else if (!matchedPaymentMethodId && effectiveIncomeDetails.length === 1) {
+                matchedIncomeDetailId = effectiveIncomeDetails[0].id;
+                matchedPaymentMethodId = effectiveIncomeDetails[0].payment_method_id;
+              }
+
               await conn.execute(
-                `INSERT INTO transaction_sales_channels (transaction_id, sales_channel_id, amount)
-                 VALUES (?, ?, ?)`,
-                [id, parseInt(detail.sales_channel_id), parseFloat(detail.amount || 0)]
+                `INSERT INTO transaction_sales_channels (transaction_id, sales_channel_id, payment_method_id, transaction_income_detail_id, amount)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [id, parseInt(detail.sales_channel_id), matchedPaymentMethodId, matchedIncomeDetailId, parseFloat(detail.amount || 0)]
+              );
+            }
+          }
+        }
+      }
+
+      // Handle product items
+      if (productItems !== undefined) {
+        await conn.execute(`DELETE FROM transaction_product_items WHERE transaction_id = ?`, [id]);
+        if (productItems && productItems.length > 0) {
+          for (const item of productItems) {
+            if (item.product_id && parseFloat(item.amount || 0) > 0) {
+              await conn.execute(
+                `INSERT INTO transaction_product_items (transaction_id, product_id, brand_id, amount, notes)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [id, parseInt(item.product_id), item.brand_id ? parseInt(item.brand_id) : null, parseFloat(item.amount || 0), item.notes || null]
               );
             }
           }
@@ -1081,11 +1242,31 @@ class Transaction {
       categoryConditionForExpense = `FALSE`;
     }
 
+    let joinFutureRefund = '';
+    if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
+      const parsedEnd = endDate.trim().split(' ')[0].split('T')[0];
+      joinFutureRefund = `
+        LEFT JOIN (
+          SELECT transaction_id, SUM(amount) as total_future_refund 
+          FROM transaction_refunds 
+          WHERE refund_date > ? 
+          GROUP BY transaction_id
+        ) t_future_ref ON t.id = t_future_ref.transaction_id
+      `;
+      params.push(parsedEnd);
+    } else {
+      joinFutureRefund = `
+        LEFT JOIN (
+          SELECT NULL as transaction_id, 0 as total_future_refund
+        ) t_future_ref ON 1=0
+      `;
+    }
+
     let sql = `
       SELECT 
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-            t.amount
+            (t.amount + COALESCE(t_future_ref.total_future_refund, 0))
           ELSE 0 
         END), 0) as omzet_gross,
 
@@ -1103,7 +1284,7 @@ class Transaction {
 
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-            t.amount 
+            (t.amount + COALESCE(t_future_ref.total_future_refund, 0)) 
           ELSE 0 
         END), 0) as lain_gross,
 
@@ -1125,7 +1306,7 @@ class Transaction {
         END), 0) as pelunasan_piutang_lalu,
 
         COALESCE(SUM(CASE 
-          WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryConditionForExpense}) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN GREATEST(0, t.amount - COALESCE(t_ref.total_refund, 0)) + COALESCE(t.pb1, 0)
+          WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryConditionForExpense}) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN (t.amount + COALESCE(t_future_ref.total_future_refund, 0)) + COALESCE(t.pb1, 0)
           ELSE 0 
         END), 0) as pengeluaran,
 
@@ -1159,6 +1340,7 @@ class Transaction {
         GROUP BY transaction_id
       ) t_ref ON t.id = t_ref.transaction_id
       ${joinDetails}
+      ${joinFutureRefund}
       WHERE 1=1
     `;
 
@@ -1188,6 +1370,9 @@ class Transaction {
     if (!includeDeleted) {
       sql += ' AND t.status_deleted = false';
     }
+
+    // Always exclude drafts from financial summary calculations
+    sql += ' AND (t.is_draft = false OR t.is_draft IS NULL)';
 
     if (startDate) {
       sql += ' AND DATE(t.transaction_date) >= ?';
@@ -1246,7 +1431,8 @@ class Transaction {
              WHERE tr.payment_date BETWEEN ? AND ?
                AND t.transaction_date < ?
                AND t.branch_id = ?
-               AND t.status_deleted = false`,
+               AND t.status_deleted = false
+               AND (t.is_draft = false OR t.is_draft IS NULL)`,
             [startDateOnly, endDateOnly, startDateOnly, branchId]
         );
         const pelunasanPiutangBulanLalu = parseFloat(debtRepaymentResult[0]?.total || 0);
@@ -1257,7 +1443,7 @@ class Transaction {
                 t.category_id,
                 COALESCE(c.name, 'Lain-lain') as category_name,
                 t.is_debt_payment,
-                SUM(t.amount) as total_gross,
+                SUM(t.amount + COALESCE(future_ref.amount, 0)) as total_gross,
                 SUM(
                     COALESCE((
                         SELECT SUM(tid.amount_app)
@@ -1266,18 +1452,39 @@ class Transaction {
                         WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
                     ), 0)
                 ) as taxable_amount,
-                (SELECT COUNT(*) FROM transactions t2 WHERE t2.category_id = t.category_id AND t2.type = 'expense' AND t2.status_deleted = false AND t2.branch_id = t.branch_id) as has_expense
+                (SELECT COUNT(*) FROM transactions t2 WHERE t2.category_id = t.category_id AND t2.type = 'expense' AND t2.status_deleted = false AND (t2.is_draft = false OR t2.is_draft IS NULL) AND t2.branch_id = t.branch_id) as has_expense
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
+             LEFT JOIN (
+                 SELECT transaction_id, SUM(amount) as amount 
+                 FROM transaction_refunds 
+                 WHERE refund_date > ? 
+                 GROUP BY transaction_id
+             ) future_ref ON t.id = future_ref.transaction_id
              WHERE t.branch_id = ?
                AND t.type = 'income'
                AND t.transaction_date BETWEEN ? AND ?
                AND t.status_deleted = false
+               AND (t.is_draft = false OR t.is_draft IS NULL)
                AND t.is_umum = true
                AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
              GROUP BY category_name, t.is_debt_payment, t.category_id`,
-            [branchId, startDateOnly, endDateOnly]
+            [endDateOnly, branchId, startDateOnly, endDateOnly]
         );
+
+        const pastIncomeRefundsResult = await query(
+            `SELECT COALESCE(SUM(tr.amount), 0) as total_past_refunds
+             FROM transaction_refunds tr
+             JOIN transactions t ON tr.transaction_id = t.id
+             WHERE t.branch_id = ?
+               AND t.type = 'income'
+               AND tr.refund_date BETWEEN ? AND ?
+               AND t.transaction_date < ?
+               AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
+               AND t.is_umum = true`,
+            [branchId, startDateOnly, endDateOnly, startDateOnly]
+        );
+        const pastIncomeRefunds = parseFloat(pastIncomeRefundsResult[0]?.total_past_refunds || 0);
 
         let omzetNetSum = 0;
         let omzetTaxSum = 0;
@@ -1305,28 +1512,37 @@ class Transaction {
             }
         });
 
+        omzetNetSum = Math.max(0, omzetNetSum - pastIncomeRefunds);
+
         // 3. Expense Breakdown & System Pengeluaran (exact match with branchReportController.js)
         const expenseBreakdownRes = await query(
           `SELECT COALESCE(SUM(total), 0) as folder_pengeluaran
            FROM (
-              /* 1. Pengeluaran Reguler & Retur (Hanya yang BUKAN transaksi simpanan rincian) */
+              /* 1. Pengeluaran Reguler & Retur dalam periode */
               SELECT (CASE 
                           WHEN t.type = 'expense' THEN 
-                              (CASE WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) ELSE t.amount END) + COALESCE(t.pb1, 0)
+                              (CASE WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) ELSE (t.amount + COALESCE(future_ref.amount, 0)) END) + COALESCE(t.pb1, 0)
                           ELSE 
-                              -(t.amount + COALESCE(t.pb1, 0))
+                              -(t.amount + COALESCE(future_ref.amount, 0) + COALESCE(t.pb1, 0))
                       END) as total 
               FROM transactions t 
               LEFT JOIN categories c ON t.category_id = c.id 
+              LEFT JOIN (
+                  SELECT transaction_id, SUM(amount) as amount 
+                  FROM transaction_refunds 
+                  WHERE refund_date > ? 
+                  GROUP BY transaction_id
+              ) future_ref ON t.id = future_ref.transaction_id
               WHERE t.branch_id = ? 
                 AND t.transaction_date BETWEEN ? AND ? 
                 AND t.status_deleted = false
+                AND (t.is_draft = false OR t.is_draft IS NULL)
                 AND t.is_umum = true
                 AND (t.is_savings = 0 OR t.is_savings IS NULL)
                 AND (
                   t.type = 'expense' 
                   OR (t.type = 'income' AND t.category_id IN (
-                     SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false
+                     SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false AND (is_draft = false OR is_draft IS NULL)
                   ))
                 )
 
@@ -1340,11 +1556,26 @@ class Transaction {
               WHERE t.branch_id = ? 
                 AND t.transaction_date BETWEEN ? AND ? 
                 AND t.status_deleted = false
+                AND (t.is_draft = false OR t.is_draft IS NULL)
                 AND t.is_umum = true
                 AND t.type = 'expense'
                 AND t.is_savings = 1
+
+              UNION ALL
+
+              /* 3. Refund yang terjadi di periode ini untuk transaksi pengeluaran sebelum startDate */
+              SELECT -tr.amount as total
+              FROM transaction_refunds tr
+              JOIN transactions t ON tr.transaction_id = t.id
+              WHERE t.branch_id = ?
+                AND t.type = 'expense'
+                AND tr.refund_date BETWEEN ? AND ?
+                AND t.transaction_date < ?
+                AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
+                AND t.is_umum = true
+                AND (t.is_savings = 0 OR t.is_savings IS NULL)
            ) as consolidated`,
-          [branchId, startDateOnly, endDateOnly, branchId, branchId, startDateOnly, endDateOnly]
+          [endDateOnly, branchId, startDateOnly, endDateOnly, branchId, branchId, startDateOnly, endDateOnly, branchId, startDateOnly, endDateOnly, startDateOnly]
         );
 
         const folderPengeluaran = parseFloat(expenseBreakdownRes[0]?.folder_pengeluaran || 0);
@@ -1359,7 +1590,7 @@ class Transaction {
               ), 0)), 0)
               FROM transactions t
               JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
-              WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+              WHERE mp.branch_id = ? AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL) AND mp.deleted_at IS NULL
               AND t.transaction_date BETWEEN ? AND ?
               AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
             ) + (
@@ -1373,7 +1604,7 @@ class Transaction {
               FROM transaction_mitra_details tmd
               JOIN transactions t ON tmd.transaction_id = t.id
               JOIN mitra_piutang mp ON tmd.mitra_piutang_id = mp.id
-              WHERE mp.branch_id = ? AND t.status_deleted = false AND mp.deleted_at IS NULL
+              WHERE mp.branch_id = ? AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL) AND mp.deleted_at IS NULL
               AND t.transaction_date BETWEEN ? AND ?
             ) as total_piutang`,
           [

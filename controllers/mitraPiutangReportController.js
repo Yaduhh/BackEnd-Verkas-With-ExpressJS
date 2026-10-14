@@ -39,21 +39,22 @@ const getMitraPiutangReport = async (req, res, next) => {
         mp.nama as mitra_nama,
         tr.amount as repayment_amount,
         DATE_FORMAT(tr.payment_date, '%Y-%m-%d') as payment_date,
-        DATE_FORMAT(t.transaction_date, '%Y-%m-%d') as transaction_date,
+        DATE_FORMAT(COALESCE(t.transaction_date, mp.initial_balance_date), '%Y-%m-%d') as transaction_date,
         tr.note,
         COALESCE(u.name, u.email) as user_name,
         COALESCE(
           (
-            SELECT tmd.remaining_debt 
+            SELECT SUM(tmd.remaining_debt) 
             FROM transaction_mitra_details tmd 
             WHERE tmd.transaction_id = tr.transaction_id AND tmd.mitra_piutang_id = tr.mitra_piutang_id
           ),
           t.remaining_debt,
+          GREATEST(0, COALESCE(mp.initial_balance, 0) - COALESCE(mp.initial_balance_paid, 0)),
           0
         ) as remaining_debt
       FROM transaction_repayments tr
       JOIN mitra_piutang mp ON tr.mitra_piutang_id = mp.id
-      JOIN transactions t ON tr.transaction_id = t.id
+      LEFT JOIN transactions t ON tr.transaction_id = t.id
       LEFT JOIN users u ON tr.user_id = u.id
       WHERE mp.branch_id = ? ${sqlFilters}
       ORDER BY tr.payment_date ASC, tr.id ASC`,

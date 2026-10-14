@@ -106,12 +106,26 @@ async function exportCategoryToExcel(data, filename, branchName, options = {}) {
         return val > 0.001;
     });
 
+    // Sort transactions chronologically (oldest first: 1 -> 31)
+    validData.sort((a, b) => {
+        const d1 = new Date(a.transaction_date).getTime();
+        const d2 = new Date(b.transaction_date).getTime();
+        if (d1 !== d2) return d1 - d2;
+        return (a.id || 0) - (b.id || 0);
+    });
+
+    const INDONESIAN_DAYS = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+
     // Determine Type / Lampiran Name
-    let lampiranType = 'PEMASUKAN';
-    if (options.type === 'expense') {
-        lampiranType = 'PENGELUARAN';
-    } else if (options.type === 'income') {
+    // Determine if sales channels are present
+    const hasSalesChannels = !!(options.hasSalesChannels && options.salesChannels && options.salesChannels.length > 0);
+
+    // Determine Type / Lampiran Name
+    let lampiranType = 'PENGELUARAN';
+    if (hasSalesChannels || options.type === 'income') {
         lampiranType = 'PEMASUKAN';
+    } else if (options.type === 'expense') {
+        lampiranType = 'PENGELUARAN';
     } else {
         const incomeCount = validData.filter(t => t.type === 'income').length;
         const expenseCount = validData.filter(t => t.type === 'expense').length;
@@ -124,22 +138,160 @@ async function exportCategoryToExcel(data, filename, branchName, options = {}) {
         }
     }
 
-    const rawCategoryName = (options.categoryName || 'SEMUA KATEGORI').toUpperCase();
-    const categoryCode = options.categoryCode ? options.categoryCode.trim() : '';
-    const categoryTitle = categoryCode
-        ? `${categoryCode}. ${rawCategoryName}`
-        : rawCategoryName;
-    const periodText = formatPeriodText(options.fromDate, options.toDate, validData);
-    const workingDays = options.workingDays || 25;
+    const isExpense = lampiranType === 'PENGELUARAN';
+    const softBgArgb = isExpense ? 'FFFDECEB' : 'FFEEF4E8';
 
-    // Calculate total amount
-    const totalAmount = validData.reduce((sum, t) => sum + Math.abs(parseFloat(t.net_amount !== undefined ? t.net_amount : t.amount || 0)), 0);
+    const rawCategoryName = (options.categoryName || 'SEMUA KATEGORI').toUpperCase();
+    let categoryTitle = (options.categoryTitle || (options.categoryCode ? `${options.categoryCode}. ${rawCategoryName}` : rawCategoryName)).toUpperCase();
+
+    if (hasSalesChannels) {
+        const channelCount = options.salesChannels.length;
+        const nums = [];
+        for (let i = 1; i <= channelCount; i++) {
+            nums.push(i + '.');
+        }
+        let prefix = '';
+        if (nums.length === 1) {
+            prefix = nums[0];
+        } else {
+            prefix = nums.slice(0, -1).join(' ') + ' & ' + nums[nums.length - 1];
+        }
+        const cleanCat = rawCategoryName.replace(/^(\d+[\.\s\-]+|&|\s)+/i, '').trim();
+        categoryTitle = `${prefix} ${cleanCat}`.toUpperCase();
+    }
+
+    const periodText = formatPeriodText(options.fromDate, options.toDate, validData);
+    const workingDays = options.workingDays || 26;
+
+    // Resolve Total column header (e.g. "Total BB" for Bahan Baku, "Total Oz" for Omzet)
+    function resolveTotalColHeader(title, name) {
+        const full = `${title || ''} ${name || ''}`.toUpperCase();
+        if (hasSalesChannels || full.includes('OMZET') || full.includes('OMSET')) {
+            return 'Total Oz';
+        }
+        if (full.includes('BAHAN BAKU') || full.includes('BB')) {
+            return 'Total BB';
+        }
+        if (full.includes('OPERASIONAL') || full.includes('OPS')) {
+            return 'Total Ops';
+        }
+        if (full.includes('GAJI')) {
+            return 'Total Gaji';
+        }
+        if (full.includes('PACKAGING') || full.includes('PKG')) {
+            return 'Total PKG';
+        }
+        if (full.includes('MARKETPLACE')) {
+            return 'Total Market';
+        }
+        const clean = (name || '').trim();
+        if (clean && clean.length <= 10 && clean !== 'Semua Kategori' && clean !== 'SEMUA KATEGORI') {
+            return `Total ${clean}`;
+        }
+        return 'Total Harian';
+    }
+
+    const totalColHeader = resolveTotalColHeader(categoryTitle, options.categoryName);
+
+    // Group transactions by Date
+    const parseDateComponents = (dateVal) => {
+        if (!dateVal) return { key: 'unknown', dayNumber: 1, dayName: 'Senin' };
+        const s = String(dateVal).split('T')[0];
+        const parts = s.split('-');
+        let year = 2026, month = 0, day = 1;
+        if (parts.length === 3) {
+            year = parseInt(parts[0], 10);
+            month = parseInt(parts[1], 10) - 1;
+            day = parseInt(parts[2], 10);
+        }
+        const d = new Date(year, month, day);
+        return {
+            key: `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+            dayNumber: day,
+            dayName: INDONESIAN_DAYS[d.getDay()] || 'Senin'
+        };
+    };
+
+    const groups = [];
+    const groupMap = new Map();
+
+    for (const item of validData) {
+        const dateInfo = parseDateComponents(item.transaction_date);
+        let group = groupMap.get(dateInfo.key);
+        if (!group) {
+            group = {
+                key: dateInfo.key,
+                dayNumber: dateInfo.dayNumber,
+                dayName: dateInfo.dayName,
+                rawItems: [],
+                items: [],
+                dayTotal: 0
+            };
+            groupMap.set(dateInfo.key, group);
+            groups.push(group);
+        }
+        const itemAmt = Math.abs(parseFloat(item.net_amount !== undefined ? item.net_amount : item.amount || 0));
+        group.rawItems.push(item);
+        group.dayTotal += itemAmt;
+    }
+
+    if (hasSalesChannels) {
+        const catPrefix = (options.categoryCode || '1').trim();
+        for (const group of groups) {
+            const channelSums = new Map();
+            let totalFromDetails = 0;
+
+            for (const t of group.rawItems) {
+                if (t.sales_channel_details && Array.isArray(t.sales_channel_details)) {
+                    for (const scd of t.sales_channel_details) {
+                        const scId = scd.sales_channel_id;
+                        const amt = Math.abs(parseFloat(scd.amount || 0));
+                        channelSums.set(scId, (channelSums.get(scId) || 0) + amt);
+                        totalFromDetails += amt;
+                    }
+                }
+            }
+
+            const fallbackToFirst = (totalFromDetails === 0 && group.dayTotal > 0);
+
+            group.items = options.salesChannels.map((channel, idx) => {
+                let amt = channelSums.get(channel.id) || 0;
+                if (fallbackToFirst && idx === 0) {
+                    amt = group.dayTotal;
+                }
+                const cleanName = (channel.name || '').replace(/^[\d\.\s\-]+/, '').trim();
+                const note = `${catPrefix}.${idx + 1} ${cleanName}`;
+                return {
+                    id: channel.id,
+                    note: note,
+                    amount: amt,
+                    channel_name: channel.name,
+                    is_sales_channel: true
+                };
+            });
+
+            const recalculatedDayTotal = group.items.reduce((s, it) => s + it.amount, 0);
+            if (recalculatedDayTotal > 0 || group.dayTotal === 0) {
+                group.dayTotal = recalculatedDayTotal;
+            }
+        }
+    } else {
+        for (const group of groups) {
+            group.items = group.rawItems;
+        }
+    }
+
+    // Calculate grand total across the whole report
+    const grandTotal = groups.reduce((sum, g) => sum + g.dayTotal, 0);
 
     // Setup Columns
     worksheet.columns = [
-        { key: 'tgl', width: 10 },
-        { key: 'note', width: 62 },
-        { key: 'nominal', width: 26 }
+        { key: 'tgl', width: 9 },
+        { key: 'note', width: 48 },
+        { key: 'nominal_rp', width: 19 },
+        { key: 'nominal_perc', width: 10 },
+        { key: 'total_day', width: 20 },
+        { key: 'day_perc', width: 10 }
     ];
 
     const thinBorder = {
@@ -155,11 +307,11 @@ async function exportCategoryToExcel(data, filename, branchName, options = {}) {
         fgColor: { argb: 'FF001B54' }
     };
 
-    const goldFont = {
+    const whiteFont = {
         name: 'Calibri',
         size: 11,
         bold: true,
-        color: { argb: 'FFFFEE00' }
+        color: { argb: 'FFFFFFFF' }
     };
 
     // Row 1 - 4: Header Container (Deep Navy #001B54)
@@ -174,38 +326,77 @@ async function exportCategoryToExcel(data, filename, branchName, options = {}) {
         const row = worksheet.getRow(r);
         row.height = 20;
 
-        // Merge A & B for text
-        worksheet.mergeCells(`A${r}:B${r}`);
+        // Merge A-D for title text
+        worksheet.mergeCells(`A${r}:D${r}`);
         const textCell = worksheet.getCell(`A${r}`);
         textCell.value = headerRows[r - 1];
-        textCell.font = goldFont;
+        textCell.font = whiteFont;
         textCell.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
 
-        // Fill Navy for all header cells
-        for (let col = 1; col <= 3; col++) {
+        // Fill Navy for all columns (A-F)
+        for (let col = 1; col <= 6; col++) {
             worksheet.getRow(r).getCell(col).fill = navyFill;
         }
     }
 
-    // Right Total Box on C4
-    const totalCell = worksheet.getCell('C4');
-    totalCell.value = totalAmount;
-    totalCell.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FFFFEE00' } };
-    totalCell.alignment = { horizontal: 'right', vertical: 'middle' };
-    totalCell.numFmt = '"Rp "#,##0.00';
-    totalCell.border = {
-        top: { style: 'medium', color: { argb: 'FFFFEE00' } },
-        left: { style: 'medium', color: { argb: 'FFFFEE00' } },
-        bottom: { style: 'medium', color: { argb: 'FFFFEE00' } },
-        right: { style: 'medium', color: { argb: 'FFFFEE00' } }
-    };
+    // Right Total Box on E4 / F4
+    const accountingIntFmt = '_("Rp"* #,##0_);_("Rp"* (#,##0);_("Rp"* 0_);_(@_)';
+    const accountingDecFmt = '_("Rp"* #,##0.00_);_("Rp"* (#,##0.00);_("Rp"* 0.00_);_(@_)';
+
+    if (hasSalesChannels) {
+        const totalCell = worksheet.getCell('E4');
+        totalCell.value = grandTotal;
+        totalCell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+        totalCell.alignment = { horizontal: 'right', vertical: 'middle' };
+        totalCell.numFmt = accountingIntFmt;
+        totalCell.fill = navyFill;
+        totalCell.border = {
+            top: { style: 'medium', color: { argb: 'FFFFFFFF' } },
+            left: { style: 'medium', color: { argb: 'FFFFFFFF' } },
+            bottom: { style: 'medium', color: { argb: 'FFFFFFFF' } },
+            right: { style: 'medium', color: { argb: 'FFFFFFFF' } }
+        };
+
+        const percCell = worksheet.getCell('F4');
+        percCell.value = 1;
+        percCell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+        percCell.alignment = { horizontal: 'center', vertical: 'middle' };
+        percCell.numFmt = '0%';
+        percCell.fill = navyFill;
+        percCell.border = {
+            top: { style: 'medium', color: { argb: 'FFFFFFFF' } },
+            left: { style: 'medium', color: { argb: 'FFFFFFFF' } },
+            bottom: { style: 'medium', color: { argb: 'FFFFFFFF' } },
+            right: { style: 'medium', color: { argb: 'FFFFFFFF' } }
+        };
+    } else {
+        worksheet.mergeCells('E4:F4');
+        const totalCell = worksheet.getCell('E4');
+        totalCell.value = grandTotal;
+        totalCell.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FFFFFFFF' } };
+        totalCell.alignment = { horizontal: 'right', vertical: 'middle' };
+        totalCell.numFmt = accountingIntFmt;
+        totalCell.border = {
+            top: { style: 'medium', color: { argb: 'FFFFFFFF' } },
+            left: { style: 'medium', color: { argb: 'FFFFFFFF' } },
+            bottom: { style: 'medium', color: { argb: 'FFFFFFFF' } },
+            right: { style: 'medium', color: { argb: 'FFFFFFFF' } }
+        };
+        worksheet.getCell('F4').border = totalCell.border;
+    }
 
     // Row 5: Table Header
     const tableHeaderRow = worksheet.getRow(5);
     tableHeaderRow.height = 24;
-    tableHeaderRow.values = ['TGL', 'Keterangan', 'Nominal'];
 
-    ['A5', 'B5', 'C5'].forEach((cellRef) => {
+    worksheet.getCell('A5').value = 'TGL';
+    worksheet.getCell('B5').value = 'Keterangan';
+    worksheet.mergeCells('C5:D5');
+    worksheet.getCell('C5').value = 'Nominal';
+    worksheet.getCell('E5').value = totalColHeader;
+    worksheet.getCell('F5').value = '%';
+
+    ['A5', 'B5', 'C5', 'D5', 'E5', 'F5'].forEach((cellRef) => {
         const cell = worksheet.getCell(cellRef);
         cell.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF000000' } };
         cell.alignment = { horizontal: 'center', vertical: 'middle' };
@@ -217,59 +408,102 @@ async function exportCategoryToExcel(data, filename, branchName, options = {}) {
         cell.border = thinBorder;
     });
 
-    // Rows 6+: Data Rows
+    // Rows 6+: Data Rows grouped by date
     let currentRow = 6;
-    validData.forEach((item, index) => {
-        let dayStr = '-';
-        if (item.transaction_date) {
-            const dateObj = new Date(item.transaction_date);
-            if (!isNaN(dateObj.getTime())) {
-                dayStr = String(dateObj.getDate()).padStart(2, '0');
-            } else {
-                dayStr = String(item.transaction_date).slice(8, 10) || '-';
+
+    for (const group of groups) {
+        const startRow = currentRow;
+        const isSingleItemInGroup = group.items.length === 1;
+
+        group.items.forEach((item, idx) => {
+            const row = worksheet.getRow(currentRow);
+            row.height = isSingleItemInGroup ? 28 : 20;
+
+            const itemAmt = Math.abs(parseFloat(item.amount !== undefined ? item.amount : (item.net_amount !== undefined ? item.net_amount : 0)));
+            const isEven = idx % 2 === 0;
+            const rowBgColor = isEven ? 'FFFFFFFF' : softBgArgb;
+
+            // Cell B: Keterangan
+            const cellB = row.getCell(2);
+            cellB.value = sanitizeText(item.note || item.category_name || '-');
+            cellB.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+            cellB.font = { name: 'Calibri', size: 10, color: { argb: 'FF000000' } };
+
+            // Cell C: Nominal Rp
+            const cellC = row.getCell(3);
+            cellC.value = itemAmt;
+            cellC.alignment = { horizontal: 'right', vertical: 'middle' };
+            cellC.font = { name: 'Calibri', size: 10, color: { argb: 'FF000000' } };
+            cellC.numFmt = accountingDecFmt;
+
+            // Cell D: Item %
+            const cellD = row.getCell(4);
+            cellD.value = group.dayTotal > 0 ? (itemAmt / group.dayTotal) : 0;
+            cellD.alignment = { horizontal: 'right', vertical: 'middle' };
+            cellD.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF000000' } };
+            cellD.numFmt = hasSalesChannels ? '0%' : '0.00%';
+
+            // Apply row background and borders to middle cells (cols 2, 3, 4)
+            for (let col = 2; col <= 4; col++) {
+                const c = row.getCell(col);
+                c.fill = {
+                    type: 'pattern',
+                    pattern: 'solid',
+                    fgColor: { argb: rowBgColor }
+                };
+                c.border = thinBorder;
             }
+
+            currentRow++;
+        });
+
+        const endRow = currentRow - 1;
+
+        // Merge A: TGL
+        worksheet.mergeCells(`A${startRow}:A${endRow}`);
+        const cellA = worksheet.getCell(`A${startRow}`);
+        cellA.value = `${group.dayNumber}\n${group.dayName}`;
+        cellA.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+        cellA.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF000000' } };
+        cellA.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: softBgArgb }
+        };
+
+        // Merge E: Total BB/Oz
+        worksheet.mergeCells(`E${startRow}:E${endRow}`);
+        const cellE = worksheet.getCell(`E${startRow}`);
+        cellE.value = group.dayTotal;
+        cellE.alignment = { horizontal: 'right', vertical: 'middle' };
+        cellE.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF000000' } };
+        cellE.numFmt = accountingDecFmt;
+        cellE.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFFFFFFF' }
+        };
+
+        // Merge F: %
+        worksheet.mergeCells(`F${startRow}:F${endRow}`);
+        const cellF = worksheet.getCell(`F${startRow}`);
+        cellF.value = grandTotal > 0 ? (group.dayTotal / grandTotal) : 0;
+        cellF.alignment = { horizontal: 'right', vertical: 'middle' };
+        cellF.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF000000' } };
+        cellF.numFmt = hasSalesChannels ? '0%' : '0.00%';
+        cellF.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: softBgArgb }
+        };
+
+        // Ensure border on all merged cells
+        for (let r = startRow; r <= endRow; r++) {
+            worksheet.getCell(`A${r}`).border = thinBorder;
+            worksheet.getCell(`E${r}`).border = thinBorder;
+            worksheet.getCell(`F${r}`).border = thinBorder;
         }
-
-        const rawNote = item.note || item.category_name || '-';
-        const noteText = sanitizeText(rawNote);
-        const itemAmt = Math.abs(parseFloat(item.net_amount !== undefined ? item.net_amount : item.amount || 0));
-
-        const isExpense = item.type === 'expense' || (lampiranType === 'PENGELUARAN' && !item.type);
-        const softBg = isExpense ? 'FFFDECEB' : 'FFEEF4E8';
-        const rowBgColor = index % 2 === 0 ? softBg : 'FFFFFFFF';
-
-        const row = worksheet.getRow(currentRow);
-        row.height = 22;
-
-        const cellA = row.getCell(1);
-        cellA.value = dayStr;
-        cellA.alignment = { horizontal: 'center', vertical: 'middle' };
-        cellA.font = { name: 'Calibri', size: 10, color: { argb: 'FF000000' } };
-
-        const cellB = row.getCell(2);
-        cellB.value = noteText;
-        cellB.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
-        cellB.font = { name: 'Calibri', size: 10, color: { argb: 'FF000000' } };
-
-        const cellC = row.getCell(3);
-        cellC.value = itemAmt;
-        cellC.alignment = { horizontal: 'right', vertical: 'middle' };
-        cellC.font = { name: 'Calibri', size: 10, color: { argb: 'FF000000' } };
-        cellC.numFmt = '"Rp "#,##0.00';
-
-        // Apply row background and borders to all 3 cells
-        for (let col = 1; col <= 3; col++) {
-            const c = row.getCell(col);
-            c.fill = {
-                type: 'pattern',
-                pattern: 'solid',
-                fgColor: { argb: rowBgColor }
-            };
-            c.border = thinBorder;
-        }
-
-        currentRow++;
-    });
+    }
 
     // Ensure output filepath
     const filepath = path.join(EXPORTS_DIR, filename);

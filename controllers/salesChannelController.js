@@ -3,11 +3,19 @@ const SalesChannel = require('../models/SalesChannel');
 // Get all sales channels
 const getSalesChannels = async (req, res, next) => {
   try {
-    const branchId = req.branchId || req.headers['x-branch-id'];
-    const { include_inactive, only_deleted } = req.query;
+    const branchId = req.branchId || req.headers['x-branch-id'] || req.query.branch_id;
+    if (!branchId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Branch ID wajib disertakan'
+      });
+    }
+
+    const { include_inactive, only_deleted, category_id } = req.query;
 
     const channels = await SalesChannel.findAll({
-      branchId: branchId ? parseInt(branchId) : null,
+      branchId: parseInt(branchId),
+      categoryId: category_id,
       includeInactive: include_inactive === 'true' || include_inactive === '1' || req.user.role === 'owner' || req.user.role === 'master',
       onlyDeleted: only_deleted === 'true' || only_deleted === '1'
     });
@@ -46,8 +54,15 @@ const getSalesChannelById = async (req, res, next) => {
 // Create sales channel
 const createSalesChannel = async (req, res, next) => {
   try {
-    const branchId = req.branchId || req.headers['x-branch-id'];
-    const { name, description, is_active = true } = req.body;
+    const branchId = req.branchId || req.headers['x-branch-id'] || req.body.branch_id;
+    if (!branchId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Branch ID wajib disertakan'
+      });
+    }
+
+    const { category_id, name, description, is_active = true } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({
@@ -57,7 +72,8 @@ const createSalesChannel = async (req, res, next) => {
     }
 
     const channel = await SalesChannel.create({
-      branchId: branchId ? parseInt(branchId) : null,
+      branchId: parseInt(branchId),
+      categoryId: category_id ? parseInt(category_id) : null,
       name: name.trim(),
       description: description ? description.trim() : null,
       isActive: is_active !== false && is_active !== 0 && is_active !== '0'
@@ -77,7 +93,7 @@ const createSalesChannel = async (req, res, next) => {
 const updateSalesChannel = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, description, is_active } = req.body;
+    const { category_id, name, description, is_active } = req.body;
 
     const existing = await SalesChannel.findById(parseInt(id));
     if (!existing) {
@@ -88,6 +104,7 @@ const updateSalesChannel = async (req, res, next) => {
     }
 
     const updated = await SalesChannel.update(parseInt(id), {
+      categoryId: category_id !== undefined ? (category_id ? parseInt(category_id) : null) : undefined,
       name: name !== undefined ? name.trim() : undefined,
       description: description !== undefined ? description.trim() : undefined,
       isActive: is_active !== undefined ? (is_active !== false && is_active !== 0 && is_active !== '0') : undefined

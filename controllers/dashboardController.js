@@ -35,8 +35,8 @@ function formatSection(date, items, transactions, req) {
         return sum + (parseFloat(t.pb1) || 0);
       }
       
-      const ref = parseFloat(t.total_refund || 0);
-      return sum + Math.max(0, val - ref);
+      const futureRef = parseFloat(t.future_refund || 0);
+      return sum + (val + futureRef);
     }, 0);
 
   // If for PB1, round the total income tax at the end
@@ -47,8 +47,8 @@ function formatSection(date, items, transactions, req) {
     .reduce((sum, t) => {
       // If for PB1, only count setoran pajak
       if (req.query.has_pb1 === 'true' && !t.is_pb1_payment) return sum;
-      const ref = parseFloat(t.total_refund || 0);
-      return sum + Math.max(0, parseFloat(t.amount) - ref);
+      const futureRef = parseFloat(t.future_refund || 0);
+      return sum + (parseFloat(t.amount) + futureRef);
     }, 0);
 
   // Get base URL from config (prioritize config over req)
@@ -97,16 +97,18 @@ function formatSection(date, items, transactions, req) {
         }
       }
 
-      let displayAmount = item.type === 'expense' ? -parseFloat(item.amount) : parseFloat(item.amount);
+      const itemFutureRef = parseFloat(item.future_refund || 0);
+      const effectiveAmount = parseFloat(item.amount) + itemFutureRef;
+      let displayAmount = item.type === 'expense' ? -effectiveAmount : effectiveAmount;
       
       // Handle debt payment logic for dashboard list (Accrual Basis)
       if (item.type === 'income' && (item.is_debt_payment === true || item.is_debt_payment === 1 || item.is_debt_payment === '1')) {
         if (item.category_id) {
           // Piutang Utama: Tampilkan Full Amount (Omzet Utuh)
-          displayAmount = parseFloat(item.amount);
+          displayAmount = effectiveAmount;
         } else {
           // Notifikasi Pelunasan: Tetap tampilkan nominal pelunasan agar terlihat di daftar
-          displayAmount = parseFloat(item.amount);
+          displayAmount = effectiveAmount;
         }
       }
 
@@ -116,7 +118,8 @@ function formatSection(date, items, transactions, req) {
         note: item.note || '',
         amount: displayAmount,
         total_refund: item.total_refund !== undefined ? parseFloat(item.total_refund) : 0,
-        net_amount: item.net_amount !== undefined ? parseFloat(item.net_amount) : (Math.max(0, Math.abs(parseFloat(item.amount || 0)) - parseFloat(item.total_refund || 0))),
+        future_refund: itemFutureRef,
+        net_amount: item.net_amount !== undefined ? parseFloat(item.net_amount) : effectiveAmount,
         pb1: item.pb1 ? parseFloat(item.pb1) : null,
         lampiran: lampiran, // Always array or null with full URLs
         user_name: item.user_name || null,
@@ -456,9 +459,11 @@ const getBulananAll = async (req, res, next) => {
       let dateStr = t.transaction_date;
       if (dateStr instanceof Date) {
         dateStr = formatDate(dateStr);
-      } else if (typeof dateStr === 'string' && dateStr.includes('T')) {
-        dateStr = dateStr.split('T')[0];
-      } else return;
+      } else if (typeof dateStr === 'string') {
+        dateStr = dateStr.includes('T') ? dateStr.split('T')[0] : dateStr;
+      } else {
+        return;
+      }
 
       const date = parseDate(dateStr);
       if (!date || isNaN(date.getTime())) return;
@@ -625,9 +630,11 @@ const getTahunan = async (req, res, next) => {
       let dateStr = t.transaction_date;
       if (dateStr instanceof Date) {
         dateStr = formatDate(dateStr);
-      } else if (typeof dateStr === 'string' && dateStr.includes('T')) {
-        dateStr = dateStr.split('T')[0];
-      } else return;
+      } else if (typeof dateStr === 'string') {
+        dateStr = dateStr.includes('T') ? dateStr.split('T')[0] : dateStr;
+      } else {
+        return;
+      }
 
       const date = parseDate(dateStr);
       if (!date || isNaN(date.getTime())) return;

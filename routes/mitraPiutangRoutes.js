@@ -6,7 +6,8 @@ const {
   create,
   update,
   delete: deleteMitraPiutang,
-  restore
+  restore,
+  bulkRepayment
 } = require('../controllers/mitraPiutangController');
 const { getMitraPiutangReport } = require('../controllers/mitraPiutangReportController');
 const { authenticate } = require('../middleware/auth');
@@ -30,6 +31,9 @@ router.post('/', create);
 
 // Update mitra piutang
 router.put('/:id', update);
+
+// Bulk repayment for mitra piutang
+router.post('/:id/bulk-repay', bulkRepayment);
 
 // Soft delete mitra piutang
 router.delete('/:id', deleteMitraPiutang);

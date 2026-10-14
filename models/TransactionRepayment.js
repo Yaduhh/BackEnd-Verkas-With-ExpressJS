@@ -25,10 +25,13 @@ class TransactionRepayment {
 
     static async findById(id) {
         const results = await query(
-            `SELECT tr.*, mp.nama as mitra_nama, COALESCE(u.name, u.email) as user_name
+            `SELECT tr.*, mp.nama as mitra_nama, COALESCE(u.name, u.email) as user_name,
+                    t_inc.bank_account_id, ba.name as bank_account_name
        FROM transaction_repayments tr
        JOIN mitra_piutang mp ON tr.mitra_piutang_id = mp.id
        JOIN users u ON tr.user_id = u.id
+       LEFT JOIN transactions t_inc ON tr.income_transaction_id = t_inc.id
+       LEFT JOIN bank_accounts ba ON t_inc.bank_account_id = ba.id
        WHERE tr.id = ?`,
             [id]
         );
