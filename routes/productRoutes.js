@@ -1,5 +1,11 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
+const uploadMemory = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
+
 const {
   getProducts,
   getProductById,
@@ -9,7 +15,9 @@ const {
   restoreProduct,
   addBrand,
   updateBrand,
-  deleteBrand
+  deleteBrand,
+  downloadTemplate,
+  importExcel
 } = require('../controllers/productController');
 const { authenticate } = require('../middleware/auth');
 const { optionalBranchContext } = require('../middleware/branchContext');
@@ -17,6 +25,10 @@ const { optionalBranchContext } = require('../middleware/branchContext');
 // All routes require authentication
 router.use(authenticate);
 router.use(optionalBranchContext);
+
+// Excel template & import (must be registered BEFORE /:id)
+router.get('/template-excel', downloadTemplate);
+router.post('/import-excel', uploadMemory.single('file'), importExcel);
 
 // Products
 router.get('/', getProducts);

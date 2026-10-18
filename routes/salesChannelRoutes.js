@@ -3,6 +3,7 @@ const router = express.Router();
 const {
   getSalesChannels,
   getSalesChannelById,
+  getSalesChannelCategoryReport,
   createSalesChannel,
   updateSalesChannel,
   deleteSalesChannel,
@@ -17,6 +18,9 @@ router.use(optionalBranchContext);
 
 // Get all sales channels
 router.get('/', getSalesChannels);
+
+// Get sales channel category report
+router.get('/report/category/:categoryId', getSalesChannelCategoryReport);
 
 // Get single sales channel
 router.get('/:id', getSalesChannelById);
