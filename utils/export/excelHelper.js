@@ -512,7 +512,625 @@ async function exportCategoryToExcel(data, filename, branchName, options = {}) {
     return filepath;
 }
 
+/**
+ * Export Financial Report to Excel (Matching PDF layout and styling exactly)
+ */
+async function exportFinancialReportToExcel(data, filename, branchName, selectedMonth, workingDays, options = {}) {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'VERKAS';
+    workbook.created = new Date();
+
+    const monthShortNames = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+    const mShort = monthShortNames[selectedMonth.getMonth()] || 'Bln';
+    const yShort = String(selectedMonth.getFullYear()).slice(-2);
+
+    const sheetName = `Lap Keu - ${mShort} ${yShort}`.substring(0, 31);
+    const worksheet = workbook.addWorksheet(sheetName, {
+        views: [{ showGridLines: true }]
+    });
+
+    // Column Setup (Matching the 4 columns of the PDF table)
+    worksheet.columns = [
+        { key: 'no', width: 8 },
+        { key: 'name', width: 46 },
+        { key: 'amount', width: 24 },
+        { key: 'percent', width: 15 }
+    ];
+
+    const fontName = 'Segoe UI';
+    const thinBorder = {
+        top: { style: 'thin', color: { argb: 'FF000000' } },
+        left: { style: 'thin', color: { argb: 'FF000000' } },
+        bottom: { style: 'thin', color: { argb: 'FF000000' } },
+        right: { style: 'thin', color: { argb: 'FF000000' } }
+    };
+    const currencyFmt = '_("Rp"* #,##0_);[Red]_("Rp"* -#,##0_);_("Rp"* "-"_);_(@_)';
+    const percentFmt = '0.00%';
+
+    let currentRow = 1;
+
+    // Helper: Style all cells in a row or range
+    const applyBorders = (startR, endR = startR, startC = 1, endC = 4, border = thinBorder) => {
+        for (let r = startR; r <= endR; r++) {
+            for (let c = startC; c <= endC; c++) {
+                worksheet.getCell(r, c).border = border;
+            }
+        }
+    };
+
+    // 1. TOP HEADER BANNER (Navy Blue #0A1C58 with Gold/Yellow #FFFF00 text)
+    const branchLabel = (options.branchCode && options.branchCode.trim())
+        ? options.branchCode.trim()
+        : (options.branchName || branchName);
+
+    // Row 1: LAP. KEU & Date Label
+    worksheet.mergeCells(`A${currentRow}:B${currentRow}`);
+    worksheet.mergeCells(`C${currentRow}:D${currentRow}`);
+    
+    const r1Left = worksheet.getCell(`A${currentRow}`);
+    r1Left.value = 'LAP. KEU';
+    r1Left.font = { name: fontName, size: 12, bold: true, color: { argb: 'FFFFFF00' } };
+    r1Left.alignment = { horizontal: 'center', vertical: 'middle' };
+
+    const r1Right = worksheet.getCell(`C${currentRow}`);
+    r1Right.value = `${mShort} ${yShort}`;
+    r1Right.font = { name: fontName, size: 11, bold: true, color: { argb: 'FFFFFF00' } };
+    r1Right.alignment = { horizontal: 'right', vertical: 'middle' };
+
+    worksheet.getRow(currentRow).height = 24;
+    for (let c = 1; c <= 4; c++) {
+        worksheet.getCell(currentRow, c).fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FF0A1C58' }
+        };
+    }
+    applyBorders(currentRow, currentRow);
+    currentRow++;
+
+    // Row 2: BRANCH NAME & Working Days
+    worksheet.mergeCells(`A${currentRow}:B${currentRow}`);
+    worksheet.mergeCells(`C${currentRow}:D${currentRow}`);
+
+    const r2Left = worksheet.getCell(`A${currentRow}`);
+    r2Left.value = branchLabel.toUpperCase();
+    r2Left.font = { name: fontName, size: 12, bold: true, color: { argb: 'FFFFFF00' } };
+    r2Left.alignment = { horizontal: 'center', vertical: 'middle' };
+
+    const r2Right = worksheet.getCell(`C${currentRow}`);
+    r2Right.value = `Buka : ${workingDays || 30} Hari`;
+    r2Right.font = { name: fontName, size: 11, bold: true, color: { argb: 'FFFFFF00' } };
+    r2Right.alignment = { horizontal: 'right', vertical: 'middle' };
+
+    worksheet.getRow(currentRow).height = 24;
+    for (let c = 1; c <= 4; c++) {
+        worksheet.getCell(currentRow, c).fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FF0A1C58' }
+        };
+    }
+    applyBorders(currentRow, currentRow);
+    currentRow++;
+
+    // 2. PEMASUKAN SECTION
+    const omzetItemsInitial = (data.income_breakdown || []).filter(it => {
+        const n = (it.category_name || '').toLowerCase();
+        return (n.includes('omzet') || n.includes('omset')) && !n.includes('lain');
+    });
+    const totalOmzetNetInitial = omzetItemsInitial.reduce((sum, it) => sum + (Number(it.total) || 0), 0);
+    const totalOtherIncomeInitial = (data.income_breakdown || []).filter(it => !(it.category_name || '').toLowerCase().includes('omzet') && !(it.category_name || '').toLowerCase().includes('omset')).reduce((sum, it) => sum + (Number(it.total) || 0), 0);
+    const totalPemasukanFinal = Number(data.omzet_total) || (totalOmzetNetInitial + totalOtherIncomeInitial + Number(data.pelunasan_piutang_bulan_lalu || 0));
+
+    // Header bar (Forest Green #257942)
+    worksheet.mergeCells(`A${currentRow}:B${currentRow}`);
+    const pemTitle = worksheet.getCell(`A${currentRow}`);
+    pemTitle.value = 'PEMASUKAN';
+    pemTitle.font = { name: fontName, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+    pemTitle.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+
+    const pemAmt = worksheet.getCell(`C${currentRow}`);
+    pemAmt.value = totalPemasukanFinal;
+    pemAmt.numFmt = currencyFmt;
+    pemAmt.font = { name: fontName, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+    pemAmt.alignment = { horizontal: 'right', vertical: 'middle' };
+
+    const pemPerc = worksheet.getCell(`D${currentRow}`);
+    pemPerc.value = 1;
+    pemPerc.numFmt = '0%';
+    pemPerc.font = { name: fontName, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+    pemPerc.alignment = { horizontal: 'center', vertical: 'middle' };
+
+    worksheet.getRow(currentRow).height = 22;
+    for (let c = 1; c <= 4; c++) {
+        worksheet.getCell(currentRow, c).fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FF257942' }
+        };
+    }
+    applyBorders(currentRow, currentRow);
+    currentRow++;
+
+    // Subheader
+    const renderSubHeader = (col2Title) => {
+        worksheet.getRow(currentRow).height = 18;
+        const subHeaders = [
+            { col: 'A', text: 'No', align: 'center' },
+            { col: 'B', text: col2Title, align: 'center' },
+            { col: 'C', text: 'Jumlah', align: 'center' },
+            { col: 'D', text: 'Persentase', align: 'center' }
+        ];
+        subHeaders.forEach(sh => {
+            const cell = worksheet.getCell(`${sh.col}${currentRow}`);
+            cell.value = sh.text;
+            cell.font = { name: fontName, size: 9, bold: true, color: { argb: 'FF000000' } };
+            cell.alignment = { horizontal: sh.align, vertical: 'middle' };
+            cell.fill = {
+                type: 'pattern',
+                pattern: 'solid',
+                fgColor: { argb: 'FFFFFFFF' }
+            };
+        });
+        applyBorders(currentRow, currentRow);
+        currentRow++;
+    };
+
+    renderSubHeader('Sales Channel');
+
+    // Pemasukan Items
+    let pemIdx = 1;
+    const omzetItems = (data.income_breakdown || []).filter(it => {
+        const n = (it.category_name || '').toLowerCase();
+        return (n.includes('omzet') || n.includes('omset')) && !n.includes('lain');
+    });
+    const totalOmzetNet = omzetItems.reduce((sum, it) => sum + (Number(it.total) || 0), 0);
+    const salesChannelsList = data.sales_channels || [];
+    const totalSalesChannels = salesChannelsList.reduce((sum, sc) => sum + (Number(sc.amount) || 0), 0);
+
+    const renderDataRow = (noVal, nameVal, amtVal, isBold = true, bgArgb = 'FFFFFFFF', indent = 1) => {
+        worksheet.getRow(currentRow).height = 18;
+
+        const cellA = worksheet.getCell(`A${currentRow}`);
+        cellA.value = noVal !== undefined && noVal !== null ? String(noVal) : '';
+        cellA.font = { name: fontName, size: 9, bold: isBold, color: { argb: 'FF000000' } };
+        cellA.alignment = { horizontal: 'center', vertical: 'middle' };
+
+        const cellB = worksheet.getCell(`B${currentRow}`);
+        cellB.value = nameVal;
+        cellB.font = { name: fontName, size: 9, bold: isBold, color: { argb: 'FF000000' } };
+        cellB.alignment = { horizontal: 'left', vertical: 'middle', indent };
+
+        const cellC = worksheet.getCell(`C${currentRow}`);
+        if (typeof amtVal === 'number') {
+            cellC.value = amtVal;
+            cellC.numFmt = currencyFmt;
+        } else {
+            cellC.value = amtVal || '-';
+        }
+        cellC.font = { name: fontName, size: 9, bold: isBold, color: { argb: 'FF000000' } };
+        cellC.alignment = { horizontal: 'right', vertical: 'middle' };
+
+        const cellD = worksheet.getCell(`D${currentRow}`);
+        if (typeof amtVal === 'number' && totalPemasukanFinal > 0) {
+            cellD.value = amtVal / totalPemasukanFinal;
+            cellD.numFmt = percentFmt;
+        } else {
+            cellD.value = '0,00%';
+        }
+        cellD.font = { name: fontName, size: 9, bold: isBold, color: { argb: 'FF000000' } };
+        cellD.alignment = { horizontal: 'center', vertical: 'middle' };
+
+        if (bgArgb && bgArgb !== 'FFFFFFFF') {
+            for (let c = 1; c <= 4; c++) {
+                worksheet.getCell(currentRow, c).fill = {
+                    type: 'pattern',
+                    pattern: 'solid',
+                    fgColor: { argb: bgArgb }
+                };
+            }
+        }
+        applyBorders(currentRow, currentRow);
+        currentRow++;
+    };
+
+    if (salesChannelsList.length === 0) {
+        if (totalOmzetNet > 0) {
+            renderDataRow(pemIdx++, 'Omzet Penjualan', totalOmzetNet, true);
+        }
+    } else {
+        salesChannelsList.forEach(sc => {
+            let scName = (sc.name || sc.channel_name || '').trim().replace(/^(omzet|omset)\s+/i, '');
+            const amt = Number(sc.amount) || 0;
+            renderDataRow(pemIdx++, scName, amt, true);
+        });
+
+        const unallocatedOmzet = totalOmzetNet - totalSalesChannels;
+        if (unallocatedOmzet >= 1) {
+            renderDataRow(pemIdx++, 'Omzet Belum Teralokasi Channel', unallocatedOmzet, true);
+        }
+    }
+
+    // Other income categories
+    const otherIncomes = (data.income_breakdown || []).filter(it => {
+        const n = (it.category_name || '').toLowerCase();
+        return n.includes('lain') || (!n.includes('omzet') && !n.includes('omset'));
+    });
+    otherIncomes.forEach(it => {
+        const amt = Number(it.total) || 0;
+        const displayName = (it.category_name || '').toLowerCase().includes('lain')
+            ? 'Pendapatan Lain-lain'
+            : it.category_name;
+        renderDataRow(pemIdx++, displayName, amt, true);
+    });
+
+    // Pelunasan Piutang Bulan Lalu
+    if (data.pelunasan_piutang_bulan_lalu && Number(data.pelunasan_piutang_bulan_lalu) > 0) {
+        const amt = Number(data.pelunasan_piutang_bulan_lalu);
+        const label = `Pelunasan Piutang ${data.prev_month_label || 'Bulan Lalu'}`;
+        renderDataRow(pemIdx++, label, amt, true);
+    }
+
+    // 3. PENGELUARAN SECTION
+    const isSimpananItem = (name) => {
+        const ln = (name || '').toLowerCase();
+        return ln.startsWith('kas ') || ln.startsWith('k.s.o.') || ln.includes('simpanan');
+    };
+
+    const isPiutangItem = (name) => {
+        const ln = (name || '').toLowerCase();
+        return ln.startsWith('piutang') || ln.includes('mitra piutang');
+    };
+
+    const regularExpenses = [];
+    const simpananExpenses = [];
+    let detectedPiutangFromBreakdown = null;
+
+    (data.expense_breakdown || []).forEach(ex => {
+        if (isSimpananItem(ex.category_name)) {
+            simpananExpenses.push(ex);
+        } else if (isPiutangItem(ex.category_name)) {
+            detectedPiutangFromBreakdown = ex;
+        } else {
+            regularExpenses.push(ex);
+        }
+    });
+
+    const piutangAmount = (data.piutang_mitra !== undefined && data.piutang_mitra !== null && !isNaN(Number(data.piutang_mitra)))
+        ? Number(data.piutang_mitra)
+        : (data.total_piutang_mitra !== undefined && data.total_piutang_mitra !== null && !isNaN(Number(data.total_piutang_mitra)))
+            ? Number(data.total_piutang_mitra)
+            : (detectedPiutangFromBreakdown ? Number(detectedPiutangFromBreakdown.total) : 0);
+
+    const piutangLabel = data.piutang_label || (detectedPiutangFromBreakdown ? detectedPiutangFromBreakdown.category_name : 'PIUTANG');
+
+    const totalPengeluaran = (data.pure_pengeluaran !== undefined && data.pure_pengeluaran !== null)
+        ? Number(data.pure_pengeluaran)
+        : (regularExpenses.reduce((s, x) => s + (Number(x.total) || 0), 0) + simpananExpenses.reduce((s, x) => s + (Number(x.total) || 0), 0));
+    const totalExpPerc = totalPemasukanFinal > 0 ? (totalPengeluaran / totalPemasukanFinal) : 0;
+
+    // Header bar (Red #E60000)
+    worksheet.mergeCells(`A${currentRow}:B${currentRow}`);
+    const pengTitle = worksheet.getCell(`A${currentRow}`);
+    pengTitle.value = 'PENGELUARAN';
+    pengTitle.font = { name: fontName, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+    pengTitle.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+
+    const pengAmt = worksheet.getCell(`C${currentRow}`);
+    pengAmt.value = totalPengeluaran;
+    pengAmt.numFmt = currencyFmt;
+    pengAmt.font = { name: fontName, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+    pengAmt.alignment = { horizontal: 'right', vertical: 'middle' };
+
+    const pengPerc = worksheet.getCell(`D${currentRow}`);
+    pengPerc.value = totalExpPerc;
+    pengPerc.numFmt = percentFmt;
+    pengPerc.font = { name: fontName, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+    pengPerc.alignment = { horizontal: 'center', vertical: 'middle' };
+
+    worksheet.getRow(currentRow).height = 22;
+    for (let c = 1; c <= 4; c++) {
+        worksheet.getCell(currentRow, c).fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFE60000' }
+        };
+    }
+    applyBorders(currentRow, currentRow);
+    currentRow++;
+
+    renderSubHeader('Uraian');
+
+    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let expLetterIdx = 0;
+
+    regularExpenses.forEach(ex => {
+        const letter = letters[expLetterIdx++] || String(expLetterIdx);
+        const amt = Number(ex.total) || 0;
+        const isAdj = ex.is_adjustment;
+        renderDataRow(
+            isAdj ? '' : letter,
+            isAdj ? `  — ${ex.category_name}` : ex.category_name,
+            amt,
+            !isAdj,
+            'FFFFFFFF',
+            isAdj ? 2 : 1
+        );
+    });
+
+    // Simpanan Expenses (if any)
+    if (simpananExpenses.length > 0) {
+        const totalSimpananAmt = simpananExpenses.reduce((sum, s) => sum + (Number(s.total) || 0), 0);
+        const simpananLetter = letters[expLetterIdx++] || 'H';
+
+        // Parent Row for Simpanan
+        renderDataRow(simpananLetter, 'Total Simpanan', totalSimpananAmt, true, 'FFFFFFFF');
+
+        // Sub-items for Simpanan (Soft Peach background #FAEBE5)
+        simpananExpenses.forEach((sx, sIdx) => {
+            const subCode = `${simpananLetter.toLowerCase()}${sIdx + 1}`;
+            const sAmt = Number(sx.total) || 0;
+            let sTitle = sx.category_name;
+            const wDays = workingDays || 30;
+            if (wDays > 0 && sAmt > 0 && !sTitle.includes('@')) {
+                const dailyRate = Math.round(sAmt / wDays);
+                if (dailyRate * wDays === sAmt || Math.abs(dailyRate * wDays - sAmt) < wDays) {
+                    const formattedRate = new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0 }).format(dailyRate);
+                    sTitle = `${sx.category_name} ( ${formattedRate} @ ${wDays} Hari )`;
+                }
+            }
+            renderDataRow(subCode, sTitle, sAmt, false, 'FFFAEBE5', 2);
+        });
+    }
+
+    // 4. RINGKASAN SECTION
+    worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
+    const ringkasanTitle = worksheet.getCell(`A${currentRow}`);
+    ringkasanTitle.value = 'RINGKASAN';
+    ringkasanTitle.font = { name: fontName, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+    ringkasanTitle.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+    worksheet.getRow(currentRow).height = 20;
+    for (let c = 1; c <= 4; c++) {
+        worksheet.getCell(currentRow, c).fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FF356296' }
+        };
+    }
+    applyBorders(currentRow, currentRow);
+    currentRow++;
+
+    // Row 1: PEMASUKAN (#C7F7C4)
+    const renderRingkasanRow = (label, amt, perc, bgArgb) => {
+        worksheet.mergeCells(`A${currentRow}:B${currentRow}`);
+        const cTitle = worksheet.getCell(`A${currentRow}`);
+        cTitle.value = label;
+        cTitle.font = { name: fontName, size: 9, bold: true, color: { argb: 'FF000000' } };
+        cTitle.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+
+        const cAmt = worksheet.getCell(`C${currentRow}`);
+        cAmt.value = amt;
+        cAmt.numFmt = currencyFmt;
+        cAmt.font = { name: fontName, size: 9, bold: true, color: { argb: 'FF000000' } };
+        cAmt.alignment = { horizontal: 'right', vertical: 'middle' };
+
+        const cPerc = worksheet.getCell(`D${currentRow}`);
+        cPerc.value = perc;
+        cPerc.numFmt = percentFmt;
+        cPerc.font = { name: fontName, size: 9, bold: true, color: { argb: 'FF000000' } };
+        cPerc.alignment = { horizontal: 'center', vertical: 'middle' };
+
+        worksheet.getRow(currentRow).height = 18;
+        for (let c = 1; c <= 4; c++) {
+            worksheet.getCell(currentRow, c).fill = {
+                type: 'pattern',
+                pattern: 'solid',
+                fgColor: { argb: bgArgb }
+            };
+        }
+        applyBorders(currentRow, currentRow);
+        currentRow++;
+    };
+
+    renderRingkasanRow('PEMASUKAN', totalPemasukanFinal, 1, 'FFC7F7C4');
+    renderRingkasanRow('PENGELUARAN', totalPengeluaran, totalExpPerc, 'FFFCDAD7');
+
+    if (piutangAmount > 0) {
+        const piutangPerc = totalPemasukanFinal > 0 ? (piutangAmount / totalPemasukanFinal) : 0;
+        renderRingkasanRow(piutangLabel, piutangAmount, piutangPerc, 'FFFFF2CC');
+    }
+
+    const totalProfitAmount = Number(data.profit) !== undefined && !isNaN(Number(data.profit))
+        ? Number(data.profit)
+        : (totalPemasukanFinal - totalPengeluaran - piutangAmount);
+    const profitPerc = totalPemasukanFinal > 0 ? (totalProfitAmount / totalPemasukanFinal) : 0;
+    renderRingkasanRow('PROFIT/SELISIH', totalProfitAmount, profitPerc, 'FFD9E2F3');
+
+    // 5. BAGI HASIL SECTION (if exists)
+    if (data.bagi_hasil && data.bagi_hasil.length > 0) {
+        worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
+        const bhHeader = worksheet.getCell(`A${currentRow}`);
+        bhHeader.value = 'BAGI HASIL';
+        bhHeader.font = { name: fontName, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+        bhHeader.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+        worksheet.getRow(currentRow).height = 20;
+        for (let c = 1; c <= 4; c++) {
+            worksheet.getCell(currentRow, c).fill = {
+                type: 'pattern',
+                pattern: 'solid',
+                fgColor: { argb: 'FF356296' }
+            };
+        }
+        applyBorders(currentRow, currentRow);
+        currentRow++;
+
+        data.bagi_hasil.forEach(bh => {
+            const bhTitle = bh.title || bh.name || 'Partner';
+            const bhAmt = Number(bh.amount) || 0;
+            const bhPerc = bh.percentage !== undefined && bh.percentage !== '' ? (Number(bh.percentage) / 100) : 0;
+
+            worksheet.mergeCells(`A${currentRow}:B${currentRow}`);
+            const cellTitle = worksheet.getCell(`A${currentRow}`);
+            cellTitle.value = bhTitle;
+            cellTitle.font = { name: fontName, size: 9, bold: true, color: { argb: 'FF000000' } };
+            cellTitle.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+
+            const cellAmt = worksheet.getCell(`C${currentRow}`);
+            cellAmt.value = bhAmt;
+            cellAmt.numFmt = currencyFmt;
+            cellAmt.font = { name: fontName, size: 9, bold: true, color: { argb: 'FF000000' } };
+            cellAmt.alignment = { horizontal: 'right', vertical: 'middle' };
+
+            const cellPerc = worksheet.getCell(`D${currentRow}`);
+            if (bhPerc > 0) {
+                cellPerc.value = bhPerc;
+                cellPerc.numFmt = percentFmt;
+            } else {
+                cellPerc.value = '-';
+            }
+            cellPerc.font = { name: fontName, size: 9, bold: true, color: { argb: 'FF000000' } };
+            cellPerc.alignment = { horizontal: 'center', vertical: 'middle' };
+
+            worksheet.getRow(currentRow).height = 18;
+            applyBorders(currentRow, currentRow);
+            currentRow++;
+
+            if (bh.subItems && bh.subItems.length > 0) {
+                const activeSubs = bh.subItems.filter(sh => sh.is_active === undefined || sh.is_active === true || sh.is_active === 'true' || sh.is_active === 1);
+                activeSubs.forEach(sh => {
+                    const sAmt = Number(sh.amount) || 0;
+                    const sPerc = sh.percentage !== undefined && sh.percentage !== '' ? (Number(sh.percentage) / 100) : 0;
+
+                    worksheet.mergeCells(`A${currentRow}:B${currentRow}`);
+                    const sCellTitle = worksheet.getCell(`A${currentRow}`);
+                    sCellTitle.value = `    — ${sh.title}`;
+                    sCellTitle.font = { name: fontName, size: 8.5, bold: false, color: { argb: 'FF000000' } };
+                    sCellTitle.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+
+                    const sCellAmt = worksheet.getCell(`C${currentRow}`);
+                    sCellAmt.value = sAmt;
+                    sCellAmt.numFmt = currencyFmt;
+                    sCellAmt.font = { name: fontName, size: 8.5, bold: false, color: { argb: 'FF000000' } };
+                    sCellAmt.alignment = { horizontal: 'right', vertical: 'middle' };
+
+                    const sCellPerc = worksheet.getCell(`D${currentRow}`);
+                    if (sPerc > 0) {
+                        sCellPerc.value = sPerc;
+                        sCellPerc.numFmt = percentFmt;
+                    } else {
+                        sCellPerc.value = '-';
+                    }
+                    sCellPerc.font = { name: fontName, size: 8.5, bold: false, color: { argb: 'FF000000' } };
+                    sCellPerc.alignment = { horizontal: 'center', vertical: 'middle' };
+
+                    worksheet.getRow(currentRow).height = 18;
+                    for (let c = 1; c <= 4; c++) {
+                        worksheet.getCell(currentRow, c).fill = {
+                            type: 'pattern',
+                            pattern: 'solid',
+                            fgColor: { argb: 'FFFAEBE5' }
+                        };
+                    }
+                    applyBorders(currentRow, currentRow);
+                    currentRow++;
+                });
+            }
+        });
+    }
+
+    // 6. NILAI STOK SECTION
+    worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
+    const stokHeader = worksheet.getCell(`A${currentRow}`);
+    stokHeader.value = 'NILAI STOK';
+    stokHeader.font = { name: fontName, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+    stokHeader.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+    worksheet.getRow(currentRow).height = 20;
+    for (let c = 1; c <= 4; c++) {
+        worksheet.getCell(currentRow, c).fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FF5C4777' }
+        };
+    }
+    applyBorders(currentRow, currentRow);
+    currentRow++;
+
+    const renderStokRow = (label, val, hasVal) => {
+        worksheet.mergeCells(`A${currentRow}:B${currentRow}`);
+        const cTitle = worksheet.getCell(`A${currentRow}`);
+        cTitle.value = label;
+        cTitle.font = { name: fontName, size: 9, bold: false, color: { argb: 'FF000000' } };
+        cTitle.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+
+        worksheet.mergeCells(`C${currentRow}:D${currentRow}`);
+        const cAmt = worksheet.getCell(`C${currentRow}`);
+        if (hasVal && typeof val === 'number') {
+            cAmt.value = val;
+            cAmt.numFmt = currencyFmt;
+        } else {
+            cAmt.value = '-';
+        }
+        cAmt.font = { name: fontName, size: 9, bold: false, color: { argb: 'FF000000' } };
+        cAmt.alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+
+        worksheet.getRow(currentRow).height = 18;
+        applyBorders(currentRow, currentRow);
+        currentRow++;
+    };
+
+    const hasStokAwal = data.stok_awal !== null && data.stok_awal !== undefined && data.stok_awal !== '';
+    const stokAwalNum = parseFloat(data.stok_awal) || 0;
+    renderStokRow('Nilai Stok Awal', stokAwalNum, hasStokAwal);
+
+    const hasStokAkhir = data.stok_akhir !== null && data.stok_akhir !== undefined && data.stok_akhir !== '';
+    const stokAkhirNum = parseFloat(data.stok_akhir) || 0;
+    renderStokRow('Nilai Stok Akhir', stokAkhirNum, hasStokAkhir);
+
+    const hasStokData = hasStokAwal || hasStokAkhir;
+    const selisihStok = stokAwalNum - stokAkhirNum;
+    renderStokRow('Selisih Nilai Stok', selisihStok, hasStokData);
+
+    // 7. FOOTER / ATTACHMENT STATS
+    currentRow++; // Spacer row
+    if (data.attachment_stats && data.attachment_stats.total > 0) {
+        const stats = data.attachment_stats;
+        worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
+        const statsCell = worksheet.getCell(`A${currentRow}`);
+        statsCell.value = `Total Transaksi: ${stats.total} | Lengkap: ${stats.hijau || 0} | Kurang: ${stats.kuning || 0} | Kosong: ${stats.merah || 0} | Opsional: ${stats.abu || 0}`;
+        statsCell.font = { name: fontName, size: 8.5, italic: true, color: { argb: 'FF6B7280' } };
+        statsCell.alignment = { horizontal: 'center', vertical: 'middle' };
+        currentRow++;
+    }
+
+    const now = new Date();
+    const formattedDate = now.toLocaleDateString('id-ID', {
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric'
+    });
+    const formattedTime = now.toLocaleTimeString('id-ID', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+    }).replace('.', ':');
+
+    const printedByText = options.printedBy ? ` oleh ${options.printedBy}` : '';
+    worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
+    const footerCell = worksheet.getCell(`A${currentRow}`);
+    footerCell.value = `Laporan ini dicetak pada ${formattedDate} pukul ${formattedTime}${printedByText}`;
+    footerCell.font = { name: fontName, size: 8, italic: true, color: { argb: 'FF9CA3AF' } };
+    footerCell.alignment = { horizontal: 'center', vertical: 'middle' };
+
+    // Ensure output filepath
+    const filepath = path.join(EXPORTS_DIR, filename);
+    await workbook.xlsx.writeFile(filepath);
+
+    return filepath;
+}
+
 module.exports = {
     exportToExcel,
-    exportCategoryToExcel
+    exportCategoryToExcel,
+    exportFinancialReportToExcel
 };

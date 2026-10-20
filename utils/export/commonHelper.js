@@ -14,8 +14,12 @@ function generateFilename(format, title = 'laporan') {
     // Map format to correct extension
     const extMap = {
         'XLS': 'xlsx',
+        'EXCEL': 'xlsx',
+        'XLSX': 'xlsx',
         'CSV': 'csv',
-        'PDF': 'pdf'
+        'PDF': 'pdf',
+        'JPEG': 'jpg',
+        'JPG': 'jpg'
     };
     const ext = extMap[format.toUpperCase()] || format.toLowerCase();
     return `${sanitizedTitle}_${timestamp}.${ext}`;
@@ -25,10 +29,14 @@ function generateFilename(format, title = 'laporan') {
 function getMimeType(format) {
     const mimeTypes = {
         'XLS': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'EXCEL': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'XLSX': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'CSV': 'text/csv',
-        'PDF': 'application/pdf'
+        'PDF': 'application/pdf',
+        'JPEG': 'image/jpeg',
+        'JPG': 'image/jpeg'
     };
-    return mimeTypes[format] || 'application/octet-stream';
+    return mimeTypes[format.toUpperCase()] || 'application/octet-stream';
 }
 
 // Format currency (IDR)

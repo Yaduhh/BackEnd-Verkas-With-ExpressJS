@@ -1194,7 +1194,41 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     }
 
     // 3. PENGELUARAN SECTION
-    const totalPengeluaran = Number(data.pengeluaran_total) || Number(data.total_pengeluaran) || (data.expense_breakdown || []).reduce((s, x) => s + (Number(x.total) || 0), 0);
+    const isSimpananItem = (name) => {
+        const ln = (name || '').toLowerCase();
+        return ln.startsWith('kas ') || ln.startsWith('k.s.o.') || ln.includes('simpanan');
+    };
+
+    const isPiutangItem = (name) => {
+        const ln = (name || '').toLowerCase();
+        return ln.startsWith('piutang') || ln.includes('mitra piutang');
+    };
+
+    const regularExpenses = [];
+    const simpananExpenses = [];
+    let detectedPiutangFromBreakdown = null;
+
+    (data.expense_breakdown || []).forEach(ex => {
+        if (isSimpananItem(ex.category_name)) {
+            simpananExpenses.push(ex);
+        } else if (isPiutangItem(ex.category_name)) {
+            detectedPiutangFromBreakdown = ex;
+        } else {
+            regularExpenses.push(ex);
+        }
+    });
+
+    const piutangAmount = (data.piutang_mitra !== undefined && data.piutang_mitra !== null && !isNaN(Number(data.piutang_mitra)))
+        ? Number(data.piutang_mitra)
+        : (data.total_piutang_mitra !== undefined && data.total_piutang_mitra !== null && !isNaN(Number(data.total_piutang_mitra)))
+            ? Number(data.total_piutang_mitra)
+            : (detectedPiutangFromBreakdown ? Number(detectedPiutangFromBreakdown.total) : 0);
+
+    const piutangLabel = data.piutang_label || (detectedPiutangFromBreakdown ? detectedPiutangFromBreakdown.category_name : 'PIUTANG');
+
+    const totalPengeluaran = (data.pure_pengeluaran !== undefined && data.pure_pengeluaran !== null)
+        ? Number(data.pure_pengeluaran)
+        : (regularExpenses.reduce((s, x) => s + (Number(x.total) || 0), 0) + simpananExpenses.reduce((s, x) => s + (Number(x.total) || 0), 0));
     const totalExpPerc = formatPercent(totalPengeluaran, totalPemasukanFinal);
 
     // Header bar (Red)
@@ -1231,23 +1265,6 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     drawCell(margin + wNo + wName, y, wAmount, subHeaderH, { bg: '#ffffff', text: 'Jumlah', font: fontBold, fontSize: 8.5, align: 'center' });
     drawCell(margin + wNo + wName + wAmount, y, wPerc, subHeaderH, { bg: '#ffffff', text: 'Persentase', font: fontBold, fontSize: 8.5, align: 'center' });
     y += subHeaderH;
-
-    // Separate regular expense items from simpanan items
-    const isSimpananItem = (name) => {
-        const ln = (name || '').toLowerCase();
-        return ln.startsWith('kas ') || ln.startsWith('k.s.o.') || ln.includes('simpanan');
-    };
-
-    const regularExpenses = [];
-    const simpananExpenses = [];
-
-    (data.expense_breakdown || []).forEach(ex => {
-        if (isSimpananItem(ex.category_name)) {
-            simpananExpenses.push(ex);
-        } else {
-            regularExpenses.push(ex);
-        }
-    });
 
     // Render regular expenses with A, B, C, D...
     const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -1307,7 +1324,8 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
     // 4. RINGKASAN SECTION
     const ringkasanH = 20;
-    checkNewPage(ringkasanH + rowH * 3 + 10);
+    const ringkasanRowCount = piutangAmount > 0 ? 4 : 3;
+    checkNewPage(ringkasanH + rowH * ringkasanRowCount + 10);
 
     drawCell(margin, y, contentWidth, ringkasanH, {
         bg: '#356296',
@@ -1331,8 +1349,19 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#fcdad7', text: totalExpPerc, font: fontBold, fontSize: 8.5, align: 'center' });
     y += rowH;
 
+    // Row: PIUTANG (#fff2cc)
+    if (piutangAmount > 0) {
+        const piutangPerc = formatPercent(piutangAmount, totalPemasukanFinal);
+        drawCell(margin, y, wNo + wName, rowH, { bg: '#fff2cc', text: piutangLabel, font: fontBold, fontSize: 8.5, paddingLeft: 8 });
+        drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#fff2cc', rpPrefix: true, rpAmount: formatCurrencyForPDF(piutangAmount), font: fontBold, fontSize: 8.5 });
+        drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#fff2cc', text: piutangPerc, font: fontBold, fontSize: 8.5, align: 'center' });
+        y += rowH;
+    }
+
     // Row 3: PROFIT/SELISIH (#d9e2f3)
-    const totalProfitAmount = Number(data.profit) !== undefined && !isNaN(Number(data.profit)) ? Number(data.profit) : (totalPemasukanFinal - totalPengeluaran);
+    const totalProfitAmount = Number(data.profit) !== undefined && !isNaN(Number(data.profit))
+        ? Number(data.profit)
+        : (totalPemasukanFinal - totalPengeluaran - piutangAmount);
     const profitPerc = formatPercent(totalProfitAmount, totalPemasukanFinal);
 
     drawCell(margin, y, wNo + wName, rowH, { bg: '#d9e2f3', text: 'PROFIT/SELISIH', font: fontBold, fontSize: 8.5, paddingLeft: 8 });

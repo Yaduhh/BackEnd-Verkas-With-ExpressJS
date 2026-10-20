@@ -6,8 +6,10 @@ const {
     getGroupFinancialReport,
     exportGroupPdf,
     exportGroupImage,
+    exportGroupExcel,
     updateReport,
     exportPdf,
+    exportExcel,
     exportBagiHasilPdf,
     exportSavingsPdf,
     exportImage,
@@ -41,9 +43,11 @@ router.get('/consolidated/report', getConsolidatedReport);
 router.get('/consolidated/financial-report', getGroupFinancialReport);
 router.get('/consolidated/export', exportGroupPdf);
 router.get('/consolidated/export-image', exportGroupImage);
+router.get('/consolidated/export-excel', exportGroupExcel);
 router.get('/group/report', getGroupFinancialReport);
 router.get('/group/export', exportGroupPdf);
 router.get('/group/export-image', exportGroupImage);
+router.get('/group/export-excel', exportGroupExcel);
 
 // GET /api/branch-reports/:branchId?month=2&year=2026
 router.get('/:branchId', getReport);
@@ -53,6 +57,9 @@ router.get('/:branchId/export', exportPdf);
 
 // GET /api/branch-reports/:branchId/export-image?month=2&year=2026&workingDays=25
 router.get('/:branchId/export-image', exportImage);
+
+// GET /api/branch-reports/:branchId/export-excel?month=2&year=2026&workingDays=25
+router.get('/:branchId/export-excel', exportExcel);
 
 // GET /api/branch-reports/:branchId/export-bagi-hasil?month=2&year=2026
 router.get('/:branchId/export-bagi-hasil', exportBagiHasilPdf);
