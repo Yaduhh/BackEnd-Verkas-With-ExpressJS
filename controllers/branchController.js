@@ -244,7 +244,7 @@ const create = async (req, res, next) => {
       });
     }
 
-    const { name, code, address, phone, pic_id, pic_ids, team_id, require_edit_approval, require_delete_approval, require_attachment } = req.body;
+    const { name, code, group_name, address, phone, pic_id, pic_ids, team_id, require_edit_approval, require_delete_approval, require_attachment } = req.body;
 
     if (!name) {
       return res.status(400).json({
@@ -307,6 +307,7 @@ const create = async (req, res, next) => {
     const branch = await Branch.create({
       name,
       code,
+      group_name,
       address,
       phone,
       ownerId: req.userId,
@@ -360,7 +361,7 @@ const update = async (req, res, next) => {
       });
     }
 
-    const { name, code, address, phone, pic_id, status_active, require_edit_approval, require_delete_approval, require_attachment } = req.body;
+    const { name, code, group_name, address, phone, pic_id, status_active, require_edit_approval, require_delete_approval, require_attachment } = req.body;
 
     // Verify PIC if provided
     if (pic_id !== undefined && pic_id !== null) {
@@ -376,6 +377,7 @@ const update = async (req, res, next) => {
     const updatedBranch = await Branch.update(id, {
       name,
       code,
+      group_name,
       address,
       phone,
       picId: pic_id,
@@ -648,6 +650,106 @@ const checkLimit = async (req, res, next) => {
   }
 };
 
+// Assign branches to group (or remove from group if group_name is empty/null)
+const assignGroup = async (req, res, next) => {
+  try {
+    const { branchIds, group_name } = req.body;
+    if (!Array.isArray(branchIds) || branchIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'Daftar ID buku kas diperlukan' });
+    }
+
+    const { query } = require('../config/database');
+    const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user.role);
+    const accessibleIds = accessibleBranches.map(b => b.id);
+
+    const validIds = branchIds.filter(id => accessibleIds.includes(parseInt(id)));
+    if (validIds.length === 0) {
+      return res.status(403).json({ success: false, message: 'Tidak ada akses ke buku kas yang dipilih' });
+    }
+
+    const newGroupName = group_name && group_name.trim() ? group_name.trim() : null;
+    const placeholders = validIds.map(() => '?').join(',');
+    await query(
+      `UPDATE branches SET group_name = ? WHERE id IN (${placeholders})`,
+      [newGroupName, ...validIds]
+    );
+
+    res.json({
+      success: true,
+      message: newGroupName 
+        ? `Berhasil menambahkan ${validIds.length} buku kas ke grup "${newGroupName}"`
+        : `Berhasil mengeluarkan ${validIds.length} buku kas dari grup`
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Rename a group across all accessible branches
+const renameGroup = async (req, res, next) => {
+  try {
+    const { old_group_name, new_group_name } = req.body;
+    if (!old_group_name || !old_group_name.trim()) {
+      return res.status(400).json({ success: false, message: 'Nama grup lama diperlukan' });
+    }
+    if (!new_group_name || !new_group_name.trim()) {
+      return res.status(400).json({ success: false, message: 'Nama grup baru diperlukan' });
+    }
+
+    const { query } = require('../config/database');
+    const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user.role);
+    const accessibleIds = accessibleBranches.map(b => b.id);
+
+    if (accessibleIds.length === 0) {
+      return res.status(403).json({ success: false, message: 'Tidak ada akses' });
+    }
+
+    const placeholders = accessibleIds.map(() => '?').join(',');
+    await query(
+      `UPDATE branches SET group_name = ? WHERE group_name = ? AND id IN (${placeholders})`,
+      [new_group_name.trim(), old_group_name.trim(), ...accessibleIds]
+    );
+
+    res.json({
+      success: true,
+      message: `Grup "${old_group_name}" berhasil diubah menjadi "${new_group_name}"`
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Delete/dissolve a group (sets group_name = NULL for all branches in group)
+const deleteGroup = async (req, res, next) => {
+  try {
+    const { groupName } = req.params;
+    if (!groupName || !groupName.trim()) {
+      return res.status(400).json({ success: false, message: 'Nama grup diperlukan' });
+    }
+
+    const { query } = require('../config/database');
+    const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user.role);
+    const accessibleIds = accessibleBranches.map(b => b.id);
+
+    if (accessibleIds.length === 0) {
+      return res.status(403).json({ success: false, message: 'Tidak ada akses' });
+    }
+
+    const placeholders = accessibleIds.map(() => '?').join(',');
+    await query(
+      `UPDATE branches SET group_name = NULL WHERE group_name = ? AND id IN (${placeholders})`,
+      [groupName.trim(), ...accessibleIds]
+    );
+
+    res.json({
+      success: true,
+      message: `Grup "${groupName}" berhasil dibubarkan (buku kas tidak dihapus, hanya dilepas dari grup)`
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAll,
   getById,
@@ -659,6 +761,10 @@ module.exports = {
   setPICs,
   softDelete,
   restore,
-  checkLimit
+  checkLimit,
+  assignGroup,
+  renameGroup,
+  deleteGroup
 };
+
 

@@ -5,7 +5,8 @@ const {
   getMingguan,
   getBulanan,
   getBulananAll,
-  getTahunan
+  getTahunan,
+  getGroupDashboard
 } = require('../controllers/dashboardController');
 const { authenticate } = require('../middleware/auth');
 const { getCurrentBranch } = require('../middleware/branchContext');
@@ -19,7 +20,10 @@ const {
 // All routes require authentication
 router.use(authenticate);
 
-// Add branch context - REQUIRED for dashboard (admin auto-assign, owner from header)
+// Group Dashboard endpoint (Multi-branch group - bypasses single branch requirement)
+router.get('/group', getGroupDashboard);
+
+// Add branch context - REQUIRED for standard single-branch dashboard (admin auto-assign, owner from header)
 router.use(getCurrentBranch);
 
 // Dashboard endpoints

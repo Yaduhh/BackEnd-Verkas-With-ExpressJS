@@ -124,7 +124,8 @@ class Transaction {
   // Find all (with filters)
   static async findAll({
     userId,
-    branchId,  // Required for branch isolation
+    branchId,  // Required for branch isolation (single)
+    branchIds = null, // Optional array of branch IDs for multi-branch consolidation
     type,
     category,
     startDate,
@@ -147,7 +148,8 @@ class Transaction {
     includeDraft = false
   } = {}) {
     let selectFields = `
-      SELECT t.*, c.name as category_name, c.min_attachment as category_min_attachment, COALESCE(u.name, u.email) as user_name,
+      SELECT t.*, b.name as branch_name, b.code as branch_code,
+             c.name as category_name, c.min_attachment as category_min_attachment, COALESCE(u.name, u.email) as user_name,
              mp.nama as mitra_piutang_nama,
              COALESCE(ba.name, (
                SELECT GROUP_CONCAT(DISTINCT ba_sub.name SEPARATOR ', ')
@@ -244,6 +246,7 @@ class Transaction {
     let sql = `
       ${selectFields}
       FROM transactions t
+      LEFT JOIN branches b ON t.branch_id = b.id
       LEFT JOIN categories c ON t.category_id = c.id
       LEFT JOIN users u ON t.user_id = u.id
       LEFT JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
@@ -265,16 +268,25 @@ class Transaction {
       WHERE 1=1
     `;
 
-    // Branch ID is required for data isolation - ensure it's a valid integer
-    if (branchId === undefined || branchId === null) {
-      throw new Error('Branch ID is required for Transaction.findAll');
+    // Branch ID or Branch IDs filter for data isolation
+    if (branchIds && Array.isArray(branchIds) && branchIds.length > 0) {
+      const validIds = branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
+      if (validIds.length === 0) {
+        throw new Error('Valid Branch IDs required');
+      }
+      const placeholders = validIds.map(() => '?').join(',');
+      sql += ` AND t.branch_id IN (${placeholders})`;
+      params.push(...validIds);
+    } else if (branchId !== undefined && branchId !== null) {
+      const validBranchId = parseInt(branchId);
+      if (isNaN(validBranchId) || validBranchId <= 0) {
+        throw new Error(`Invalid Branch ID: ${branchId}`);
+      }
+      sql += ' AND t.branch_id = ?';
+      params.push(validBranchId);
+    } else {
+      throw new Error('Branch ID or branchIds is required for Transaction.findAll');
     }
-    const validBranchId = parseInt(branchId);
-    if (isNaN(validBranchId) || validBranchId <= 0) {
-      throw new Error(`Invalid Branch ID: ${branchId}`);
-    }
-    sql += ' AND t.branch_id = ?';
-    params.push(validBranchId);
 
     if (userId !== undefined && userId !== null) {
       const validUserId = parseInt(userId);
@@ -1213,7 +1225,7 @@ class Transaction {
   }
 
   // Get summary for date range
-  static async getSummary({ userId, branchId, categoryId, subCategoryId, startDate, endDate, includeDeleted = false, excludeFolders = false, onlyFolders = false, isUmum = undefined }) {
+  static async getSummary({ userId, branchId, branchIds = null, categoryId, subCategoryId, startDate, endDate, includeDeleted = false, excludeFolders = false, onlyFolders = false, isUmum = undefined }) {
     const params = [];
 
     // Conditionally build portions of the query
@@ -1350,8 +1362,15 @@ class Transaction {
       params.push(userId);
     }
 
-    // Branch ID
-    if (branchId) {
+    // Branch ID or Branch IDs
+    if (branchIds && Array.isArray(branchIds) && branchIds.length > 0) {
+      const validIds = branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
+      if (validIds.length > 0) {
+        const placeholders = validIds.map(() => '?').join(',');
+        sql += ` AND t.branch_id IN (${placeholders})`;
+        params.push(...validIds);
+      }
+    } else if (branchId) {
       sql += ' AND t.branch_id = ?';
       params.push(branchId);
     }

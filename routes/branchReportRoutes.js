@@ -2,6 +2,10 @@ const express = require('express');
 const router = express.Router();
 const {
     getReport,
+    getConsolidatedReport,
+    getGroupFinancialReport,
+    exportGroupPdf,
+    exportGroupImage,
     updateReport,
     exportPdf,
     exportBagiHasilPdf,
@@ -10,7 +14,11 @@ const {
     getBagiHasilTemplates,
     createBagiHasilTemplate,
     updateBagiHasilTemplate,
-    deleteBagiHasilTemplate
+    deleteBagiHasilTemplate,
+    getExpenseOrderTemplates,
+    createExpenseOrderTemplate,
+    updateExpenseOrderTemplate,
+    deleteExpenseOrderTemplate
 } = require('../controllers/branchReportController');
 const { authenticate } = require('../middleware/auth');
 
@@ -21,6 +29,21 @@ router.get('/:branchId/bagi-hasil-templates', getBagiHasilTemplates);
 router.post('/:branchId/bagi-hasil-templates', createBagiHasilTemplate);
 router.put('/:branchId/bagi-hasil-templates/:templateId', updateBagiHasilTemplate);
 router.delete('/:branchId/bagi-hasil-templates/:templateId', deleteBagiHasilTemplate);
+
+// Expense Order Templates routes
+router.get('/:branchId/expense-order-templates', getExpenseOrderTemplates);
+router.post('/:branchId/expense-order-templates', createExpenseOrderTemplate);
+router.put('/:branchId/expense-order-templates/:templateId', updateExpenseOrderTemplate);
+router.delete('/:branchId/expense-order-templates/:templateId', deleteExpenseOrderTemplate);
+
+// Consolidated & Group Reports
+router.get('/consolidated/report', getConsolidatedReport);
+router.get('/consolidated/financial-report', getGroupFinancialReport);
+router.get('/consolidated/export', exportGroupPdf);
+router.get('/consolidated/export-image', exportGroupImage);
+router.get('/group/report', getGroupFinancialReport);
+router.get('/group/export', exportGroupPdf);
+router.get('/group/export-image', exportGroupImage);
 
 // GET /api/branch-reports/:branchId?month=2&year=2026
 router.get('/:branchId', getReport);

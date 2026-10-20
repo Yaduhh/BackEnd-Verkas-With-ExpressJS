@@ -226,17 +226,17 @@ class Branch {
   }
 
   // Create branch (owner only)
-  static async create({ name, code = null, address, phone, ownerId, teamId = null, picId = null, requireEditApproval = false, requireDeleteApproval = false, requireAttachment = false }) {
+  static async create({ name, code = null, group_name = null, address, phone, ownerId, teamId = null, picId = null, requireEditApproval = false, requireDeleteApproval = false, requireAttachment = false }) {
     const result = await query(
-      `INSERT INTO branches (name, code, address, phone, owner_id, team_id, pic_id, status_active, status_deleted, require_edit_approval, require_delete_approval, require_attachment)
-       VALUES (?, ?, ?, ?, ?, ?, ?, true, false, ?, ?, ?)`,
-      [name, code ? code.trim() : null, address || null, phone || null, ownerId, teamId, picId, requireEditApproval, requireDeleteApproval, requireAttachment]
+      `INSERT INTO branches (name, code, group_name, address, phone, owner_id, team_id, pic_id, status_active, status_deleted, require_edit_approval, require_delete_approval, require_attachment)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, true, false, ?, ?, ?)`,
+      [name, code ? code.trim() : null, group_name ? group_name.trim() : null, address || null, phone || null, ownerId, teamId, picId, requireEditApproval, requireDeleteApproval, requireAttachment]
     );
     return await this.findById(result.insertId);
   }
 
   // Update branch (owner only)
-  static async update(id, { name, code, address, phone, picId, statusActive, requireEditApproval, requireDeleteApproval, requireAttachment }) {
+  static async update(id, { name, code, group_name, address, phone, picId, statusActive, requireEditApproval, requireDeleteApproval, requireAttachment }) {
     const updates = [];
     const params = [];
 
@@ -247,6 +247,10 @@ class Branch {
     if (code !== undefined) {
       updates.push('code = ?');
       params.push(code ? code.trim() : null);
+    }
+    if (group_name !== undefined) {
+      updates.push('group_name = ?');
+      params.push(group_name ? group_name.trim() : null);
     }
     if (address !== undefined) {
       updates.push('address = ?');

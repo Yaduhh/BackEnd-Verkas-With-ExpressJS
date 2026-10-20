@@ -16,7 +16,11 @@ const {
   addBrand,
   updateBrand,
   deleteBrand,
+  bulkDeleteProducts,
+  deleteProductsByCategory,
+  bulkAssignCategory,
   downloadTemplate,
+  previewExcel,
   importExcel
 } = require('../controllers/productController');
 const { authenticate } = require('../middleware/auth');
@@ -26,9 +30,15 @@ const { optionalBranchContext } = require('../middleware/branchContext');
 router.use(authenticate);
 router.use(optionalBranchContext);
 
-// Excel template & import (must be registered BEFORE /:id)
+// Excel template, preview & import (must be registered BEFORE /:id)
 router.get('/template-excel', downloadTemplate);
+router.post('/preview-excel', uploadMemory.single('file'), previewExcel);
 router.post('/import-excel', uploadMemory.single('file'), importExcel);
+
+// Bulk operations (must be registered BEFORE /:id)
+router.post('/bulk-delete', bulkDeleteProducts);
+router.post('/bulk-assign-category', bulkAssignCategory);
+router.delete('/by-category/:categoryId', deleteProductsByCategory);
 
 // Products
 router.get('/', getProducts);

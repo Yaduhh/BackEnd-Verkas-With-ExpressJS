@@ -249,6 +249,141 @@ const deleteBrand = async (req, res, next) => {
   }
 };
 
+// Bulk Delete Products
+const bulkDeleteProducts = async (req, res, next) => {
+  try {
+    const branchId = req.branchId || req.headers['x-branch-id'] || req.body.branch_id;
+    const { productIds, permanent = false } = req.body;
+
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Daftar ID produk wajib disertakan'
+      });
+    }
+
+    const validIds = productIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
+    if (validIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'ID produk tidak valid' });
+    }
+
+    const placeholders = validIds.map(() => '?').join(',');
+    const params = branchId ? [...validIds, parseInt(branchId)] : [...validIds];
+    const branchCondition = branchId ? ' AND branch_id = ?' : '';
+
+    let affectedCount = 0;
+    if (permanent === true || permanent === 'true' || permanent === 1) {
+      const result = await query(
+        `DELETE FROM products WHERE id IN (${placeholders})${branchCondition}`,
+        params
+      );
+      affectedCount = result.affectedRows || 0;
+    } else {
+      const result = await query(
+        `UPDATE products SET status_deleted = 1, deleted_at = NOW() WHERE id IN (${placeholders})${branchCondition}`,
+        params
+      );
+      affectedCount = result.affectedRows || 0;
+    }
+
+    res.json({
+      success: true,
+      message: `Berhasil menghapus ${affectedCount} produk`,
+      data: { affectedCount }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Delete all products by category (or uncategorized)
+const deleteProductsByCategory = async (req, res, next) => {
+  try {
+    const branchId = req.branchId || req.headers['x-branch-id'] || req.query.branch_id;
+    if (!branchId) {
+      return res.status(400).json({ success: false, message: 'Branch ID wajib disertakan' });
+    }
+
+    const { categoryId } = req.params;
+    const permanent = req.query.permanent === 'true' || req.body?.permanent === true;
+
+    let result;
+    if (categoryId === 'uncategorized' || categoryId === '0') {
+      if (permanent) {
+        result = await query(
+          `DELETE FROM products 
+           WHERE branch_id = ? AND (category_id IS NULL OR category_id NOT IN (SELECT id FROM categories WHERE status_deleted = 0))`,
+          [parseInt(branchId)]
+        );
+      } else {
+        result = await query(
+          `UPDATE products SET status_deleted = 1, deleted_at = NOW() 
+           WHERE branch_id = ? AND (category_id IS NULL OR category_id NOT IN (SELECT id FROM categories WHERE status_deleted = 0))`,
+          [parseInt(branchId)]
+        );
+      }
+    } else {
+      const catId = parseInt(categoryId);
+      if (permanent) {
+        result = await query(
+          `DELETE FROM products WHERE branch_id = ? AND category_id = ?`,
+          [parseInt(branchId), catId]
+        );
+      } else {
+        result = await query(
+          `UPDATE products SET status_deleted = 1, deleted_at = NOW() WHERE branch_id = ? AND category_id = ?`,
+          [parseInt(branchId), catId]
+        );
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Berhasil menghapus ${result.affectedRows || 0} produk`,
+      data: { affectedCount: result.affectedRows || 0 }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Bulk Assign Category to Products (move products to a category)
+const bulkAssignCategory = async (req, res, next) => {
+  try {
+    const branchId = req.branchId || req.headers['x-branch-id'] || req.body.branch_id;
+    const { productIds, category_id } = req.body;
+
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'Daftar ID produk wajib disertakan' });
+    }
+    if (!category_id) {
+      return res.status(400).json({ success: false, message: 'Kategori tujuan wajib dipilih' });
+    }
+
+    const validIds = productIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
+    const placeholders = validIds.map(() => '?').join(',');
+    const params = [parseInt(category_id), ...validIds];
+    let branchCondition = '';
+    if (branchId) {
+      branchCondition = ' AND branch_id = ?';
+      params.push(parseInt(branchId));
+    }
+
+    const result = await query(
+      `UPDATE products SET category_id = ? WHERE id IN (${placeholders})${branchCondition}`,
+      params
+    );
+
+    res.json({
+      success: true,
+      message: `Berhasil memindahkan ${result.affectedRows || 0} produk ke kategori tujuan`,
+      data: { affectedCount: result.affectedRows || 0 }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // Download Excel Template for Product & Brand Import
 const downloadTemplate = async (req, res, next) => {
   try {
@@ -361,6 +496,221 @@ const downloadTemplate = async (req, res, next) => {
   }
 };
 
+// Helper: Parse and validate product Excel buffer
+const parseProductExcel = async (buffer, branchId, targetCategoryId = null) => {
+  const workbook = xlsx.read(buffer, { type: 'buffer' });
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) {
+    throw new Error('File Excel kosong atau tidak memiliki sheet');
+  }
+
+  const worksheet = workbook.Sheets[firstSheetName];
+  const rawRows = xlsx.utils.sheet_to_json(worksheet, { defval: '' });
+  if (!rawRows || rawRows.length === 0) {
+    throw new Error('Tidak ada data yang ditemukan di dalam file Excel');
+  }
+
+  // Identify column keys
+  const firstRow = rawRows[0];
+  const keys = Object.keys(firstRow);
+
+  const categoryKey = keys.find(k => /kategori|category/i.test(k));
+  const productKey = keys.find(k => /nama.*produk|produk|product.*name|nama.*barang|barang/i.test(k));
+  const brandKey = keys.find(k => /merek|merk|brand|varian/i.test(k));
+  const descKey = keys.find(k => /keterangan|deskripsi|catatan|note|description/i.test(k));
+
+  if (!productKey) {
+    throw new Error('Kolom "Nama Produk" tidak ditemukan dalam file Excel. Silakan gunakan template yang telah disediakan.');
+  }
+
+  // Fetch existing categories
+  const categories = await query(
+    `SELECT id, name, type FROM categories WHERE status_deleted = 0 OR status_deleted IS NULL`
+  );
+  const categoryMap = new Map();
+  for (const cat of categories) {
+    if (cat.name) {
+      categoryMap.set(cat.name.trim().toLowerCase(), cat);
+    }
+  }
+
+  // Forced target category if selected by user
+  let forcedCategory = null;
+  if (targetCategoryId && targetCategoryId !== 'auto' && targetCategoryId !== '0') {
+    forcedCategory = categories.find(c => c.id === parseInt(targetCategoryId)) || null;
+  }
+
+  // Fetch existing products in this branch
+  const existingProducts = await query(
+    `SELECT id, LOWER(name) as lower_name, name, category_id, description FROM products WHERE branch_id = ? AND status_deleted = 0`,
+    [parseInt(branchId)]
+  );
+  const existingProductMap = new Map();
+  for (const p of existingProducts) {
+    existingProductMap.set(p.lower_name.trim(), p);
+  }
+
+  // Group rows by product name
+  const productsToProcess = new Map();
+  const previewItems = [];
+
+  for (const row of rawRows) {
+    const rawProductName = (row[productKey] || '').toString().trim();
+    if (!rawProductName) continue; // Skip blank product names
+
+    const warnings = [];
+    let safeProductName = rawProductName;
+    if (safeProductName.length > 255) {
+      safeProductName = safeProductName.slice(0, 255);
+      warnings.push('Nama produk melebihi 255 karakter (dipotong)');
+    }
+
+    const lowerProd = safeProductName.toLowerCase();
+    const rawCategory = categoryKey ? (row[categoryKey] || '').toString().trim().slice(0, 255) : '';
+    const rawBrands = brandKey ? (row[brandKey] || '').toString().trim() : '';
+    const rawDesc = descKey ? (row[descKey] || '').toString().trim() : '';
+
+    // Split brands by comma, semicolon, newline, slash, or pipe
+    const brandList = rawBrands
+      ? rawBrands.split(/[,;\n|/]+/).map(b => {
+          const trimmed = b.trim();
+          if (trimmed.length > 255) {
+            warnings.push(`Merek "${trimmed.slice(0, 25)}..." dipotong 255 karakter`);
+            return trimmed.slice(0, 255);
+          }
+          return trimmed;
+        }).filter(Boolean)
+      : [];
+
+    let matchedCat = null;
+    if (forcedCategory) {
+      matchedCat = forcedCategory;
+    } else if (rawCategory) {
+      matchedCat = categoryMap.get(rawCategory.toLowerCase()) || null;
+    }
+
+    if (!matchedCat) {
+      warnings.push('Kategori induk belum dipilih / tidak ditemukan');
+    }
+
+    const isExisting = existingProductMap.has(lowerProd);
+
+    if (!productsToProcess.has(lowerProd)) {
+      productsToProcess.set(lowerProd, {
+        name: safeProductName,
+        categoryName: matchedCat ? matchedCat.name : rawCategory,
+        matchedCategoryName: matchedCat ? matchedCat.name : null,
+        matchedCategoryId: matchedCat ? matchedCat.id : null,
+        description: rawDesc,
+        brands: new Set(brandList),
+        isExisting,
+        warnings
+      });
+    } else {
+      const item = productsToProcess.get(lowerProd);
+      if (!item.matchedCategoryId && matchedCat) {
+        item.categoryName = matchedCat.name;
+        item.matchedCategoryName = matchedCat.name;
+        item.matchedCategoryId = matchedCat.id;
+      }
+      if (!item.description && rawDesc) item.description = rawDesc;
+      brandList.forEach(b => item.brands.add(b));
+      if (warnings.length > 0) item.warnings.push(...warnings);
+    }
+  }
+
+  if (productsToProcess.size === 0) {
+    throw new Error('Tidak ada baris data produk yang valid untuk diimpor');
+  }
+
+  let totalBrands = 0;
+  let newProductsCount = 0;
+  let existingProductsCount = 0;
+  let missingCategoryCount = 0;
+
+  for (const item of productsToProcess.values()) {
+    const brandsArr = Array.from(item.brands);
+    totalBrands += brandsArr.length;
+    if (item.isExisting) {
+      existingProductsCount++;
+    } else {
+      newProductsCount++;
+    }
+    if (!item.matchedCategoryId) {
+      missingCategoryCount++;
+    }
+
+    previewItems.push({
+      name: item.name,
+      categoryName: item.matchedCategoryName || item.categoryName || 'Tanpa Kategori Induk',
+      matchedCategoryName: item.matchedCategoryName,
+      matchedCategoryId: item.matchedCategoryId,
+      brands: brandsArr,
+      description: item.description,
+      isExisting: item.isExisting,
+      warnings: Array.from(new Set(item.warnings))
+    });
+  }
+
+  return {
+    rawRowsCount: rawRows.length,
+    detectedColumns: {
+      category: categoryKey || null,
+      product: productKey || null,
+      brand: brandKey || null,
+      description: descKey || null
+    },
+    summary: {
+      totalRows: rawRows.length,
+      totalProducts: productsToProcess.size,
+      newProducts: newProductsCount,
+      existingProducts: existingProductsCount,
+      totalBrands,
+      missingCategoryCount
+    },
+    items: previewItems,
+    productsToProcess,
+    existingProductMap
+  };
+};
+
+// Preview Excel File Before Import
+const previewExcel = async (req, res, next) => {
+  try {
+    const branchId = req.branchId || req.headers['x-branch-id'] || req.body.branch_id;
+    if (!branchId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Branch ID wajib disertakan'
+      });
+    }
+
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({
+        success: false,
+        message: 'File Excel wajib diunggah'
+      });
+    }
+
+    const targetCategoryId = req.body.target_category_id || req.query.target_category_id || null;
+    const result = await parseProductExcel(req.file.buffer, branchId, targetCategoryId);
+    res.json({
+      success: true,
+      message: 'Preview data berhasil dianalisa',
+      data: {
+        detectedColumns: result.detectedColumns,
+        summary: result.summary,
+        items: result.items
+      }
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Gagal menganalisa file Excel'
+    });
+  }
+};
+
 // Import Excel File to Products & Brands
 const importExcel = async (req, res, next) => {
   try {
@@ -379,101 +729,14 @@ const importExcel = async (req, res, next) => {
       });
     }
 
-    // Read Excel from buffer using xlsx
-    const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
-    const firstSheetName = workbook.SheetNames[0];
-    if (!firstSheetName) {
+    const targetCategoryId = req.body.target_category_id || req.query.target_category_id || null;
+    const { productsToProcess, existingProductMap, summary } = await parseProductExcel(req.file.buffer, branchId, targetCategoryId);
+
+    // Enforce that all products MUST have a parent category!
+    if (summary.missingCategoryCount > 0) {
       return res.status(400).json({
         success: false,
-        message: 'File Excel kosong atau tidak memiliki sheet'
-      });
-    }
-
-    const worksheet = workbook.Sheets[firstSheetName];
-    const rawRows = xlsx.utils.sheet_to_json(worksheet, { defval: '' });
-
-    if (!rawRows || rawRows.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Tidak ada data yang ditemukan di dalam file Excel'
-      });
-    }
-
-    // Identify column keys
-    const firstRow = rawRows[0];
-    const keys = Object.keys(firstRow);
-
-    const categoryKey = keys.find(k => /kategori|category/i.test(k));
-    const productKey = keys.find(k => /nama.*produk|produk|product.*name|nama.*barang|barang/i.test(k));
-    const brandKey = keys.find(k => /merek|merk|brand|varian/i.test(k));
-    const descKey = keys.find(k => /keterangan|deskripsi|catatan|note|description/i.test(k));
-
-    if (!productKey) {
-      return res.status(400).json({
-        success: false,
-        message: 'Kolom "Nama Produk" tidak ditemukan dalam file Excel. Silakan gunakan template yang telah disediakan.'
-      });
-    }
-
-    // Fetch existing categories to match category name -> category id
-    const categories = await query(
-      `SELECT id, name, type FROM categories WHERE status_deleted = 0 OR status_deleted IS NULL`
-    );
-    const categoryMap = new Map();
-    for (const cat of categories) {
-      if (cat.name) {
-        categoryMap.set(cat.name.trim().toLowerCase(), cat.id);
-      }
-    }
-
-    // Default category fallback (e.g. Bahan Baku or first available category)
-    const defaultCat = categories.find(c => /bahan\s*baku/i.test(c.name)) || categories[0];
-
-    // Fetch existing products in this branch
-    const existingProducts = await query(
-      `SELECT id, LOWER(name) as lower_name, name, category_id, description FROM products WHERE branch_id = ? AND status_deleted = 0`,
-      [parseInt(branchId)]
-    );
-    const existingProductMap = new Map();
-    for (const p of existingProducts) {
-      existingProductMap.set(p.lower_name.trim(), p);
-    }
-
-    // Group rows by product name
-    const productsToProcess = new Map();
-    for (const row of rawRows) {
-      const rawProductName = (row[productKey] || '').toString().trim();
-      if (!rawProductName) continue; // Skip blank product names
-
-      const lowerProd = rawProductName.toLowerCase();
-      const rawCategory = categoryKey ? (row[categoryKey] || '').toString().trim() : '';
-      const rawBrands = brandKey ? (row[brandKey] || '').toString().trim() : '';
-      const rawDesc = descKey ? (row[descKey] || '').toString().trim() : '';
-
-      // Split brands by comma, semicolon, newline, slash, or pipe
-      const brandList = rawBrands
-        ? rawBrands.split(/[,;\n|/]+/).map(b => b.trim()).filter(Boolean)
-        : [];
-
-      if (!productsToProcess.has(lowerProd)) {
-        productsToProcess.set(lowerProd, {
-          name: rawProductName,
-          categoryName: rawCategory,
-          description: rawDesc,
-          brands: new Set(brandList)
-        });
-      } else {
-        const item = productsToProcess.get(lowerProd);
-        if (!item.categoryName && rawCategory) item.categoryName = rawCategory;
-        if (!item.description && rawDesc) item.description = rawDesc;
-        brandList.forEach(b => item.brands.add(b));
-      }
-    }
-
-    if (productsToProcess.size === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Tidak ada baris data produk yang valid untuk diimpor'
+        message: `Terdapat ${summary.missingCategoryCount} produk tanpa Kategori Induk. Produk tidak dapat diimpor tanpa Kategori Induk. Silakan tentukan Kategori Induk tujuan.`
       });
     }
 
@@ -483,15 +746,16 @@ const importExcel = async (req, res, next) => {
     let brandsSkipped = 0;
 
     for (const [lowerProd, item] of productsToProcess.entries()) {
-      let categoryId = null;
-      if (item.categoryName) {
-        categoryId = categoryMap.get(item.categoryName.toLowerCase()) || null;
-      }
-      if (!categoryId && defaultCat) {
-        categoryId = defaultCat.id;
+      const categoryId = item.matchedCategoryId;
+      if (!categoryId) {
+        return res.status(400).json({
+          success: false,
+          message: `Produk "${item.name}" tidak memiliki Kategori Induk. Semua produk wajib memiliki Kategori Induk.`
+        });
       }
 
       let productId = null;
+
       if (existingProductMap.has(lowerProd)) {
         const existing = existingProductMap.get(lowerProd);
         productId = existing.id;
@@ -499,8 +763,8 @@ const importExcel = async (req, res, next) => {
         if (item.description && !existing.description) {
           await query(`UPDATE products SET description = ? WHERE id = ?`, [item.description, productId]);
         }
-        // Update category if previously empty
-        if (categoryId && !existing.category_id) {
+        // Update category if previously empty or changed
+        if (categoryId && (!existing.category_id || existing.category_id !== categoryId)) {
           await query(`UPDATE products SET category_id = ? WHERE id = ?`, [categoryId, productId]);
         }
         productsUpdated++;
@@ -508,7 +772,7 @@ const importExcel = async (req, res, next) => {
         const insertRes = await query(
           `INSERT INTO products (branch_id, category_id, name, description, is_active, status_deleted)
            VALUES (?, ?, ?, ?, 1, 0)`,
-          [parseInt(branchId), categoryId, item.name, item.description || null]
+          [parseInt(branchId), categoryId, item.name.slice(0, 255), item.description || null]
         );
         productId = insertRes.insertId;
         existingProductMap.set(lowerProd, { id: productId, lower_name: lowerProd, name: item.name, category_id: categoryId });
@@ -524,12 +788,13 @@ const importExcel = async (req, res, next) => {
         const existingBrandSet = new Set(existingBrands.map(b => b.lower_name.trim()));
 
         for (const brandName of item.brands) {
-          const lowerBrand = brandName.toLowerCase();
+          const safeBrand = brandName.slice(0, 255);
+          const lowerBrand = safeBrand.toLowerCase();
           if (!existingBrandSet.has(lowerBrand)) {
             await query(
               `INSERT INTO product_brands (product_id, name, description, is_active, status_deleted)
                VALUES (?, ?, NULL, 1, 0)`,
-              [productId, brandName]
+              [productId, safeBrand]
             );
             existingBrandSet.add(lowerBrand);
             brandsCreated++;
@@ -566,7 +831,12 @@ module.exports = {
   addBrand,
   updateBrand,
   deleteBrand,
+  bulkDeleteProducts,
+  deleteProductsByCategory,
+  bulkAssignCategory,
   downloadTemplate,
+  previewExcel,
   importExcel
 };
+
 

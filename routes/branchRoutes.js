@@ -11,13 +11,21 @@ const {
   setPICs,
   softDelete,
   restore,
-  checkLimit
+  checkLimit,
+  assignGroup,
+  renameGroup,
+  deleteGroup
 } = require('../controllers/branchController');
 const { getLockedPeriods, toggleLock } = require('../controllers/lockedPeriodController');
 const { authenticate, authorize } = require('../middleware/auth');
 
 // All routes require authentication
 router.use(authenticate);
+
+// Group management routes (owner & co-owner)
+router.post('/group/assign', authorize('owner', 'co-owner'), assignGroup);
+router.put('/group/rename', authorize('owner', 'co-owner'), renameGroup);
+router.delete('/group/:groupName', authorize('owner', 'co-owner'), deleteGroup);
 
 // Get all branches user has access to
 router.get('/', getAll);

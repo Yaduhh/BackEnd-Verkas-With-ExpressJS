@@ -114,6 +114,9 @@ function formatSection(date, items, transactions, req) {
 
       return {
         transaction_id: item.id, // Add transaction ID for detail navigation
+        branch_id: item.branch_id || null,
+        branch_name: item.branch_name || null,
+        branch_code: item.branch_code || null,
         category: item.category_name || '-',
         note: item.note || '',
         amount: displayAmount,
@@ -671,10 +674,193 @@ const getTahunan = async (req, res, next) => {
   }
 };
 
+// Dashboard Grup Cabang (Multi-Branch Group Dashboard)
+const getGroupDashboard = async (req, res, next) => {
+  try {
+    const { group_name, branchIds, tab = 'Bulanan', year, month, date, startDate, endDate } = req.query;
+
+    const Branch = require('../models/Branch');
+    const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user.role);
+    const accessibleIds = accessibleBranches.map(b => b.id);
+
+    let targetBranches = [];
+    if (branchIds) {
+      const ids = (typeof branchIds === 'string' ? branchIds.split(',') : branchIds)
+        .map(id => parseInt(id.trim ? id.trim() : id))
+        .filter(id => !isNaN(id) && accessibleIds.includes(id));
+      targetBranches = accessibleBranches.filter(b => ids.includes(b.id));
+    } else if (group_name && group_name !== 'Semua' && group_name !== 'ALL') {
+      targetBranches = accessibleBranches.filter(b => b.group_name && b.group_name.toLowerCase() === group_name.toLowerCase());
+    } else {
+      targetBranches = accessibleBranches;
+    }
+
+    if (targetBranches.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          title: group_name || 'Grup Cabang',
+          group_name: group_name || 'Gabungan',
+          branches: [],
+          summary: {
+            income: 0,
+            expense: 0,
+            balance: 0,
+            total_transactions: 0
+          },
+          sections: []
+        }
+      });
+    }
+
+    const targetBranchIds = targetBranches.map(b => b.id);
+    const isUmum = req.query.is_umum === 'all' ? undefined : (req.query.is_umum === 'false' ? false : true);
+    const hasPb1 = req.query.has_pb1 === 'true';
+
+    const currentYear = parseInt(year) || new Date().getFullYear();
+    const currentMonth = parseInt(month) || (new Date().getMonth() + 1);
+
+    let finalStart = '';
+    let finalEnd = '';
+    let title = '';
+
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+
+    if (tab === 'Harian') {
+      finalStart = startDate || date || formatDate(new Date());
+      finalEnd = endDate || date || formatDate(new Date());
+      const s = parseDate(finalStart);
+      const e = parseDate(finalEnd);
+      title = finalStart === finalEnd 
+        ? `${s.getDate()} ${months[s.getMonth()]} ${s.getFullYear()}`
+        : `${s.getDate()} ${months[s.getMonth()]} - ${e.getDate()} ${months[e.getMonth()]} ${e.getFullYear()}`;
+    } else if (tab === 'Mingguan') {
+      const monthRange = getMonthRange(currentYear, currentMonth);
+      finalStart = monthRange.start;
+      finalEnd = monthRange.end;
+      title = `${months[currentMonth - 1]} ${currentYear}`;
+    } else if (tab === 'Tahunan') {
+      const yearRange = getYearRange(currentYear);
+      finalStart = yearRange.start;
+      finalEnd = yearRange.end;
+      title = String(currentYear);
+    } else {
+      // Bulanan (default)
+      const monthRange = getMonthRange(currentYear, currentMonth);
+      finalStart = monthRange.start;
+      finalEnd = monthRange.end;
+      title = `${months[currentMonth - 1]} ${currentYear}`;
+    }
+
+    // Fetch transactions across branches
+    const transactions = await Transaction.findAll({
+      branchIds: targetBranchIds,
+      startDate: finalStart,
+      endDate: finalEnd,
+      limit: 10000,
+      page: 1,
+      isUmum: isUmum,
+      hasPb1: hasPb1
+    });
+
+    // Fetch summary across branches with unified financial logic
+    let summary;
+    if (targetBranchIds.length === 1) {
+      summary = await Transaction.getSummary({
+        branchId: targetBranchIds[0],
+        startDate: finalStart,
+        endDate: finalEnd,
+        isUmum: isUmum,
+        hasPb1: hasPb1
+      });
+
+      summary.trend = await calculateTrend(
+        targetBranchIds[0],
+        tab === 'Mingguan' ? 'Bulanan' : tab,
+        { year: currentYear, month: currentMonth, finalStartDate: finalStart, finalEndDate: finalEnd },
+        summary,
+        isUmum,
+        hasPb1
+      ) || null;
+    } else {
+      const branchSummaries = await Promise.all(
+        targetBranchIds.map(bId =>
+          Transaction.getSummary({
+            branchId: bId,
+            startDate: finalStart,
+            endDate: finalEnd,
+            isUmum: isUmum,
+            hasPb1: hasPb1
+          })
+        )
+      );
+
+      summary = branchSummaries.reduce((acc, curr) => ({
+        pemasukan: acc.pemasukan + (curr.pemasukan || 0),
+        total_omzet: acc.total_omzet + (curr.total_omzet || 0),
+        pemasukan_lain: acc.pemasukan_lain + (curr.pemasukan_lain || 0),
+        pelunasan_piutang_lalu: acc.pelunasan_piutang_lalu + (curr.pelunasan_piutang_lalu || 0),
+        pengeluaran: acc.pengeluaran + (curr.pengeluaran || 0),
+        folder_pengeluaran: (acc.folder_pengeluaran || 0) + (curr.folder_pengeluaran || 0),
+        total_piutang_mitra: (acc.total_piutang_mitra || 0) + (curr.total_piutang_mitra || 0),
+        saldo: acc.saldo + (curr.saldo || 0),
+        total_pb1: acc.total_pb1 + (curr.total_pb1 || 0),
+        total_pb1_paid: acc.total_pb1_paid + (curr.total_pb1_paid || 0),
+        saldo_pb1: acc.saldo_pb1 + (curr.saldo_pb1 || 0)
+      }), {
+        pemasukan: 0,
+        total_omzet: 0,
+        pemasukan_lain: 0,
+        pelunasan_piutang_lalu: 0,
+        pengeluaran: 0,
+        folder_pengeluaran: 0,
+        total_piutang_mitra: 0,
+        saldo: 0,
+        total_pb1: 0,
+        total_pb1_paid: 0,
+        saldo_pb1: 0
+      });
+      summary.trend = null;
+    }
+
+    // Group transactions by date
+    const transactionsByDate = {};
+    transactions.forEach(t => {
+      let dateStr = t.transaction_date;
+      if (dateStr instanceof Date) {
+        dateStr = formatDate(dateStr);
+      } else if (typeof dateStr === 'string' && dateStr.includes('T')) {
+        dateStr = dateStr.split('T')[0];
+      }
+      if (!transactionsByDate[dateStr]) {
+        transactionsByDate[dateStr] = [];
+      }
+      transactionsByDate[dateStr].push(t);
+    });
+
+    const sortedDates = Object.keys(transactionsByDate).sort((a, b) => b.localeCompare(a));
+    const sections = sortedDates.map(d => formatSection(d, transactionsByDate[d], transactionsByDate[d], req));
+
+    res.json({
+      success: true,
+      data: {
+        title,
+        group_name: group_name || 'Gabungan',
+        branches: targetBranches.map(b => ({ id: b.id, name: b.name, code: b.code, group_name: b.group_name })),
+        summary,
+        sections
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getHarian,
   getMingguan,
   getBulanan,
   getBulananAll,
-  getTahunan
+  getTahunan,
+  getGroupDashboard
 };
