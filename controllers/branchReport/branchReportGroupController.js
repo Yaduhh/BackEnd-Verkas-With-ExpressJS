@@ -1,11 +1,13 @@
 const fs = require('fs');
 const Branch = require('../../models/Branch');
 const BranchReport = require('../../models/BranchReport');
+const GroupReport = require('../../models/GroupReport');
 const { query } = require('../../config/database');
 const { 
     exportFinancialReportToPDF, 
     exportFinancialReportToExcel, 
     exportPDFToJPEG, 
+    exportBagiHasilToPDF,
     generateFilename, 
     getMimeType 
 } = require('../../utils/exportHelper');
@@ -319,6 +321,10 @@ const getGroupFinancialReport = async (req, res, next) => {
         }
 
         const targetBranchIds = targetBranches.map(b => b.id);
+        const targetOwnerId = targetBranches[0]?.owner_id || req.userId;
+        const targetGroupName = (group_name && group_name !== 'Semua') ? group_name : (targetBranches[0]?.group_name || 'Gabungan');
+        const savedGroupReport = await GroupReport.findByGroupAndPeriod(targetOwnerId, targetGroupName, month, year);
+
         const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
         const daysInMonth = new Date(year, month, 0).getDate();
         const endDate = `${year}-${String(month).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
@@ -697,6 +703,37 @@ const getGroupFinancialReport = async (req, res, next) => {
             is_active: 1
         }));
 
+        const disabledList = Array.isArray(savedGroupReport?.disabled_categories) ? savedGroupReport.disabled_categories : [];
+        const piutangLabel = `PIUTANG ${new Date(year, month - 1, 1).toLocaleDateString('id-ID', { month: 'long', year: 'numeric' }).toUpperCase()}`;
+        const isPiutangDisabled = disabledList.includes(piutangLabel) || disabledList.includes('PIUTANG');
+
+        // Map is_active into expenseBreakdown
+        const processedExpenseBreakdown = expenseBreakdown.map(item => ({
+            ...item,
+            is_active: !disabledList.includes(item.category_name)
+        }));
+
+        // Map is_active into incomeBreakdown
+        const processedIncomeBreakdown = incomeBreakdown.map(item => ({
+            ...item,
+            is_active: !disabledList.includes(item.category_name)
+        }));
+
+        // Calculate active totals
+        const activeExpenseFromBreakdown = processedExpenseBreakdown
+            .filter(item => item.is_active)
+            .reduce((sum, item) => sum + (parseFloat(item.total) || 0), 0);
+        const activePiutang = isPiutangDisabled ? 0 : totalMitraPiutangGroup;
+        const activePengeluaranTotal = activeExpenseFromBreakdown + activePiutang;
+
+        // Active Omzet (if any income breakdown category is disabled)
+        const hasDisabledIncome = disabledList.some(d => incomeBreakdown.some(i => i.category_name === d));
+        const activeOmzetTotal = hasDisabledIncome
+            ? processedIncomeBreakdown.filter(item => item.is_active).reduce((sum, item) => sum + (parseFloat(item.total_net) || parseFloat(item.total) || 0), 0)
+            : totalSystemOmzet;
+
+        const activeProfit = activeOmzetTotal - activePengeluaranTotal;
+
         const report = {
             id: 0,
             branch_id: 0,
@@ -704,22 +741,34 @@ const getGroupFinancialReport = async (req, res, next) => {
             is_group: true,
             month,
             year,
-            omzet_total: totalSystemOmzet,
-            pengeluaran_total: totalSystemPengeluaran - totalMitraPiutangGroup,
-            pure_pengeluaran: totalSystemPengeluaran - totalMitraPiutangGroup,
-            piutang_mitra: totalMitraPiutangGroup,
-            total_piutang_mitra: totalMitraPiutangGroup,
-            piutang_label: `PIUTANG ${new Date(year, month - 1, 1).toLocaleDateString('id-ID', { month: 'long', year: 'numeric' }).toUpperCase()}`,
-            profit: finalProfit,
+            omzet_total: activeOmzetTotal,
+            raw_omzet_total: totalSystemOmzet,
+            pengeluaran_total: activePengeluaranTotal - activePiutang,
+            pure_pengeluaran: activePengeluaranTotal - activePiutang,
+            raw_pengeluaran_total: totalSystemPengeluaran - totalMitraPiutangGroup,
+            piutang_mitra: activePiutang,
+            total_piutang_mitra: activePiutang,
+            raw_piutang_mitra: totalMitraPiutangGroup,
+            is_piutang_disabled: isPiutangDisabled,
+            piutang_label: piutangLabel,
+            profit: activeProfit,
             pelunasan_piutang_bulan_lalu: totalPelunasanPiutang,
             prev_month_label: prevMonthName,
-            income_breakdown: incomeBreakdown,
-            expense_breakdown: expenseBreakdown,
-            sales_channels: systemSalesChannels.map(s => ({ name: s.name, amount: s.amount })),
+            income_breakdown: processedIncomeBreakdown,
+            expense_breakdown: processedExpenseBreakdown,
+            disabled_categories: disabledList,
+            sales_channels: (savedGroupReport?.sales_channels && savedGroupReport.sales_channels.length > 0)
+                ? savedGroupReport.sales_channels
+                : systemSalesChannels.map(s => ({ name: s.name, amount: s.amount })),
             system_sales_channels: systemSalesChannels,
             master_sales_channels: masterSalesChannels,
             unallocated_omzet: totalUnallocatedOmzet,
-            working_days: 25,
+            working_days: savedGroupReport?.working_days || 25,
+            stok_awal: savedGroupReport ? Number(savedGroupReport.stok_awal) : 0,
+            stok_akhir: savedGroupReport ? Number(savedGroupReport.stok_akhir) : 0,
+            bagi_hasil: savedGroupReport ? savedGroupReport.bagi_hasil : [],
+            expense_adjustments: savedGroupReport ? savedGroupReport.expense_adjustments : [],
+            expense_order: savedGroupReport ? savedGroupReport.expense_order : [],
             branches: branchContributions
         };
 
@@ -760,7 +809,11 @@ const exportGroupPdf = async (req, res, next) => {
 
         const dataForPdf = {
             ...reportData,
-            working_days: workingDays
+            working_days: workingDays,
+            expense_breakdown: (reportData.expense_breakdown || []).filter(item => item.is_active !== false),
+            income_breakdown: (reportData.income_breakdown || []).filter(item => item.is_active !== false),
+            piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.piutang_mitra,
+            total_piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.total_piutang_mitra
         };
 
         const filepath = await exportFinancialReportToPDF(
@@ -818,7 +871,11 @@ const exportGroupImage = async (req, res, next) => {
 
         const dataForPdf = {
             ...reportData,
-            working_days: workingDays
+            working_days: workingDays,
+            expense_breakdown: (reportData.expense_breakdown || []).filter(item => item.is_active !== false),
+            income_breakdown: (reportData.income_breakdown || []).filter(item => item.is_active !== false),
+            piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.piutang_mitra,
+            total_piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.total_piutang_mitra
         };
 
         const pdfPath = await exportFinancialReportToPDF(
@@ -877,7 +934,11 @@ const exportGroupExcel = async (req, res, next) => {
 
         const dataForExcel = {
             ...reportData,
-            working_days: workingDays
+            working_days: workingDays,
+            expense_breakdown: (reportData.expense_breakdown || []).filter(item => item.is_active !== false),
+            income_breakdown: (reportData.income_breakdown || []).filter(item => item.is_active !== false),
+            piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.piutang_mitra,
+            total_piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.total_piutang_mitra
         };
 
         const filepath = await exportFinancialReportToExcel(
@@ -913,10 +974,114 @@ const exportGroupExcel = async (req, res, next) => {
     }
 };
 
+/**
+ * PUT /api/branch-reports/consolidated/report?group_name=Bahan%20Baku&month=10&year=2026
+ * or PUT /api/branch-reports/consolidated/financial-report
+ */
+const saveGroupReport = async (req, res, next) => {
+    try {
+        const { group_name } = req.query;
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+        const {
+            stok_awal,
+            stok_akhir,
+            bagi_hasil,
+            working_days,
+            sales_channels,
+            expense_adjustments,
+            expense_order,
+            disabled_categories
+        } = req.body;
+
+        const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user?.role || 'owner');
+        let targetBranches = [];
+        if (group_name && group_name !== 'Semua' && group_name !== 'ALL') {
+            targetBranches = accessibleBranches.filter(b => b.group_name && b.group_name.toLowerCase() === group_name.toLowerCase());
+        } else {
+            targetBranches = accessibleBranches;
+        }
+
+        if (targetBranches.length === 0) {
+            return res.status(404).json({ success: false, message: 'Grup buku kas tidak ditemukan atau tidak memiliki akses' });
+        }
+
+        const targetOwnerId = targetBranches[0]?.owner_id || req.userId;
+        const targetGroupName = (group_name && group_name !== 'Semua') ? group_name : (targetBranches[0]?.group_name || 'Gabungan');
+
+        await GroupReport.upsert(targetOwnerId, targetGroupName, month, year, {
+            stokAwal: stok_awal !== undefined ? parseFloat(stok_awal) : undefined,
+            stokAkhir: stok_akhir !== undefined ? parseFloat(stok_akhir) : undefined,
+            bagiHasil: bagi_hasil,
+            workingDays: working_days !== undefined ? parseInt(working_days) : undefined,
+            salesChannels: sales_channels,
+            expenseAdjustments: expense_adjustments,
+            expenseOrder: expense_order,
+            disabledCategories: disabled_categories
+        });
+
+        // Return updated full report
+        const fakeReq = { ...req, query: { group_name, month, year }, _returnReportOnly: true };
+        const updatedReport = await getGroupFinancialReport(fakeReq, res, next);
+
+        return res.json({
+            success: true,
+            message: 'Laporan keuangan grup berhasil disimpan',
+            data: {
+                report: updatedReport
+            }
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * GET /api/branch-reports/consolidated/export-bagi-hasil-pdf?group_name=Bahan%20Baku&month=10&year=2026
+ */
+const exportGroupBagiHasilPdf = async (req, res, next) => {
+    try {
+        const { group_name } = req.query;
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+
+        const fakeReq = { ...req, query: { ...req.query }, _returnReportOnly: true };
+        const reportData = await getGroupFinancialReport(fakeReq, res, next);
+        if (!reportData) return res.status(404).json({ success: false, message: 'Tidak ada data buku kas dalam grup ini' });
+
+        const groupLabel = group_name ? `Grup_${group_name.replace(/\s+/g, '_')}` : 'Grup_Gabungan';
+        const filename = generateFilename('PDF', `Bagi_Hasil_${groupLabel}`);
+        const selectedMonthDate = new Date(year, month - 1, 1);
+
+        try {
+            const filepath = await exportBagiHasilToPDF(reportData, filename, groupLabel, selectedMonthDate);
+
+            res.setHeader('Content-Type', getMimeType('PDF') || 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+            const fileStream = fs.createReadStream(filepath);
+            fileStream.pipe(res);
+
+            fileStream.on('end', () => {
+                setTimeout(() => {
+                    fs.unlink(filepath, () => {});
+                }, 10000);
+            });
+        } catch (pdfError) {
+            console.error(`[EXPORT BH GROUP] PDF Gen Error:`, pdfError);
+            return res.status(500).json({ success: false, message: 'Gagal memproses PDF Bagi Hasil: ' + pdfError.message });
+        }
+    } catch (error) {
+        next(error);
+    }
+};
+
 module.exports = {
     getConsolidatedReport,
     getGroupFinancialReport,
+    saveGroupReport,
     exportGroupPdf,
     exportGroupImage,
-    exportGroupExcel
+    exportGroupExcel,
+    exportGroupBagiHasilPdf
 };

@@ -4,9 +4,11 @@ const {
     getReport,
     getConsolidatedReport,
     getGroupFinancialReport,
+    saveGroupReport,
     exportGroupPdf,
     exportGroupImage,
     exportGroupExcel,
+    exportGroupBagiHasilPdf,
     updateReport,
     exportPdf,
     exportExcel,
@@ -41,13 +43,18 @@ router.delete('/:branchId/expense-order-templates/:templateId', deleteExpenseOrd
 // Consolidated & Group Reports
 router.get('/consolidated/report', getConsolidatedReport);
 router.get('/consolidated/financial-report', getGroupFinancialReport);
+router.put('/consolidated/report', saveGroupReport);
+router.put('/consolidated/financial-report', saveGroupReport);
 router.get('/consolidated/export', exportGroupPdf);
 router.get('/consolidated/export-image', exportGroupImage);
 router.get('/consolidated/export-excel', exportGroupExcel);
+router.get('/consolidated/export-bagi-hasil-pdf', exportGroupBagiHasilPdf);
 router.get('/group/report', getGroupFinancialReport);
+router.put('/group/report', saveGroupReport);
 router.get('/group/export', exportGroupPdf);
 router.get('/group/export-image', exportGroupImage);
 router.get('/group/export-excel', exportGroupExcel);
+router.get('/group/export-bagi-hasil-pdf', exportGroupBagiHasilPdf);
 
 // GET /api/branch-reports/:branchId?month=2&year=2026
 router.get('/:branchId', getReport);
