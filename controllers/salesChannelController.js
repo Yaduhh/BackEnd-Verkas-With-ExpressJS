@@ -232,6 +232,26 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
 
       if (scDetails.length > 0) {
         overallTrxIds.add(t.id);
+
+        // Reconcile PB1 differences between items and t.pb1 (Single Source of Truth)
+        const tPb1 = parseFloat(t.pb1 || 0);
+        let scPb1Sum = 0;
+        const taxableItems = [];
+
+        scDetails.forEach(scd => {
+          scPb1Sum += parseFloat(scd.pb1_amount || 0);
+          if (scd.is_taxable == 1 || scd.is_taxable === true) {
+            taxableItems.push(scd);
+          }
+        });
+
+        if (tPb1 > 0 && Math.abs(tPb1 - scPb1Sum) > 0 && Math.abs(tPb1 - scPb1Sum) <= 2 && taxableItems.length > 0) {
+          taxableItems.sort((a, b) => parseFloat(b.gross_amount || 0) - parseFloat(a.gross_amount || 0));
+          const diff = tPb1 - scPb1Sum;
+          taxableItems[0].pb1_amount = parseFloat(taxableItems[0].pb1_amount || 0) + diff;
+          taxableItems[0].net_amount = parseFloat(taxableItems[0].gross_amount || 0) - taxableItems[0].pb1_amount;
+        }
+
         scDetails.forEach(scd => {
           const gross = parseFloat(scd.gross_amount || 0);
           const pb1 = parseFloat(scd.pb1_amount || 0);

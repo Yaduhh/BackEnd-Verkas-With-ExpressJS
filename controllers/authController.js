@@ -1,4 +1,5 @@
 const User = require('../models/User');
+const { query } = require('../config/database');
 const { generateToken } = require('../middleware/auth');
 const LogService = require('../services/logService');
 const crypto = require('crypto');
@@ -261,7 +262,7 @@ const logout = async (req, res, next) => {
 };
 
 // Get all admin users (for PIC selection) - owner and co-owner
-// Returns admin users that are in the same team as owner (admin users created by owner through team)
+// Get all admin users for owner's team ecosystem
 const getAdmins = async (req, res, next) => {
   try {
     // Only owner and co-owner can get admin users list
@@ -281,8 +282,7 @@ const getAdmins = async (req, res, next) => {
       }
     }
 
-    // Get admin users that are assigned as PIC to owner's branches
-    // This ensures we only show admins that belong to this owner's team
+    // Get admin users that belong to this owner's team ecosystem
     const admins = await User.findAdminsByOwnerTeam(targetUserId);
 
     res.json({
@@ -290,6 +290,96 @@ const getAdmins = async (req, res, next) => {
       data: {
         users: admins
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Delete admin user (soft delete) - owner and co-owner (only within own team)
+const deleteAdmin = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Only owner and co-owner can delete admin users.'
+      });
+    }
+
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner') {
+      const currentUser = await User.findById(req.userId);
+      if (currentUser && currentUser.created_by) {
+        targetUserId = currentUser.created_by;
+      }
+    }
+
+    const { id } = req.params;
+    const teamAdmins = await User.findAdminsByOwnerTeam(targetUserId);
+    const adminUser = teamAdmins.find(a => a.id === parseInt(id));
+
+    if (!adminUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'Admin user tidak ditemukan di dalam tim Anda'
+      });
+    }
+
+    await User.softDelete(id);
+    await query('DELETE FROM branch_pics WHERE user_id = ?', [id]);
+
+    res.json({
+      success: true,
+      message: 'Admin user berhasil dihapus'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Reset admin password - owner and co-owner (only within own team)
+const resetAdminPassword = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Hanya owner atau co-owner yang dapat mereset password admin.'
+      });
+    }
+
+    const { id } = req.params;
+    const { newPassword } = req.body;
+
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password baru minimal harus 6 karakter'
+      });
+    }
+
+    let targetUserId = req.userId;
+    if (req.user.role === 'co-owner') {
+      const currentUser = await User.findById(req.userId);
+      if (currentUser && currentUser.created_by) {
+        targetUserId = currentUser.created_by;
+      }
+    }
+
+    const teamAdmins = await User.findAdminsByOwnerTeam(targetUserId);
+    const adminUser = teamAdmins.find(a => a.id === parseInt(id));
+
+    if (!adminUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'Admin user tidak ditemukan di dalam tim Anda'
+      });
+    }
+
+    await User.changePassword(id, newPassword);
+
+    res.json({
+      success: true,
+      message: `Password admin ${adminUser.name || adminUser.email} berhasil direset`
     });
   } catch (error) {
     next(error);
@@ -367,6 +457,8 @@ module.exports = {
   getMe,
   logout,
   getAdmins,
+  deleteAdmin,
+  resetAdminPassword,
   changePassword
 };
 
