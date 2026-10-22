@@ -333,6 +333,14 @@ const getReport = async (req, res, next) => {
                         WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
                     ), 0)
                 ) as taxable_amount,
+                SUM(
+                    COALESCE((
+                        SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), t.pb1, 0)
+                ) as total_pb1,
                 (SELECT COUNT(*) FROM transactions t2 WHERE t2.category_id = t.category_id AND t2.type = 'expense' AND t2.status_deleted = false AND t2.branch_id = t.branch_id) as has_expense
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
@@ -361,7 +369,9 @@ const getReport = async (req, res, next) => {
         incomeBreakdownResult.forEach(item => {
             const gross = parseFloat(item.total_gross) || 0;
             const taxable = parseFloat(item.taxable_amount) || 0;
-            const tax = Math.round((taxable * 10) / 110);
+            const tax = item.total_pb1 !== undefined && item.total_pb1 !== null
+                ? parseFloat(item.total_pb1) || 0
+                : Math.round((taxable * 10) / 110);
             const net = gross - tax;
 
             const nameUpper = item.category_name.toUpperCase();
@@ -1008,6 +1018,14 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                         WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
                     ), 0)
                 ) as taxable_amount,
+                SUM(
+                    COALESCE((
+                        SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), t.pb1, 0)
+                ) as total_pb1,
                 t.is_debt_payment,
                 (SELECT COUNT(*) FROM transactions WHERE category_id = t.category_id AND type = 'expense' AND status_deleted = false) as has_expense
              FROM transactions t 
@@ -1036,7 +1054,9 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
         incomeBreakdownRaw.forEach(item => {
             const gross = parseFloat(item.total_gross) || 0;
             const taxable = parseFloat(item.taxable_amount) || 0;
-            const tax = Math.round((taxable * 10) / 110);
+            const tax = item.total_pb1 !== undefined && item.total_pb1 !== null
+                ? parseFloat(item.total_pb1) || 0
+                : Math.round((taxable * 10) / 110);
             const net = gross - tax;
 
             const nameUpper = item.category_name.toUpperCase();

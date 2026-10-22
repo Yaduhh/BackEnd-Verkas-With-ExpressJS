@@ -526,7 +526,15 @@ const getGroupFinancialReport = async (req, res, next) => {
                             JOIN payment_methods pm ON tid.payment_method_id = pm.id
                             WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
                         ), 0)
-                    ) as taxable_amount
+                    ) as taxable_amount,
+                    SUM(
+                        COALESCE((
+                            SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                            FROM transaction_income_details tid
+                            JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                            WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                        ), t.pb1, 0)
+                    ) as total_pb1
                  FROM transactions t
                  LEFT JOIN categories c ON t.category_id = c.id
                  LEFT JOIN (
@@ -633,7 +641,9 @@ const getGroupFinancialReport = async (req, res, next) => {
             for (const inc of incomeBreakdownResult) {
                 const cat = inc.category_name;
                 const g = parseFloat(inc.total_gross) || 0;
-                const tax = Math.round(((parseFloat(inc.taxable_amount) || 0) * 10) / 110);
+                const tax = inc.total_pb1 !== undefined && inc.total_pb1 !== null
+                    ? parseFloat(inc.total_pb1) || 0
+                    : Math.round(((parseFloat(inc.taxable_amount) || 0) * 10) / 110);
                 if (!aggregatedIncomeMap[cat]) {
                     aggregatedIncomeMap[cat] = { total: 0, total_tax: 0, total_net: 0 };
                 }

@@ -1295,6 +1295,19 @@ class Transaction {
         END), 0) as omzet_taxable,
 
         COALESCE(SUM(CASE 
+          WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+            COALESCE(
+              (SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+               FROM transaction_income_details tid
+               JOIN payment_methods pm ON tid.payment_method_id = pm.id
+               WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
+              t.pb1,
+              0
+            )
+          ELSE 0 
+        END), 0) as omzet_pb1,
+
+        COALESCE(SUM(CASE 
           WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
             (t.amount + COALESCE(t_future_ref.total_future_refund, 0)) 
           ELSE 0 
@@ -1311,6 +1324,19 @@ class Transaction {
             )
           ELSE 0 
         END), 0) as lain_taxable,
+
+        COALESCE(SUM(CASE 
+          WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+            COALESCE(
+              (SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+               FROM transaction_income_details tid
+               JOIN payment_methods pm ON tid.payment_method_id = pm.id
+               WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
+              t.pb1,
+              0
+            )
+          ELSE 0 
+        END), 0) as lain_pb1,
 
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' AND (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL AND ${startDate ? 't_parent.transaction_date < ?' : 'FALSE'} THEN t.amount
@@ -1416,18 +1442,20 @@ class Transaction {
     const {
       omzet_gross,
       omzet_taxable,
+      omzet_pb1,
       lain_gross,
       lain_taxable,
+      lain_pb1,
       pelunasan_piutang_lalu,
       pengeluaran,
       total_taxable,
       total_pb1_paid
     } = results[0];
 
-    const omzetTax = Math.round((Number(omzet_taxable) * 10) / 110);
+    const omzetTax = omzet_pb1 !== undefined && Number(omzet_pb1) > 0 ? Number(omzet_pb1) : Math.round((Number(omzet_taxable) * 10) / 110);
     const totalOmzetNet = Number(omzet_gross) - omzetTax;
 
-    const lainTax = Math.round((Number(lain_taxable) * 10) / 110);
+    const lainTax = lain_pb1 !== undefined && Number(lain_pb1) > 0 ? Number(lain_pb1) : Math.round((Number(lain_taxable) * 10) / 110);
     const totalPemasukanLainNet = Number(lain_gross) - lainTax;
 
     const totalPelunasanLalu = Number(pelunasan_piutang_lalu);
@@ -1471,6 +1499,14 @@ class Transaction {
                         WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
                     ), 0)
                 ) as taxable_amount,
+                SUM(
+                    COALESCE((
+                        SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), t.pb1, 0)
+                ) as total_pb1,
                 (SELECT COUNT(*) FROM transactions t2 WHERE t2.category_id = t.category_id AND t2.type = 'expense' AND t2.status_deleted = false AND (t2.is_draft = false OR t2.is_draft IS NULL) AND t2.branch_id = t.branch_id) as has_expense
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
@@ -1513,7 +1549,9 @@ class Transaction {
         incomeBreakdownResult.forEach(item => {
             const gross = parseFloat(item.total_gross) || 0;
             const taxable = parseFloat(item.taxable_amount) || 0;
-            const tax = Math.round((taxable * 10) / 110);
+            const tax = item.total_pb1 !== undefined && item.total_pb1 !== null
+                ? parseFloat(item.total_pb1) || 0
+                : Math.round((taxable * 10) / 110);
             const net = gross - tax;
 
             const nameUpper = item.category_name.toUpperCase();
