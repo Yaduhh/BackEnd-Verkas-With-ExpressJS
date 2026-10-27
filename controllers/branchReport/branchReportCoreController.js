@@ -514,6 +514,17 @@ const getReport = async (req, res, next) => {
             gross_amount: parseFloat(s.gross_amount) || 0
         }));
 
+        // Auto-reconcile minor rounding discrepancy (<= 2 Rupiah) between omzetNet and sum of channels
+        const omzetNetTarget = groupedIncome['OMZET PENJUALAN']?.total_net || 0;
+        const totalChannelAmount = systemSalesChannels.reduce((sum, s) => sum + s.amount, 0);
+        const channelDiff = omzetNetTarget - totalChannelAmount;
+        if (Math.abs(channelDiff) > 0 && Math.abs(channelDiff) <= 2 && systemSalesChannels.length > 0) {
+            const targetChannel = systemSalesChannels.find(s => s.gross_amount !== s.amount && Math.abs(((s.gross_amount * 10) / 110) % 1) > 0.001) || systemSalesChannels[systemSalesChannels.length - 1];
+            if (targetChannel) {
+                targetChannel.amount = Math.max(0, targetChannel.amount + channelDiff);
+            }
+        }
+
         return res.json({
             success: true,
             data: {
@@ -791,6 +802,22 @@ const updateReport = async (req, res, next) => {
             [branchId]
         );
 
+        const systemSalesChannels = systemSalesChannelsResult.map(s => ({
+            sales_channel_id: s.sales_channel_id,
+            name: s.name,
+            amount: parseFloat(s.amount) || 0,
+            gross_amount: parseFloat(s.gross_amount) || 0
+        }));
+
+        const totalChannelAmount = systemSalesChannels.reduce((sum, s) => sum + s.amount, 0);
+        const channelDiff = systemOmzet - totalChannelAmount;
+        if (Math.abs(channelDiff) > 0 && Math.abs(channelDiff) <= 2 && systemSalesChannels.length > 0) {
+            const targetChannel = systemSalesChannels.find(s => s.gross_amount !== s.amount && Math.abs(((s.gross_amount * 10) / 110) % 1) > 0.001) || systemSalesChannels[systemSalesChannels.length - 1];
+            if (targetChannel) {
+                targetChannel.amount = Math.max(0, targetChannel.amount + channelDiff);
+            }
+        }
+
         return res.json({
             success: true,
             message: 'Laporan berhasil disimpan',
@@ -800,11 +827,7 @@ const updateReport = async (req, res, next) => {
                     omzet_total: finalOmzetTotal,
                     profit: finalProfit,
                     pelunasan_piutang_bulan_lalu: pelunasanPiutangBulanLalu,
-                    system_sales_channels: systemSalesChannelsResult.map(s => ({
-                        sales_channel_id: s.sales_channel_id,
-                        name: s.name,
-                        amount: parseFloat(s.amount) || 0
-                    })),
+                    system_sales_channels: systemSalesChannels,
                     master_sales_channels: masterSalesChannelsResult
                 },
             },

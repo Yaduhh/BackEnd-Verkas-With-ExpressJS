@@ -16,60 +16,44 @@ const formatLampiran = (lampiran, req) => {
   // Get base URL from config (prioritize config over req)
   const baseUrl = config.baseUrl || `${req.protocol}://${req.get('host')}`;
 
-  try {
-    // Try to parse as JSON (array)
-    const parsed = JSON.parse(lampiran);
-    if (Array.isArray(parsed)) {
-      return parsed.map(path => {
-        // If already full URL, check if it needs to be replaced with baseUrl
-        if (path.startsWith('http://') || path.startsWith('https://')) {
-          // Extract path from URL
-          try {
-            const urlObj = new URL(path);
-            const urlPath = urlObj.pathname;
-            // Always use baseUrl from config
-            return `${baseUrl}${urlPath}`;
-          } catch (e) {
-            // If URL parsing fails, return as is
-            return path;
-          }
-        }
-        // Convert relative path to full URL using baseUrl
-        return `${baseUrl}${path.startsWith('/') ? path : '/' + path}`;
-      });
-    } else {
-      // Single value
-      const path = parsed;
-      if (path.startsWith('http://') || path.startsWith('https://')) {
-        // Extract path from URL
-        try {
-          const urlObj = new URL(path);
-          const urlPath = urlObj.pathname;
-          // Always use baseUrl from config
-          return [`${baseUrl}${urlPath}`];
-        } catch (e) {
-          // If URL parsing fails, return as is
-          return [path];
-        }
-      }
-      return [`${baseUrl}${path.startsWith('/') ? path : '/' + path}`];
-    }
-  } catch (e) {
-    // Not JSON, treat as string
-    const path = lampiran;
+  const formatSingleUrl = (path) => {
+    if (!path || typeof path !== 'string') return path;
     if (path.startsWith('http://') || path.startsWith('https://')) {
-      // Extract path from URL
       try {
         const urlObj = new URL(path);
         const urlPath = urlObj.pathname;
-        // Always use baseUrl from config
-        return [`${baseUrl}${urlPath}`];
+        return `${baseUrl}${urlPath}`;
       } catch (e) {
-        // If URL parsing fails, return as is
-        return [path];
+        return path;
       }
     }
-    return [`${baseUrl}${path.startsWith('/') ? path : '/' + path}`];
+    return `${baseUrl}${path.startsWith('/') ? path : '/' + path}`;
+  };
+
+  const processItem = (item) => {
+    if (!item) return item;
+    if (typeof item === 'object' && item.url) {
+      return {
+        ...item,
+        url: formatSingleUrl(item.url)
+      };
+    }
+    if (typeof item === 'string') {
+      return formatSingleUrl(item);
+    }
+    return item;
+  };
+
+  try {
+    // Try to parse as JSON
+    const parsed = JSON.parse(lampiran);
+    if (Array.isArray(parsed)) {
+      return parsed.map(processItem);
+    } else {
+      return [processItem(parsed)];
+    }
+  } catch (e) {
+    return [processItem(lampiran)];
   }
 };
 
@@ -78,6 +62,13 @@ const stripBaseUrl = (lampiran, baseUrl) => {
   if (!lampiran) return null;
 
   const cleanPath = (p) => {
+    if (!p) return p;
+    if (typeof p === 'object' && p.url) {
+      return {
+        ...p,
+        url: cleanPath(p.url)
+      };
+    }
     if (typeof p !== 'string') return p;
     if (p.startsWith('http://') || p.startsWith('https://')) {
       try {
@@ -127,6 +118,7 @@ const getAll = async (req, res, next) => {
       payment_method_id,
       payment_method_category_id,
       include_income_details,
+      include_product_items,
       is_draft
     } = req.query;
 
@@ -181,6 +173,7 @@ const getAll = async (req, res, next) => {
       paymentMethodId: payment_method_id || undefined,
       paymentMethodCategoryId: payment_method_category_id || undefined,
       includeIncomeDetails: include_income_details === 'true',
+      includeProductItems: include_product_items === 'true',
       isDraft: isDraftFilter
     });
 
@@ -209,7 +202,8 @@ const getAll = async (req, res, next) => {
       income_details: t.income_details ? t.income_details.map(id => ({
         ...id,
         lampiran: formatLampiran(id.lampiran, req)
-      })) : []
+      })) : [],
+      product_items: t.product_items || []
     }));
 
     res.json({

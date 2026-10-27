@@ -144,6 +144,7 @@ class Transaction {
     paymentMethodId = null,
     paymentMethodCategoryId = null,
     includeIncomeDetails = false,
+    includeProductItems = false,
     isDraft = undefined,
     includeDraft = false
   } = {}) {
@@ -440,6 +441,24 @@ class Transaction {
 
       transactions.forEach(t => {
         t.income_details = allIncomeDetails.filter(d => d.transaction_id === t.id);
+      });
+    }
+
+    if (includeProductItems && transactions.length > 0) {
+      const transactionIds = transactions.map(t => t.id);
+      const placeholders = transactionIds.map(() => '?').join(',');
+      const productSql = `
+        SELECT tpi.*, p.name as product_name, pb.name as brand_name
+        FROM transaction_product_items tpi
+        JOIN products p ON tpi.product_id = p.id
+        LEFT JOIN product_brands pb ON tpi.brand_id = pb.id
+        WHERE tpi.transaction_id IN (${placeholders})
+        ORDER BY tpi.id ASC
+      `;
+      const allProductItems = await query(productSql, transactionIds);
+
+      transactions.forEach(t => {
+        t.product_items = allProductItems.filter(pi => pi.transaction_id === t.id);
       });
     }
 

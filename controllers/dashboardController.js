@@ -57,19 +57,32 @@ function formatSection(date, items, transactions, req) {
   // Helper to convert path to full URL using baseUrl from config
   const pathToUrl = (path) => {
     if (!path) return null;
-    if (path.startsWith('http://') || path.startsWith('https://')) {
-      // Extract path from URL
-      try {
-        const urlObj = new URL(path);
-        const urlPath = urlObj.pathname;
-        // Always use baseUrl from config
-        return `${baseUrl}${urlPath}`;
-      } catch (e) {
-        // If URL parsing fails, return as is
-        return path;
+
+    const formatSingle = (urlStr) => {
+      if (!urlStr || typeof urlStr !== 'string') return urlStr;
+      if (urlStr.startsWith('http://') || urlStr.startsWith('https://')) {
+        try {
+          const urlObj = new URL(urlStr);
+          const urlPath = urlObj.pathname;
+          return `${baseUrl}${urlPath}`;
+        } catch (e) {
+          return urlStr;
+        }
       }
+      return `${baseUrl}${urlStr.startsWith('/') ? urlStr : '/' + urlStr}`;
+    };
+
+    if (typeof path === 'object' && path !== null) {
+      if (path.url) {
+        return {
+          ...path,
+          url: formatSingle(path.url)
+        };
+      }
+      return path;
     }
-    return `${baseUrl}${path.startsWith('/') ? path : '/' + path}`;
+
+    return formatSingle(path);
   };
 
   return {

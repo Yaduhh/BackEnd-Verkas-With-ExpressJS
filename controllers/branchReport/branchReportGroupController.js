@@ -718,6 +718,16 @@ const getGroupFinancialReport = async (req, res, next) => {
             }))
             .sort((a, b) => b.amount - a.amount);
 
+        const omzetNetTarget = aggregatedIncomeMap['OMZET PENJUALAN']?.total_net || 0;
+        const totalChannelAmount = systemSalesChannels.reduce((sum, s) => sum + s.amount, 0);
+        const channelDiff = omzetNetTarget - totalChannelAmount;
+        if (Math.abs(channelDiff) > 0 && Math.abs(channelDiff) <= 2 && systemSalesChannels.length > 0) {
+            const targetChannel = systemSalesChannels.find(s => s.gross_amount !== s.amount && Math.abs(((s.gross_amount * 10) / 110) % 1) > 0.001) || systemSalesChannels[systemSalesChannels.length - 1];
+            if (targetChannel) {
+                targetChannel.amount = Math.max(0, targetChannel.amount + channelDiff);
+            }
+        }
+
         const masterSalesChannels = Array.from(masterSalesChannelsSet).map((name, idx) => ({
             id: idx + 1,
             name,
