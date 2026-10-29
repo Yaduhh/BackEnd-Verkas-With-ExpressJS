@@ -4,7 +4,8 @@ const {
   getAll,
   create,
   updateAccount,
-  deleteAccount
+  deleteAccount,
+  getStatement
 } = require('../controllers/bankAccountController');
 const { authenticate } = require('../middleware/auth');
 
@@ -13,6 +14,9 @@ router.use(authenticate);
 
 // Get all bank accounts for branch
 router.get('/', getAll);
+
+// Get bank account statement & breakdown
+router.get('/:id/statement', getStatement);
 
 // Create new bank account
 router.post('/', create);

@@ -183,7 +183,11 @@ const exportCategoryReport = async (req, res, next) => {
                      LEFT JOIN payment_methods pm ON COALESCE(
                          tsc.payment_method_id,
                          tid_direct.payment_method_id,
-                         (SELECT tid.payment_method_id FROM transaction_income_details tid WHERE tid.transaction_id = t.id LIMIT 1)
+                         CASE
+                             WHEN (SELECT COUNT(*) FROM transaction_income_details tid_c WHERE tid_c.transaction_id = t.id) = 1
+                             THEN (SELECT tid.payment_method_id FROM transaction_income_details tid WHERE tid.transaction_id = t.id LIMIT 1)
+                             ELSE NULL
+                         END
                      ) = pm.id
                      WHERE tsc.transaction_id IN (${placeholders})`,
                     transactionIds

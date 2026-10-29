@@ -25,7 +25,7 @@ const getAll = async (req, res, next) => {
 
 const create = async (req, res, next) => {
   try {
-    const { name, type } = req.body;
+    const { name, accountNumber, account_number, type } = req.body;
     const branchId = req.branchId || req.headers['x-branch-id'] || null;
 
     if (!name) {
@@ -44,6 +44,7 @@ const create = async (req, res, next) => {
 
     const account = await BankAccount.create({
       name,
+      accountNumber: accountNumber || account_number || null,
       branchId: parseInt(branchId),
       type: type || 'savings'
     });
@@ -61,7 +62,7 @@ const create = async (req, res, next) => {
 const updateAccount = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, type } = req.body;
+    const { name, accountNumber, account_number, type } = req.body;
 
     const account = await BankAccount.findById(id);
     if (!account) {
@@ -71,7 +72,13 @@ const updateAccount = async (req, res, next) => {
       });
     }
 
-    const updated = await BankAccount.update(id, { name, type });
+    const resolvedAccountNumber = accountNumber !== undefined ? accountNumber : account_number;
+
+    const updated = await BankAccount.update(id, {
+      name,
+      accountNumber: resolvedAccountNumber,
+      type
+    });
 
     res.json({
       success: true,
@@ -106,9 +113,40 @@ const deleteAccount = async (req, res, next) => {
   }
 };
 
+const getStatement = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { startDate, endDate, type, search, page = 1, limit = 50 } = req.query;
+
+    const data = await BankAccount.getStatement(parseInt(id), {
+      startDate: startDate || null,
+      endDate: endDate || null,
+      type: type || 'all',
+      search: search || '',
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        message: 'Bank account not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAll,
   create,
   updateAccount,
-  deleteAccount
+  deleteAccount,
+  getStatement
 };

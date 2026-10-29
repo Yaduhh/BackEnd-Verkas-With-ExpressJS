@@ -267,7 +267,7 @@ const getById = async (req, res, next) => {
 
 const create = async (req, res, next) => {
   try {
-    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_savings, mitra_details, savings_details, income_details, sales_channel_details, product_items, is_pb1_payment, is_draft } = req.body;
+    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_savings, mitra_details, savings_details, income_details, sales_channel_details, product_items, is_pb1_payment, is_draft, total_customer, tc, apc } = req.body;
 
     const isDraft = is_draft === true || is_draft === 'true' || is_draft === 1;
 
@@ -402,6 +402,15 @@ const create = async (req, res, next) => {
 
     const finalAmount = amount !== undefined && amount !== null && amount !== '' ? parseFloat(amount) : 0;
 
+    const parsedTc = (total_customer !== undefined && total_customer !== null && total_customer !== '') 
+      ? parseInt(total_customer) 
+      : ((tc !== undefined && tc !== null && tc !== '') ? parseInt(tc) : null);
+
+    let parsedApc = (apc !== undefined && apc !== null && apc !== '') ? parseFloat(apc) : null;
+    if ((parsedApc === null || isNaN(parsedApc)) && parsedTc && parsedTc > 0) {
+      parsedApc = Math.round(finalAmount / parsedTc);
+    }
+
     // Create transaction
     const transaction = await Transaction.create({
       userId: req.userId,
@@ -409,6 +418,8 @@ const create = async (req, res, next) => {
       type: type || 'pengeluaran',
       categoryId: foundCategoryId,
       amount: isNaN(finalAmount) ? 0 : finalAmount,
+      totalCustomer: parsedTc,
+      apc: parsedApc,
       pb1: pb1 ? parseFloat(pb1) : null,
       note: note || null,
       transactionDate: txDate,
@@ -497,7 +508,7 @@ const create = async (req, res, next) => {
 const update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, mitra_details, savings_details, income_details, sales_channel_details, product_items, is_pb1_payment, is_draft } = req.body;
+    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, mitra_details, savings_details, income_details, sales_channel_details, product_items, is_pb1_payment, is_draft, total_customer, tc, apc } = req.body;
 
     // Check if transaction exists and belongs to user
     const existing = await Transaction.findById(id);
@@ -683,6 +694,22 @@ const update = async (req, res, next) => {
 
     if (is_draft !== undefined) {
       updateData.isDraft = is_draft === true || is_draft === 'true' || is_draft === 1;
+    }
+
+    if (total_customer !== undefined || tc !== undefined) {
+      const rawTc = total_customer !== undefined ? total_customer : tc;
+      updateData.totalCustomer = (rawTc !== null && rawTc !== '' && !isNaN(parseInt(rawTc))) ? parseInt(rawTc) : null;
+    }
+
+    if (apc !== undefined) {
+      updateData.apc = (apc !== null && apc !== '' && !isNaN(parseFloat(apc))) ? parseFloat(apc) : null;
+    } else if (updateData.totalCustomer !== undefined) {
+      const currentAmount = updateData.amount !== undefined ? updateData.amount : existing.amount;
+      if (updateData.totalCustomer && updateData.totalCustomer > 0 && currentAmount) {
+        updateData.apc = Math.round(parseFloat(currentAmount) / updateData.totalCustomer);
+      } else if (!updateData.totalCustomer) {
+        updateData.apc = null;
+      }
     }
 
     // Guarantee PB1 setoran payments NEVER get saved with is_umum = true (Kas Berjalan)

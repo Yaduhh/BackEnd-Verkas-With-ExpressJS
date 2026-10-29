@@ -594,12 +594,12 @@ class Transaction {
     return results[0].total;
   }
 
-  static async create({ userId, branchId, type, categoryId, amount, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, isSavings = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, bankAccountId = null, mitraDetails = [], savingsDetails = [], incomeDetails = [], salesChannelDetails = [], productItems = [], isPb1Payment = false, isDraft = false }) {
+  static async create({ userId, branchId, type, categoryId, amount, totalCustomer = null, apc = null, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, isSavings = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, bankAccountId = null, mitraDetails = [], savingsDetails = [], incomeDetails = [], salesChannelDetails = [], productItems = [], isPb1Payment = false, isDraft = false }) {
     const transactionId = await dbTransaction(async (conn) => {
       const [result] = await conn.execute(
-        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, bank_account_id, is_draft, status_deleted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
-        [userId, branchId, type, categoryId, amount, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, isSavings || (savingsDetails && savingsDetails.length > 0) || false, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment, bankAccountId, isDraft ? 1 : 0]
+        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, total_customer, apc, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, bank_account_id, is_draft, status_deleted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
+        [userId, branchId, type, categoryId, amount, totalCustomer || null, apc || null, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, isSavings || (savingsDetails && savingsDetails.length > 0) || false, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment, bankAccountId, isDraft ? 1 : 0]
       );
 
       const newId = result.insertId;
@@ -696,7 +696,7 @@ class Transaction {
   }
 
   // Update transaction
-  static async update(id, { type, categoryId, amount, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, incomeDetails, salesChannelDetails, productItems, isPb1Payment, isDraft }) {
+  static async update(id, { type, categoryId, amount, totalCustomer, apc, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, incomeDetails, salesChannelDetails, productItems, isPb1Payment, isDraft }) {
     await dbTransaction(async (conn) => {
       // Get old transaction data first to reverse allocation
       const [oldRows] = await conn.execute(
@@ -775,6 +775,14 @@ class Transaction {
       if (isPb1Payment !== undefined) {
         updates.push('is_pb1_payment = ?');
         params.push(isPb1Payment === true || isPb1Payment === 'true' || isPb1Payment === 1);
+      }
+      if (totalCustomer !== undefined) {
+        updates.push('total_customer = ?');
+        params.push(totalCustomer || null);
+      }
+      if (apc !== undefined) {
+        updates.push('apc = ?');
+        params.push(apc || null);
       }
       if (isDraft !== undefined) {
         updates.push('is_draft = ?');

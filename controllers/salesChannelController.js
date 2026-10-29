@@ -169,7 +169,11 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
          LEFT JOIN payment_methods pm ON COALESCE(
              tsc.payment_method_id,
              tid_direct.payment_method_id,
-             (SELECT tid.payment_method_id FROM transaction_income_details tid WHERE tid.transaction_id = t.id LIMIT 1)
+             CASE
+                 WHEN (SELECT COUNT(*) FROM transaction_income_details tid_c WHERE tid_c.transaction_id = t.id) = 1
+                 THEN (SELECT tid.payment_method_id FROM transaction_income_details tid WHERE tid.transaction_id = t.id LIMIT 1)
+                 ELSE NULL
+             END
          ) = pm.id
          WHERE tsc.transaction_id IN (${placeholders})`,
         trxIds
@@ -222,54 +226,87 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
     const overallTrxIds = new Set();
 
     transactions.forEach(t => {
-      const scDetails = tscMap.get(t.id) || [];
-      t.sales_channel_details = scDetails;
+      const rawScDetails = tscMap.get(t.id) || [];
       t.income_details = incomeDetailsMap.get(t.id) || [];
 
       let trxGross = 0;
       let trxPb1 = 0;
       let trxNet = 0;
 
-      if (scDetails.length > 0) {
+      if (rawScDetails.length > 0) {
         overallTrxIds.add(t.id);
 
-        // Reconcile PB1 differences between items and t.pb1 (Single Source of Truth)
-        const tPb1 = parseFloat(t.pb1 || 0);
-        let scPb1Sum = 0;
-        const taxableItems = [];
+        // 1. Group by sales_channel_id within the transaction so PB1 is calculated at channel level
+        //    (matching TransactionFinancialCard.tsx in Transaction Detail Page)
+        const groupedMap = new Map();
+        rawScDetails.forEach(scd => {
+          const chId = scd.sales_channel_id;
+          const gross = parseFloat(scd.gross_amount || 0);
+          const isTax = scd.is_taxable == 1 || scd.is_taxable === true;
 
-        scDetails.forEach(scd => {
-          scPb1Sum += parseFloat(scd.pb1_amount || 0);
-          if (scd.is_taxable == 1 || scd.is_taxable === true) {
-            taxableItems.push(scd);
+          if (!groupedMap.has(chId)) {
+            groupedMap.set(chId, {
+              id: scd.id,
+              transaction_id: t.id,
+              sales_channel_id: chId,
+              sales_channel_name: scd.sales_channel_name,
+              sales_channel_category_id: scd.sales_channel_category_id,
+              gross_amount: 0,
+              taxable_gross: 0,
+              pb1_amount: 0,
+              net_amount: 0,
+              is_taxable: isTax ? 1 : 0,
+              sources: []
+            });
           }
+
+          const group = groupedMap.get(chId);
+          group.gross_amount += gross;
+          if (isTax) {
+            group.taxable_gross += gross;
+            group.is_taxable = 1;
+          }
+          group.sources.push(scd);
         });
 
-        if (tPb1 > 0 && Math.abs(tPb1 - scPb1Sum) > 0 && Math.abs(tPb1 - scPb1Sum) <= 2 && taxableItems.length > 0) {
-          taxableItems.sort((a, b) => parseFloat(b.gross_amount || 0) - parseFloat(a.gross_amount || 0));
+        const groupedChannels = Array.from(groupedMap.values());
+
+        // Calculate channel-level PB1 (10/110 of taxable_gross)
+        groupedChannels.forEach(g => {
+          g.pb1_amount = g.taxable_gross > 0 ? Math.round((g.taxable_gross * 10) / 110) : 0;
+          g.net_amount = g.gross_amount - g.pb1_amount;
+        });
+
+        // 2. Reconcile PB1 differences between channel groups and t.pb1 (Single Source of Truth)
+        const tPb1 = parseFloat(t.pb1 || 0);
+        const scPb1Sum = groupedChannels.reduce((sum, g) => sum + g.pb1_amount, 0);
+        const taxableGroups = groupedChannels.filter(g => g.taxable_gross > 0);
+
+        if (tPb1 > 0 && Math.abs(tPb1 - scPb1Sum) > 0 && Math.abs(tPb1 - scPb1Sum) <= 2 && taxableGroups.length > 0) {
+          taxableGroups.sort((a, b) => b.taxable_gross - a.taxable_gross);
           const diff = tPb1 - scPb1Sum;
-          taxableItems[0].pb1_amount = parseFloat(taxableItems[0].pb1_amount || 0) + diff;
-          taxableItems[0].net_amount = parseFloat(taxableItems[0].gross_amount || 0) - taxableItems[0].pb1_amount;
+          taxableGroups[0].pb1_amount += diff;
+          taxableGroups[0].net_amount = taxableGroups[0].gross_amount - taxableGroups[0].pb1_amount;
         }
 
-        scDetails.forEach(scd => {
-          const gross = parseFloat(scd.gross_amount || 0);
-          const pb1 = parseFloat(scd.pb1_amount || 0);
-          const net = parseFloat(scd.net_amount || 0);
+        // Store aggregated channel items per transaction & accumulate stats
+        t.sales_channel_details = groupedChannels;
 
-          trxGross += gross;
-          trxPb1 += pb1;
-          trxNet += net;
+        groupedChannels.forEach(g => {
+          trxGross += g.gross_amount;
+          trxPb1 += g.pb1_amount;
+          trxNet += g.net_amount;
 
-          const stat = channelStatsMap.get(scd.sales_channel_id);
+          const stat = channelStatsMap.get(g.sales_channel_id);
           if (stat) {
-            stat.total_gross += gross;
-            stat.total_pb1 += pb1;
-            stat.total_net += net;
+            stat.total_gross += g.gross_amount;
+            stat.total_pb1 += g.pb1_amount;
+            stat.total_net += g.net_amount;
             stat.transaction_ids.add(t.id);
           }
         });
       } else {
+        t.sales_channel_details = [];
         // Fallback if transaction in this category has no sales channel details yet
         const tAmount = parseFloat(t.amount || 0);
         const tPb1 = parseFloat(t.pb1 || 0);
