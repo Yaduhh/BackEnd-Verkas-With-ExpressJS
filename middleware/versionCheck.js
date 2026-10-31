@@ -9,6 +9,7 @@ const versionCheck = (req, res, next) => {
     const path = req.path;
     if (
         path.startsWith('/api/app-config') ||
+        path.startsWith('/api/external') ||
         path.startsWith('/uploads') ||
         path === '/health' ||
         path === '/favicon.ico'

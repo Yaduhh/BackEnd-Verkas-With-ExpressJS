@@ -497,17 +497,55 @@ const downloadTemplate = async (req, res, next) => {
 };
 
 // Helper: Parse and validate product Excel buffer
-const parseProductExcel = async (buffer, branchId, targetCategoryId = null) => {
+const parseProductExcel = async (buffer, branchId, targetCategoryId = null, requestedSheetName = null, isPreview = false) => {
   const workbook = xlsx.read(buffer, { type: 'buffer' });
-  const firstSheetName = workbook.SheetNames[0];
-  if (!firstSheetName) {
+  const sheetNames = workbook.SheetNames || [];
+  if (sheetNames.length === 0) {
     throw new Error('File Excel kosong atau tidak memiliki sheet');
   }
 
-  const worksheet = workbook.Sheets[firstSheetName];
+  let targetSheetName = sheetNames[0];
+  if (requestedSheetName && sheetNames.includes(requestedSheetName)) {
+    targetSheetName = requestedSheetName;
+  } else if (sheetNames.length > 1) {
+    for (const name of sheetNames) {
+      const ws = workbook.Sheets[name];
+      const rows = xlsx.utils.sheet_to_json(ws, { defval: '' });
+      if (rows && rows.length > 0) {
+        const k = Object.keys(rows[0] || {});
+        if (k.some(col => /nama.*produk|produk|product.*name|nama.*barang|barang|nama.*rincian|rincian/i.test(col))) {
+          targetSheetName = name;
+          break;
+        }
+      }
+    }
+  }
+
+  const emptyPreviewResult = (errMsg) => ({
+    sheetNames,
+    selectedSheet: targetSheetName,
+    sheetError: errMsg,
+    rawRowsCount: 0,
+    detectedColumns: { category: null, product: null, brand: null, description: null },
+    summary: {
+      totalRows: 0,
+      totalProducts: 0,
+      newProducts: 0,
+      existingProducts: 0,
+      totalBrands: 0,
+      missingCategoryCount: 0
+    },
+    items: [],
+    productsToProcess: new Map(),
+    existingProductMap: new Map()
+  });
+
+  const worksheet = workbook.Sheets[targetSheetName];
   const rawRows = xlsx.utils.sheet_to_json(worksheet, { defval: '' });
   if (!rawRows || rawRows.length === 0) {
-    throw new Error('Tidak ada data yang ditemukan di dalam file Excel');
+    const msg = `Tidak ada data yang ditemukan pada sheet "${targetSheetName}".`;
+    if (isPreview) return emptyPreviewResult(msg);
+    throw new Error(msg);
   }
 
   // Identify column keys
@@ -515,12 +553,14 @@ const parseProductExcel = async (buffer, branchId, targetCategoryId = null) => {
   const keys = Object.keys(firstRow);
 
   const categoryKey = keys.find(k => /kategori|category/i.test(k));
-  const productKey = keys.find(k => /nama.*produk|produk|product.*name|nama.*barang|barang/i.test(k));
+  const productKey = keys.find(k => /nama.*produk|produk|product.*name|nama.*barang|barang|nama.*rincian|rincian/i.test(k));
   const brandKey = keys.find(k => /merek|merk|brand|varian/i.test(k));
   const descKey = keys.find(k => /keterangan|deskripsi|catatan|note|description/i.test(k));
 
   if (!productKey) {
-    throw new Error('Kolom "Nama Produk" tidak ditemukan dalam file Excel. Silakan gunakan template yang telah disediakan.');
+    const msg = `Kolom "Nama Produk" tidak ditemukan pada sheet "${targetSheetName}". Silakan pilih sheet lain atau gunakan template yang telah disediakan.`;
+    if (isPreview) return emptyPreviewResult(msg);
+    throw new Error(msg);
   }
 
   // Fetch existing categories
@@ -620,7 +660,9 @@ const parseProductExcel = async (buffer, branchId, targetCategoryId = null) => {
   }
 
   if (productsToProcess.size === 0) {
-    throw new Error('Tidak ada baris data produk yang valid untuk diimpor');
+    const msg = `Tidak ada baris data produk yang valid pada sheet "${targetSheetName}".`;
+    if (isPreview) return emptyPreviewResult(msg);
+    throw new Error(msg);
   }
 
   let totalBrands = 0;
@@ -653,6 +695,9 @@ const parseProductExcel = async (buffer, branchId, targetCategoryId = null) => {
   }
 
   return {
+    sheetNames,
+    selectedSheet: targetSheetName,
+    sheetError: null,
     rawRowsCount: rawRows.length,
     detectedColumns: {
       category: categoryKey || null,
@@ -693,11 +738,15 @@ const previewExcel = async (req, res, next) => {
     }
 
     const targetCategoryId = req.body.target_category_id || req.query.target_category_id || null;
-    const result = await parseProductExcel(req.file.buffer, branchId, targetCategoryId);
+    const sheetName = req.body.sheet_name || req.query.sheet_name || null;
+    const result = await parseProductExcel(req.file.buffer, branchId, targetCategoryId, sheetName, true);
     res.json({
       success: true,
       message: 'Preview data berhasil dianalisa',
       data: {
+        sheetNames: result.sheetNames,
+        selectedSheet: result.selectedSheet,
+        sheetError: result.sheetError || null,
         detectedColumns: result.detectedColumns,
         summary: result.summary,
         items: result.items
@@ -730,7 +779,8 @@ const importExcel = async (req, res, next) => {
     }
 
     const targetCategoryId = req.body.target_category_id || req.query.target_category_id || null;
-    const { productsToProcess, existingProductMap, summary } = await parseProductExcel(req.file.buffer, branchId, targetCategoryId);
+    const sheetName = req.body.sheet_name || req.query.sheet_name || null;
+    const { productsToProcess, existingProductMap, summary } = await parseProductExcel(req.file.buffer, branchId, targetCategoryId, sheetName, false);
 
     // Enforce that all products MUST have a parent category!
     if (summary.missingCategoryCount > 0) {

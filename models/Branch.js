@@ -374,6 +374,9 @@ class Branch {
 
   // Check if user has access to branch
   static async userHasAccess(userId, branchId, userRole) {
+    // Master role has access to all branches
+    if (userRole === 'master') return true;
+
     const branch = await this.findById(branchId);
     if (!branch) return false;
 

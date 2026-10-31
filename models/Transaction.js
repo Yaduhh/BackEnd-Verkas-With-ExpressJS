@@ -42,7 +42,7 @@ class Transaction {
 
     // Fetch income details
     const incomeDetails = await query(
-      `SELECT tid.*, pm.name as payment_method_name, ba.name as bank_account_name, ba.type as bank_account_type
+      `SELECT tid.*, pm.name as payment_method_name, pm.is_taxable as is_taxable, pm.is_taxable as payment_method_is_taxable, ba.name as bank_account_name, ba.type as bank_account_type
        FROM transaction_income_details tid
        JOIN payment_methods pm ON tid.payment_method_id = pm.id
        LEFT JOIN bank_accounts ba ON tid.bank_account_id = ba.id
@@ -50,6 +50,24 @@ class Transaction {
       [id]
     );
     transaction.income_details = incomeDetails;
+
+    if (transaction.type === 'income') {
+      const taxableBase = incomeDetails.reduce((sum, item) => {
+        if (item.is_taxable === 1 || item.is_taxable === true) {
+          const rowBase = parseFloat(item.amount_app) > 0 ? parseFloat(item.amount_app) : parseFloat(item.amount_cashier || 0);
+          return sum + rowBase;
+        }
+        return sum;
+      }, 0);
+      if (taxableBase > 0) {
+        transaction.pb1 = Math.round((taxableBase * 10) / 110);
+      }
+      if (transaction.total_customer && Number(transaction.total_customer) > 0) {
+        const effPb1 = parseFloat(transaction.pb1 || 0);
+        const netAmt = Math.max(0, Math.abs(parseFloat(transaction.amount || 0)) - effPb1);
+        transaction.apc = Math.round(netAmt / Number(transaction.total_customer));
+      }
+    }
 
     // Fetch sales channel details
     const salesChannelDetails = await query(
@@ -121,6 +139,21 @@ class Transaction {
     return transaction;
   }
 
+  // Find by External Reference ID (Idempotency)
+  static async findByExternalReference(externalReferenceId) {
+    if (!externalReferenceId) return null;
+    const results = await query(
+      `SELECT t.*, c.name as category_name, ba.name as bank_account_name, ba.type as bank_account_type
+       FROM transactions t
+       LEFT JOIN categories c ON t.category_id = c.id
+       LEFT JOIN bank_accounts ba ON t.bank_account_id = ba.id
+       WHERE t.external_reference_id = ? AND t.status_deleted = false
+       LIMIT 1`,
+      [externalReferenceId]
+    );
+    return results[0] || null;
+  }
+
   // Find all (with filters)
   static async findAll({
     userId,
@@ -176,7 +209,7 @@ class Transaction {
              CASE 
                WHEN t.type = 'income' THEN 
                  COALESCE(
-                   (SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                   (SELECT ROUND(SUM(CASE WHEN tid.amount_app > 0 THEN tid.amount_app ELSE tid.amount_cashier END) * 10 / 110)
                     FROM transaction_income_details tid
                     JOIN payment_methods pm ON tid.payment_method_id = pm.id
                     WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
@@ -431,7 +464,7 @@ class Transaction {
       const transactionIds = transactions.map(t => t.id);
       const placeholders = transactionIds.map(() => '?').join(',');
       const incomeSql = `
-        SELECT tid.*, pm.name as payment_method_name, pm.category_id, ba.name as bank_account_name, ba.type as bank_account_type
+        SELECT tid.*, pm.name as payment_method_name, pm.category_id, pm.is_taxable as is_taxable, pm.is_taxable as payment_method_is_taxable, ba.name as bank_account_name, ba.type as bank_account_type
         FROM transaction_income_details tid
         LEFT JOIN payment_methods pm ON tid.payment_method_id = pm.id
         LEFT JOIN bank_accounts ba ON tid.bank_account_id = ba.id
@@ -461,6 +494,14 @@ class Transaction {
         t.product_items = allProductItems.filter(pi => pi.transaction_id === t.id);
       });
     }
+
+    transactions.forEach(t => {
+      if (t.type === 'income' && t.total_customer && Number(t.total_customer) > 0) {
+        const effPb1 = parseFloat(t.pb1 || 0);
+        const netAmt = Math.max(0, Math.abs(parseFloat(t.amount || 0)) - effPb1);
+        t.apc = Math.round(netAmt / Number(t.total_customer));
+      }
+    });
 
     return transactions;
   }
@@ -594,12 +635,12 @@ class Transaction {
     return results[0].total;
   }
 
-  static async create({ userId, branchId, type, categoryId, amount, totalCustomer = null, apc = null, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, isSavings = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, bankAccountId = null, mitraDetails = [], savingsDetails = [], incomeDetails = [], salesChannelDetails = [], productItems = [], isPb1Payment = false, isDraft = false }) {
+  static async create({ userId, branchId, type, categoryId, amount, totalCustomer = null, apc = null, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, isSavings = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, bankAccountId = null, mitraDetails = [], savingsDetails = [], incomeDetails = [], salesChannelDetails = [], productItems = [], isPb1Payment = false, isDraft = false, externalReferenceId = null }) {
     const transactionId = await dbTransaction(async (conn) => {
       const [result] = await conn.execute(
-        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, total_customer, apc, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, bank_account_id, is_draft, status_deleted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
-        [userId, branchId, type, categoryId, amount, totalCustomer || null, apc || null, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, isSavings || (savingsDetails && savingsDetails.length > 0) || false, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment, bankAccountId, isDraft ? 1 : 0]
+        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, total_customer, apc, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, bank_account_id, is_draft, external_reference_id, status_deleted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
+        [userId, branchId, type, categoryId, amount, totalCustomer || null, apc || null, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, isSavings || (savingsDetails && savingsDetails.length > 0) || false, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment, bankAccountId, isDraft ? 1 : 0, externalReferenceId || null]
       );
 
       const newId = result.insertId;
@@ -696,7 +737,7 @@ class Transaction {
   }
 
   // Update transaction
-  static async update(id, { type, categoryId, amount, totalCustomer, apc, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, incomeDetails, salesChannelDetails, productItems, isPb1Payment, isDraft }) {
+  static async update(id, { type, categoryId, amount, totalCustomer, apc, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, isSavings, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, incomeDetails, salesChannelDetails, productItems, isPb1Payment, isDraft }) {
     await dbTransaction(async (conn) => {
       // Get old transaction data first to reverse allocation
       const [oldRows] = await conn.execute(
@@ -768,9 +809,12 @@ class Transaction {
         updates.push('bank_account_id = ?');
         params.push(bankAccountId);
       }
-      if (savingsDetails !== undefined) {
+      if (isSavings !== undefined) {
         updates.push('is_savings = ?');
-        params.push(savingsDetails && savingsDetails.length > 0);
+        params.push(Boolean(isSavings === true || isSavings === 'true' || isSavings === 1 || (savingsDetails && savingsDetails.length > 0)));
+      } else if (savingsDetails !== undefined) {
+        updates.push('is_savings = ?');
+        params.push(Boolean(savingsDetails && savingsDetails.length > 0));
       }
       if (isPb1Payment !== undefined) {
         updates.push('is_pb1_payment = ?');

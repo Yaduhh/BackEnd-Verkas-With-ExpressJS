@@ -27,6 +27,9 @@ const appConfigRoutes = require('./routes/appConfigRoutes');
 const assistantRoutes = require('./routes/assistantRoutes');
 const salesChannelRoutes = require('./routes/salesChannelRoutes');
 const productRoutes = require('./routes/productRoutes');
+const stockRoutes = require('./routes/stockRoutes');
+const externalApiRoutes = require('./routes/externalApiRoutes');
+const apiKeyRoutes = require('./routes/apiKeyRoutes');
 
 // Initialize app
 const app = express();
@@ -321,6 +324,9 @@ app.use('/api/app-config', appConfigRoutes);
 app.use('/api/assistant', assistantRoutes);
 app.use('/api/sales-channels', salesChannelRoutes);
 app.use('/api/products', productRoutes);
+app.use('/api/stocks', stockRoutes);
+app.use('/api/external/v1', externalApiRoutes);
+app.use('/api/api-keys', apiKeyRoutes);
 
 // 404 handler
 app.use(notFound);

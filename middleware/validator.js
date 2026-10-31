@@ -112,8 +112,20 @@ const validateUpdateTransaction = [
     .optional()
     .trim(),
   body('lampiran')
-    .optional()
-    .trim(),
+    .optional({ nullable: true, checkFalsy: true })
+    .custom((value) => {
+      if (value && Array.isArray(value)) {
+        for (const item of value) {
+          if (!item || (typeof item === 'string' && item.trim() === '')) {
+            throw new Error('Lampiran array cannot contain empty values');
+          }
+          if (typeof item === 'object' && (!item.url || typeof item.url !== 'string')) {
+            throw new Error('Lampiran object must contain a valid url string');
+          }
+        }
+      }
+      return true;
+    }),
   handleValidationErrors
 ];
 

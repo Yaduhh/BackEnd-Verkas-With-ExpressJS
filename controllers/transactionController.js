@@ -8,6 +8,72 @@ const LockedPeriod = require('../models/LockedPeriod');
 const LogService = require('../services/logService');
 const config = require('../config/config');
 const { query } = require('../config/database');
+const axios = require('axios');
+
+// Helper: Notify Bosgil Backend when a PO-linked transaction's refund is created/updated/deleted in VerKas
+const notifyBosgilRefundSync = (transaction) => {
+  try {
+    const extRef = transaction?.external_reference_id;
+    if (!extRef || !String(extRef).startsWith('po_')) return;
+
+    const bosgilBaseUrl = (process.env.BOSGIL_API_BASE_URL || 'http://localhost:3001').replace(/\/+$/, '');
+    axios
+      .post(
+        `${bosgilBaseUrl}/api/verkas-integration/webhook/refund-sync`,
+        {
+          external_reference_id: extRef,
+          transaction_id: transaction.id
+        },
+        { timeout: 8000 }
+      )
+      .catch((err) => {
+        console.error('[Bosgil Refund Sync Webhook Warning]:', err.message);
+      });
+  } catch (e) {
+    console.error('[Bosgil Refund Sync Webhook Error]:', e.message);
+  }
+};
+
+// Helper: Two-Way Sync — Notify Bosgil Backend when a PO-linked or Kas Berjalan Expense transaction is created/updated/deleted/restored in VerKas
+const notifyBosgilTransactionSync = async (action, txOrId) => {
+  try {
+    const txId = typeof txOrId === 'object' ? txOrId?.id : txOrId;
+    const freshTx = txId ? await Transaction.findById(txId, true) : null;
+    const tx = freshTx || (typeof txOrId === 'object' ? txOrId : null);
+
+    if (!tx) return;
+
+    const isLinkedPo =
+      (tx.external_reference_id && String(tx.external_reference_id).startsWith('po_')) ||
+      tx.source_app === 'bosgil';
+    const isKasBerjalanExpense =
+      (tx.type === 'expense' || tx.type === 'pengeluaran') &&
+      Boolean(tx.is_umum) &&
+      !Boolean(tx.is_pb1_payment);
+
+    if (!isLinkedPo && !isKasBerjalanExpense) return;
+
+    const bosgilBaseUrl = (process.env.BOSGIL_API_BASE_URL || 'http://localhost:3001').replace(/\/+$/, '');
+    const res = await axios.post(
+      `${bosgilBaseUrl}/api/verkas-integration/webhook/transaction-sync`,
+      {
+        action,
+        transaction: tx
+      },
+      { timeout: 10000 }
+    );
+
+    const newExtRef = res.data?.data?.external_reference_id;
+    if (newExtRef && !tx.external_reference_id && action !== 'delete') {
+      await query('UPDATE transactions SET external_reference_id = ? WHERE id = ?', [
+        newExtRef,
+        tx.id
+      ]);
+    }
+  } catch (err) {
+    console.error('[Bosgil Transaction Sync Webhook Warning]:', err.message);
+  }
+};
 
 // Helper: Convert lampiran paths to full URLs using BASE_URL from config
 const formatLampiran = (lampiran, req) => {
@@ -62,14 +128,16 @@ const stripBaseUrl = (lampiran, baseUrl) => {
   if (!lampiran) return null;
 
   const cleanPath = (p) => {
-    if (!p) return p;
+    if (!p || p === '[object Object]') return null;
     if (typeof p === 'object' && p.url) {
+      const cleanedUrl = cleanPath(p.url);
+      if (!cleanedUrl) return null;
       return {
         ...p,
-        url: cleanPath(p.url)
+        url: cleanedUrl
       };
     }
-    if (typeof p !== 'string') return p;
+    if (typeof p !== 'string') return null;
     if (p.startsWith('http://') || p.startsWith('https://')) {
       try {
         const url = new URL(p);
@@ -82,13 +150,13 @@ const stripBaseUrl = (lampiran, baseUrl) => {
   };
 
   if (Array.isArray(lampiran)) {
-    return lampiran.map(cleanPath);
+    return lampiran.map(cleanPath).filter(Boolean);
   }
 
   try {
     const parsed = JSON.parse(lampiran);
     if (Array.isArray(parsed)) {
-      return parsed.map(cleanPath);
+      return parsed.map(cleanPath).filter(Boolean);
     }
     return cleanPath(parsed);
   } catch (e) {
@@ -401,14 +469,16 @@ const create = async (req, res, next) => {
     }
 
     const finalAmount = amount !== undefined && amount !== null && amount !== '' ? parseFloat(amount) : 0;
+    const parsedPb1 = (pb1 !== undefined && pb1 !== null && pb1 !== '' && !isNaN(parseFloat(pb1))) ? parseFloat(pb1) : 0;
 
     const parsedTc = (total_customer !== undefined && total_customer !== null && total_customer !== '') 
       ? parseInt(total_customer) 
       : ((tc !== undefined && tc !== null && tc !== '') ? parseInt(tc) : null);
 
     let parsedApc = (apc !== undefined && apc !== null && apc !== '') ? parseFloat(apc) : null;
-    if ((parsedApc === null || isNaN(parsedApc)) && parsedTc && parsedTc > 0) {
-      parsedApc = Math.round(finalAmount / parsedTc);
+    if (parsedTc && parsedTc > 0 && finalAmount > 0) {
+      const netAmountForApc = Math.max(0, finalAmount - parsedPb1);
+      parsedApc = Math.round(netAmountForApc / parsedTc);
     }
 
     // Create transaction
@@ -493,6 +563,11 @@ const create = async (req, res, next) => {
         lampiran: formatLampiran(id.lampiran, req)
       })) : []
     };
+
+    // Two-Way Sync: Notify Bosgil if this is a Kas Berjalan expense transaction
+    if (!isDraft) {
+      notifyBosgilTransactionSync('create', transaction.id);
+    }
 
     res.status(201).json({
       success: true,
@@ -705,8 +780,10 @@ const update = async (req, res, next) => {
       updateData.apc = (apc !== null && apc !== '' && !isNaN(parseFloat(apc))) ? parseFloat(apc) : null;
     } else if (updateData.totalCustomer !== undefined) {
       const currentAmount = updateData.amount !== undefined ? updateData.amount : existing.amount;
+      const currentPb1 = updateData.pb1 !== undefined ? (updateData.pb1 || 0) : (parseFloat(existing.pb1) || 0);
       if (updateData.totalCustomer && updateData.totalCustomer > 0 && currentAmount) {
-        updateData.apc = Math.round(parseFloat(currentAmount) / updateData.totalCustomer);
+        const netAmountForApc = Math.max(0, parseFloat(currentAmount) - currentPb1);
+        updateData.apc = Math.round(netAmountForApc / updateData.totalCustomer);
       } else if (!updateData.totalCustomer) {
         updateData.apc = null;
       }
@@ -861,6 +938,9 @@ const update = async (req, res, next) => {
       })) : []
     };
 
+    // Two-Way Sync: Notify Bosgil on transaction update
+    notifyBosgilTransactionSync('update', transaction);
+
     res.json({
       success: true,
       message: 'Transaction updated successfully',
@@ -928,6 +1008,9 @@ const softDelete = async (req, res, next) => {
     }
 
     const result = await Transaction.softDelete(id);
+
+    // Two-Way Sync: Notify Bosgil on soft delete
+    notifyBosgilTransactionSync('delete', existing);
 
     // Log activity
     LogService.logActivity({
@@ -997,6 +1080,9 @@ const restore = async (req, res, next) => {
     // Reload transaction to get updated data
     const restoredTransaction = await Transaction.findById(id);
 
+    // Two-Way Sync: Notify Bosgil on restore
+    notifyBosgilTransactionSync('restore', restoredTransaction);
+
     // Log activity
     LogService.logActivity({
       userId: req.userId,
@@ -1057,6 +1143,9 @@ const hardDelete = async (req, res, next) => {
     }
 
     const result = await Transaction.hardDelete(id);
+
+    // Two-Way Sync: Notify Bosgil on hard delete
+    notifyBosgilTransactionSync('delete', existing);
 
     res.json({
       success: true,
@@ -1243,6 +1332,9 @@ const approveEdit = async (req, res, next) => {
 
     // Update history status
     await TransactionEdit.updateStatus(id, 'approved', req.userId);
+
+    // Sync approved edit back to Bosgil if linked
+    notifyBosgilTransactionSync('update', id);
 
     // Log activity
     LogService.logActivity({
@@ -2070,6 +2162,9 @@ const approveDelete = async (req, res, next) => {
     // Call softDelete logic directly to perform the actual deletion
     const result = await Transaction.softDelete(id);
 
+    // Two-Way Sync: Notify Bosgil on soft delete
+    notifyBosgilTransactionSync('delete', existing);
+
     // Log activity
     LogService.logActivity({
       userId: req.userId,
@@ -2329,6 +2424,7 @@ const createRefund = async (req, res, next) => {
     }
 
     const updatedTransaction = await Transaction.findById(id);
+    notifyBosgilRefundSync(updatedTransaction || transaction);
 
     return res.status(201).json({
       success: true,
@@ -2492,6 +2588,7 @@ const updateRefund = async (req, res, next) => {
     }
 
     const updatedTransaction = await Transaction.findById(id);
+    notifyBosgilRefundSync(updatedTransaction || transaction);
 
     return res.json({
       success: true,
@@ -2592,6 +2689,7 @@ const deleteRefund = async (req, res, next) => {
     }
 
     const updatedTransaction = await Transaction.findById(id);
+    notifyBosgilRefundSync(updatedTransaction || transaction);
 
     return res.json({
       success: true,
