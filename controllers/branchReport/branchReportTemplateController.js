@@ -35,7 +35,10 @@ const createBagiHasilTemplate = async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'Nama template wajib diisi' });
         }
 
-        if (!templateData || !Array.isArray(templateData) || templateData.length === 0) {
+        const isValidArray = Array.isArray(templateData) && templateData.length > 0;
+        const isValidObject = templateData && typeof templateData === 'object' && !Array.isArray(templateData) && Array.isArray(templateData.order) && templateData.order.length > 0;
+
+        if (!isValidArray && !isValidObject) {
             return res.status(400).json({ success: false, message: 'Data template tidak boleh kosong' });
         }
 
@@ -145,7 +148,10 @@ const createExpenseOrderTemplate = async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'Nama template wajib diisi' });
         }
 
-        if (!templateData || !Array.isArray(templateData) || templateData.length === 0) {
+        const isValidArray = Array.isArray(templateData) && templateData.length > 0;
+        const isValidObject = templateData && typeof templateData === 'object' && !Array.isArray(templateData) && Array.isArray(templateData.order) && templateData.order.length > 0;
+
+        if (!isValidArray && !isValidObject) {
             return res.status(400).json({ success: false, message: 'Data template tidak boleh kosong' });
         }
 

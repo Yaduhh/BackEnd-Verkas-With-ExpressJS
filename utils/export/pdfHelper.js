@@ -1272,12 +1272,12 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
     regularExpenses.forEach(ex => {
         checkNewPage(rowH);
-        const letter = letters[expLetterIdx++] || String(expLetterIdx);
+        const isAdj = ex.is_adjustment;
+        const letter = isAdj ? '' : (letters[expLetterIdx++] || String(expLetterIdx));
         const amt = Number(ex.total) || 0;
         const percStr = formatPercent(amt, totalPemasukanFinal);
-        const isAdj = ex.is_adjustment;
 
-        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: isAdj ? '' : letter, font: fontBold, fontSize: 8.5, align: 'center' });
+        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: letter, font: fontBold, fontSize: 8.5, align: 'left', paddingLeft: 6 });
         drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: isAdj ? `  — ${ex.category_name}` : ex.category_name, font: isAdj ? fontRegular : fontBold, fontSize: 8.5, paddingLeft: 8 });
         drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: amt > 0, rpAmount: amt > 0 ? formatCurrencyForPDF(amt) : '-', font: isAdj ? fontRegular : fontBold, fontSize: 8.5 });
         drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: isAdj ? fontRegular : fontBold, fontSize: 8.5, align: 'center' });
@@ -1292,7 +1292,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
         // Parent Row for Simpanan (Bold, white background)
         checkNewPage(rowH);
-        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: simpananLetter, font: fontBold, fontSize: 8.5, align: 'center' });
+        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: simpananLetter, font: fontBold, fontSize: 8.5, align: 'left', paddingLeft: 6 });
         drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: 'Total Simpanan', font: fontBold, fontSize: 8.5, paddingLeft: 8 });
         drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(totalSimpananAmt), font: fontBold, fontSize: 8.5 });
         drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: totalSimpananPerc, font: fontBold, fontSize: 8.5, align: 'center' });
@@ -1306,15 +1306,23 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
             const sPerc = formatPercent(sAmt, totalPemasukanFinal);
 
             let sTitle = sx.category_name;
-            const wDays = workingDays || 30;
-            if (wDays > 0 && sAmt > 0 && !sTitle.includes('@')) {
-                const dailyRate = Math.round(sAmt / wDays);
-                if (dailyRate * wDays === sAmt || Math.abs(dailyRate * wDays - sAmt) < wDays) {
-                    sTitle = `${sx.category_name} ( ${formatCurrencyForPDF(dailyRate)} @ ${wDays} Hari )`;
+            const customNote = typeof sx.savings_note === 'string' ? sx.savings_note.trim() : '';
+            const allocAmt = Number(sx.allocation_amount) || 0;
+            const allocDays = Number(sx.allocation_days) || 0;
+            if (customNote) {
+                const cleanNote = customNote.replace(/^\(\s*|\s*\)$/g, '');
+                sTitle = `${sx.category_name} ( ${cleanNote} )`;
+            } else if (!sTitle.includes('@')) {
+                if (allocAmt > 0 && allocDays > 0) {
+                    sTitle = `${sx.category_name} ( ${formatCurrencyForPDF(allocAmt)} @ ${allocDays} Hari )`;
+                } else if (allocAmt > 0) {
+                    sTitle = `${sx.category_name} ( ${formatCurrencyForPDF(allocAmt)} )`;
+                } else if (allocDays > 0) {
+                    sTitle = `${sx.category_name} ( ${allocDays} Hari )`;
                 }
             }
 
-            drawCell(margin, y, wNo, rowH, { bg: '#faebe5', text: subCode, font: fontRegular, fontSize: 8, align: 'center' });
+            drawCell(margin, y, wNo, rowH, { bg: '#faebe5', text: subCode, font: fontRegular, fontSize: 8, align: 'right', paddingRight: 6 });
             drawCell(margin + wNo, y, wName, rowH, { bg: '#faebe5', text: sTitle, font: fontRegular, fontSize: 8, paddingLeft: 8 });
             drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#faebe5', rpPrefix: true, rpAmount: formatCurrencyForPDF(sAmt), font: fontRegular, fontSize: 8 });
             drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#faebe5', text: sPerc, font: fontRegular, fontSize: 8, align: 'center' });

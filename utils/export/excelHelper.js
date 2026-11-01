@@ -688,13 +688,17 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
     const salesChannelsList = data.sales_channels || [];
     const totalSalesChannels = salesChannelsList.reduce((sum, sc) => sum + (Number(sc.amount) || 0), 0);
 
-    const renderDataRow = (noVal, nameVal, amtVal, isBold = true, bgArgb = 'FFFFFFFF', indent = 1) => {
+    const renderDataRow = (noVal, nameVal, amtVal, isBold = true, bgArgb = 'FFFFFFFF', indent = 1, noAlign = 'center') => {
         worksheet.getRow(currentRow).height = 18;
 
         const cellA = worksheet.getCell(`A${currentRow}`);
         cellA.value = noVal !== undefined && noVal !== null ? String(noVal) : '';
         cellA.font = { name: fontName, size: 9, bold: isBold, color: { argb: 'FF000000' } };
-        cellA.alignment = { horizontal: 'center', vertical: 'middle' };
+        cellA.alignment = {
+            horizontal: noAlign,
+            vertical: 'middle',
+            ...(noAlign === 'left' ? { indent: 1 } : {})
+        };
 
         const cellB = worksheet.getCell(`B${currentRow}`);
         cellB.value = nameVal;
@@ -845,16 +849,17 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
     let expLetterIdx = 0;
 
     regularExpenses.forEach(ex => {
-        const letter = letters[expLetterIdx++] || String(expLetterIdx);
-        const amt = Number(ex.total) || 0;
         const isAdj = ex.is_adjustment;
+        const letter = isAdj ? '' : (letters[expLetterIdx++] || String(expLetterIdx));
+        const amt = Number(ex.total) || 0;
         renderDataRow(
-            isAdj ? '' : letter,
+            letter,
             isAdj ? `  — ${ex.category_name}` : ex.category_name,
             amt,
             !isAdj,
             'FFFFFFFF',
-            isAdj ? 2 : 1
+            isAdj ? 2 : 1,
+            'left'
         );
     });
 
@@ -864,22 +869,31 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
         const simpananLetter = letters[expLetterIdx++] || 'H';
 
         // Parent Row for Simpanan
-        renderDataRow(simpananLetter, 'Total Simpanan', totalSimpananAmt, true, 'FFFFFFFF');
+        renderDataRow(simpananLetter, 'Total Simpanan', totalSimpananAmt, true, 'FFFFFFFF', 1, 'left');
 
         // Sub-items for Simpanan (Soft Peach background #FAEBE5)
         simpananExpenses.forEach((sx, sIdx) => {
             const subCode = `${simpananLetter.toLowerCase()}${sIdx + 1}`;
             const sAmt = Number(sx.total) || 0;
             let sTitle = sx.category_name;
-            const wDays = workingDays || 30;
-            if (wDays > 0 && sAmt > 0 && !sTitle.includes('@')) {
-                const dailyRate = Math.round(sAmt / wDays);
-                if (dailyRate * wDays === sAmt || Math.abs(dailyRate * wDays - sAmt) < wDays) {
-                    const formattedRate = new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0 }).format(dailyRate);
-                    sTitle = `${sx.category_name} ( ${formattedRate} @ ${wDays} Hari )`;
+            const customNote = typeof sx.savings_note === 'string' ? sx.savings_note.trim() : '';
+            const allocAmt = Number(sx.allocation_amount) || 0;
+            const allocDays = Number(sx.allocation_days) || 0;
+            if (customNote) {
+                const cleanNote = customNote.replace(/^\(\s*|\s*\)$/g, '');
+                sTitle = `${sx.category_name} ( ${cleanNote} )`;
+            } else if (!sTitle.includes('@')) {
+                if (allocAmt > 0 && allocDays > 0) {
+                    const formattedRate = new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0 }).format(allocAmt);
+                    sTitle = `${sx.category_name} ( ${formattedRate} @ ${allocDays} Hari )`;
+                } else if (allocAmt > 0) {
+                    const formattedRate = new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0 }).format(allocAmt);
+                    sTitle = `${sx.category_name} ( ${formattedRate} )`;
+                } else if (allocDays > 0) {
+                    sTitle = `${sx.category_name} ( ${allocDays} Hari )`;
                 }
             }
-            renderDataRow(subCode, sTitle, sAmt, false, 'FFFAEBE5', 2);
+            renderDataRow(subCode, sTitle, sAmt, false, 'FFFAEBE5', 2, 'right');
         });
     }
 

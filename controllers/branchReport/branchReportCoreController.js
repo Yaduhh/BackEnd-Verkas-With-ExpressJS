@@ -3,6 +3,7 @@ const BranchReport = require('../../models/BranchReport');
 const Category = require('../../models/Category');
 const Transaction = require('../../models/Transaction');
 const { query } = require('../../config/database');
+const { computeBranchSystemSalesChannels } = require('../../utils/salesChannelHelper');
 
 /**
  * GET /api/branch-reports/:branchId?month=2&year=2026
@@ -65,7 +66,15 @@ const getReport = async (req, res, next) => {
                         JOIN payment_methods pm ON tid.payment_method_id = pm.id
                         WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
                     ), 0)
-                ) as taxable_amount
+                ) as taxable_amount,
+                SUM(
+                    COALESCE((
+                        SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), t.pb1, 0)
+                ) as total_pb1
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
              LEFT JOIN (
@@ -99,7 +108,10 @@ const getReport = async (req, res, next) => {
 
         const systemOmzetGross = (parseFloat(incomeResult[0].total_gross) || 0) - pastIncomeRefunds;
         const systemTaxable = parseFloat(incomeResult[0].taxable_amount) || 0;
-        const systemOmzet = systemOmzetGross - Math.round((systemTaxable * 10) / 110);
+        const systemPb1 = incomeResult[0]?.total_pb1 !== undefined && incomeResult[0]?.total_pb1 !== null
+            ? parseFloat(incomeResult[0].total_pb1) || 0
+            : Math.round((systemTaxable * 10) / 110);
+        const systemOmzet = systemOmzetGross - systemPb1;
 
         // 2. Pengeluaran Breakdown (Net per Category, Period-Aware regarding refunds)
         // SYNC WITH ADD/EDIT: Use (paid_amount if debt else amount) + pb1 for regular expenses
@@ -421,9 +433,40 @@ const getReport = async (req, res, next) => {
                     [branchId]
                 );
                 if (defaultTemplates.length > 0) {
-                    report.expense_order = typeof defaultTemplates[0].template_data === 'string'
+                    const parsedTpl = typeof defaultTemplates[0].template_data === 'string'
                         ? JSON.parse(defaultTemplates[0].template_data)
                         : defaultTemplates[0].template_data;
+
+                    if (Array.isArray(parsedTpl)) {
+                        report.expense_order = parsedTpl;
+                    } else if (parsedTpl && typeof parsedTpl === 'object') {
+                        if (Array.isArray(parsedTpl.order)) {
+                            report.expense_order = parsedTpl.order;
+                        }
+                        if (parsedTpl.savingsAllocations && typeof parsedTpl.savingsAllocations === 'object') {
+                            const existingAdjs = Array.isArray(report.expense_adjustments) ? report.expense_adjustments : [];
+                            const hasExistingSavingsMeta = existingAdjs.some(a => a && (a.is_savings_meta || a.name === '__SAVINGS_META__'));
+                            if (!hasExistingSavingsMeta) {
+                                const tplSavingsMeta = Object.entries(parsedTpl.savingsAllocations).map(([catName, val]) => {
+                                    const savingsNote = typeof val === 'string'
+                                        ? val.trim()
+                                        : (val && typeof val === 'object'
+                                            ? (typeof val.note === 'string'
+                                                ? val.note.trim()
+                                                : (val.amount && val.days ? `${val.amount} @ ${val.days} Hari` : (val.amount || '')))
+                                            : '');
+                                    return {
+                                        parent_category: catName,
+                                        name: '__SAVINGS_META__',
+                                        amount: 0,
+                                        is_savings_meta: true,
+                                        savings_note: savingsNote
+                                    };
+                                });
+                                report.expense_adjustments = [...existingAdjs, ...tplSavingsMeta];
+                            }
+                        }
+                    }
                 }
             } catch (e) {
                 console.error('Error applying default expense order template:', e);
@@ -432,35 +475,8 @@ const getReport = async (req, res, next) => {
 
         const finalProfit = finalOmzetTotal - systemPengeluaran;
 
-        // 6. Aggregate Sales Channels from recorded transactions in this period (NET after PB1)
-        const systemSalesChannelsResult = await query(
-            `SELECT 
-                sc.id as sales_channel_id,
-                sc.name as name,
-                COALESCE(SUM(tsc.amount), 0) as gross_amount,
-                COALESCE(SUM(
-                    CASE 
-                        WHEN pm.is_taxable = 1 THEN tsc.amount - ROUND((tsc.amount * 10) / 110)
-                        ELSE tsc.amount
-                    END
-                ), 0) as amount
-             FROM sales_channels sc
-             JOIN transaction_sales_channels tsc ON sc.id = tsc.sales_channel_id
-             JOIN transactions t ON tsc.transaction_id = t.id
-             LEFT JOIN payment_methods pm ON COALESCE(
-                 tsc.payment_method_id,
-                 (SELECT tid.payment_method_id FROM transaction_income_details tid WHERE tid.transaction_id = t.id LIMIT 1)
-             ) = pm.id
-             WHERE t.branch_id = ?
-               AND t.transaction_date BETWEEN ? AND ?
-               AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-               AND t.is_umum = true
-               AND t.type = 'income'
-             GROUP BY sc.id, sc.name
-             HAVING amount > 0
-             ORDER BY amount DESC, sc.name ASC`,
-            [branchId, startDate, endDate]
-        );
+        // 6. Aggregate Sales Channels from recorded transactions in this period (NET after PB1, per-transaction reconciled)
+        const systemSalesChannels = await computeBranchSystemSalesChannels(branchId, startDate, endDate);
 
         // Fetch active master sales channels for dropdown/selection
         const masterSalesChannelsResult = await query(
@@ -506,24 +522,6 @@ const getReport = async (req, res, next) => {
         const taxableWithoutChannels = parseFloat(omzetWithoutChannelsResult[0]?.taxable_without_channel) || 0;
         const taxWithoutChannels = Math.round((taxableWithoutChannels * 10) / 110);
         const omzetWithoutChannels = Math.max(0, grossWithoutChannels - taxWithoutChannels);
-
-        const systemSalesChannels = systemSalesChannelsResult.map(s => ({
-            sales_channel_id: s.sales_channel_id,
-            name: s.name,
-            amount: parseFloat(s.amount) || 0,
-            gross_amount: parseFloat(s.gross_amount) || 0
-        }));
-
-        // Auto-reconcile minor rounding discrepancy (<= 2 Rupiah) between omzetNet and sum of channels
-        const omzetNetTarget = groupedIncome['OMZET PENJUALAN']?.total_net || 0;
-        const totalChannelAmount = systemSalesChannels.reduce((sum, s) => sum + s.amount, 0);
-        const channelDiff = omzetNetTarget - totalChannelAmount;
-        if (Math.abs(channelDiff) > 0 && Math.abs(channelDiff) <= 2 && systemSalesChannels.length > 0) {
-            const targetChannel = systemSalesChannels.find(s => s.gross_amount !== s.amount && Math.abs(((s.gross_amount * 10) / 110) % 1) > 0.001) || systemSalesChannels[systemSalesChannels.length - 1];
-            if (targetChannel) {
-                targetChannel.amount = Math.max(0, targetChannel.amount + channelDiff);
-            }
-        }
 
         return res.json({
             success: true,
@@ -607,7 +605,15 @@ const updateReport = async (req, res, next) => {
                         JOIN payment_methods pm ON tid.payment_method_id = pm.id
                         WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
                     ), 0)
-                ) as taxable_amount
+                ) as taxable_amount,
+                SUM(
+                    COALESCE((
+                        SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), t.pb1, 0)
+                ) as total_pb1
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
              LEFT JOIN (
@@ -641,7 +647,10 @@ const updateReport = async (req, res, next) => {
 
         const systemOmzetGross = (parseFloat(incomeResult[0].total_gross) || 0) - pastIncomeRefunds;
         const systemTaxable = parseFloat(incomeResult[0].taxable_amount) || 0;
-        const systemOmzet = systemOmzetGross - Math.round((systemTaxable * 10) / 110);
+        const systemPb1 = incomeResult[0]?.total_pb1 !== undefined && incomeResult[0]?.total_pb1 !== null
+            ? parseFloat(incomeResult[0].total_pb1) || 0
+            : Math.round((systemTaxable * 10) / 110);
+        const systemOmzet = systemOmzetGross - systemPb1;
 
         // Recalculate net expense consistently with getReport logic
         const folderResult = await query(
@@ -763,35 +772,8 @@ const updateReport = async (req, res, next) => {
 
         const finalProfit = finalOmzetTotal - systemPengeluaran;
 
-        // Fetch system sales channels (NET after PB1)
-        const systemSalesChannelsResult = await query(
-            `SELECT 
-                sc.id as sales_channel_id,
-                sc.name as name,
-                COALESCE(SUM(tsc.amount), 0) as gross_amount,
-                COALESCE(SUM(
-                    CASE 
-                        WHEN pm.is_taxable = 1 THEN tsc.amount - ROUND((tsc.amount * 10) / 110)
-                        ELSE tsc.amount
-                    END
-                ), 0) as amount
-             FROM sales_channels sc
-             JOIN transaction_sales_channels tsc ON sc.id = tsc.sales_channel_id
-             JOIN transactions t ON tsc.transaction_id = t.id
-             LEFT JOIN payment_methods pm ON COALESCE(
-                 tsc.payment_method_id,
-                 (SELECT tid.payment_method_id FROM transaction_income_details tid WHERE tid.transaction_id = t.id LIMIT 1)
-             ) = pm.id
-             WHERE t.branch_id = ?
-               AND t.transaction_date BETWEEN ? AND ?
-               AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-               AND t.is_umum = true
-               AND t.type = 'income'
-             GROUP BY sc.id, sc.name
-             HAVING amount > 0
-             ORDER BY amount DESC, sc.name ASC`,
-            [branchId, startDate, endDate]
-        );
+        // Fetch system sales channels (NET after PB1, per-transaction reconciled)
+        const systemSalesChannels = await computeBranchSystemSalesChannels(branchId, startDate, endDate);
 
         const masterSalesChannelsResult = await query(
             `SELECT id, name, is_active FROM sales_channels
@@ -801,22 +783,6 @@ const updateReport = async (req, res, next) => {
              ORDER BY name ASC`,
             [branchId]
         );
-
-        const systemSalesChannels = systemSalesChannelsResult.map(s => ({
-            sales_channel_id: s.sales_channel_id,
-            name: s.name,
-            amount: parseFloat(s.amount) || 0,
-            gross_amount: parseFloat(s.gross_amount) || 0
-        }));
-
-        const totalChannelAmount = systemSalesChannels.reduce((sum, s) => sum + s.amount, 0);
-        const channelDiff = systemOmzet - totalChannelAmount;
-        if (Math.abs(channelDiff) > 0 && Math.abs(channelDiff) <= 2 && systemSalesChannels.length > 0) {
-            const targetChannel = systemSalesChannels.find(s => s.gross_amount !== s.amount && Math.abs(((s.gross_amount * 10) / 110) % 1) > 0.001) || systemSalesChannels[systemSalesChannels.length - 1];
-            if (targetChannel) {
-                targetChannel.amount = Math.max(0, targetChannel.amount + channelDiff);
-            }
-        }
 
         return res.json({
             success: true,
@@ -878,7 +844,15 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                         JOIN payment_methods pm ON tid.payment_method_id = pm.id
                         WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
                     ), 0)
-                ) as taxable_amount
+                ) as taxable_amount,
+                SUM(
+                    COALESCE((
+                        SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                        FROM transaction_income_details tid
+                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                    ), t.pb1, 0)
+                ) as total_pb1
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
              LEFT JOIN (
@@ -912,7 +886,10 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
 
         const systemOmzetGross = (parseFloat(incomeResult[0].total_gross) || 0) - pastIncomeRefunds;
         const systemTaxable = parseFloat(incomeResult[0].taxable_amount) || 0;
-        const systemOmzet = systemOmzetGross - Math.round((systemTaxable * 10) / 110);
+        const systemPb1 = incomeResult[0]?.total_pb1 !== undefined && incomeResult[0]?.total_pb1 !== null
+            ? parseFloat(incomeResult[0].total_pb1) || 0
+            : Math.round((systemTaxable * 10) / 110);
+        const systemOmzet = systemOmzetGross - systemPb1;
 
         const expenseBreakdown = await query(
             `SELECT category_name, SUM(total) as total
@@ -1117,8 +1094,25 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
 
         // APPLY EXPENSE ADJUSTMENTS AND SORTING FOR PDF
         const adjustmentsByParent = {};
+        const savingsMetaByParent = {};
         if (report.expense_adjustments && report.expense_adjustments.length > 0) {
             report.expense_adjustments.forEach(adj => {
+                if (adj.is_savings_meta || adj.name === '__SAVINGS_META__') {
+                    let savingsNote = '';
+                    if (typeof adj.savings_note === 'string') {
+                        savingsNote = adj.savings_note.trim();
+                    } else if (Number(adj.allocation_amount) > 0 && Number(adj.allocation_days) > 0) {
+                        const formattedAmt = new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0 }).format(Number(adj.allocation_amount));
+                        savingsNote = `${formattedAmt} @ ${Number(adj.allocation_days)} Hari`;
+                    }
+                    savingsMetaByParent[adj.parent_category] = {
+                        savings_note: savingsNote,
+                        allocation_amount: Number(adj.allocation_amount) || 0,
+                        allocation_days: Number(adj.allocation_days) || 0,
+                        has_savings_meta: true
+                    };
+                    return;
+                }
                 if (!adjustmentsByParent[adj.parent_category]) {
                     adjustmentsByParent[adj.parent_category] = [];
                 }
@@ -1151,12 +1145,19 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
             const adjs = adjustmentsByParent[item.category_name] || [];
             const adjTotal = adjs.reduce((sum, a) => sum + (parseFloat(a.amount) || 0), 0);
             const parentTotal = (parseFloat(item.total) || 0) - adjTotal;
+            const sMeta = savingsMetaByParent[item.category_name];
 
             // Only add parent if it has value
             if (Math.abs(parentTotal) > 0.01) {
                 processedExpenseBreakdown.push({
                     category_name: item.category_name,
-                    total: parentTotal
+                    total: parentTotal,
+                    ...(sMeta ? {
+                        savings_note: sMeta.savings_note,
+                        allocation_amount: sMeta.allocation_amount,
+                        allocation_days: sMeta.allocation_days,
+                        has_savings_meta: true
+                    } : {})
                 });
             }
 
@@ -1226,36 +1227,9 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
             }
         });
 
-        const systemSalesChannelsResult = await query(
-            `SELECT 
-                sc.name,
-                COALESCE(SUM(
-                    CASE 
-                        WHEN pm.is_taxable = 1 THEN tsc.amount - ROUND((tsc.amount * 10) / 110)
-                        ELSE tsc.amount
-                    END
-                ), 0) as amount,
-                SUM(tsc.amount) as gross_amount
-             FROM sales_channels sc
-             JOIN transaction_sales_channels tsc ON sc.id = tsc.sales_channel_id
-             JOIN transactions t ON tsc.transaction_id = t.id
-             LEFT JOIN payment_methods pm ON COALESCE(
-                 tsc.payment_method_id,
-                 (SELECT tid.payment_method_id FROM transaction_income_details tid WHERE tid.transaction_id = t.id LIMIT 1)
-             ) = pm.id
-             WHERE t.branch_id = ?
-               AND t.transaction_date BETWEEN ? AND ?
-               AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-               AND t.is_umum = true
-               AND t.type = 'income'
-             GROUP BY sc.id, sc.name
-             HAVING amount > 0
-             ORDER BY amount DESC, sc.name ASC`,
-            [branchId, startDate, endDate]
-        );
+        const systemSalesChannelsResult = await computeBranchSystemSalesChannels(branchId, startDate, endDate);
 
         const sysNetMap = new Map(systemSalesChannelsResult.map(s => [s.name.toLowerCase().trim(), parseFloat(s.amount) || 0]));
-        const sysGrossMap = new Map(systemSalesChannelsResult.map(s => [s.name.toLowerCase().trim(), parseFloat(s.gross_amount) || 0]));
 
         let exportSalesChannels = report.sales_channels;
         if (!exportSalesChannels || exportSalesChannels.length === 0) {
@@ -1265,14 +1239,17 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
         } else {
             exportSalesChannels = exportSalesChannels.map(sc => {
                 const key = (sc.name || sc.channel_name || '').toLowerCase().trim();
-                const savedAmt = Number(sc.amount) || 0;
-                const sysGross = sysGrossMap.get(key);
                 const sysNet = sysNetMap.get(key);
-                // If saved amount was equal to gross amount from system, update it to net amount
-                if (sysGross !== undefined && Math.abs(savedAmt - sysGross) < 1 && sysNet !== undefined) {
+                if (sysNet !== undefined && sysNet > 0) {
                     return { ...sc, amount: sysNet };
                 }
                 return sc;
+            });
+            systemSalesChannelsResult.forEach(s => {
+                const key = s.name.toLowerCase().trim();
+                if (!exportSalesChannels.some(ec => (ec.name || ec.channel_name || '').toLowerCase().trim() === key)) {
+                    exportSalesChannels.push({ name: s.name, amount: parseFloat(s.amount) || 0 });
+                }
             });
         }
 
@@ -1303,7 +1280,7 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
         return {
             branch,
             report,
-            workingDays: report.working_days || workingDays,
+            workingDays: workingDays || report.working_days || 25,
             dataForPdf,
             branchCodeOrName: (branch.code && branch.code.trim()) ? branch.code.trim() : branch.name,
             selectedMonthDate: new Date(year, month - 1, 1)

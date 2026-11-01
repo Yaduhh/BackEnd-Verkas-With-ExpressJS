@@ -3,6 +3,7 @@ const Branch = require('../../models/Branch');
 const BranchReport = require('../../models/BranchReport');
 const GroupReport = require('../../models/GroupReport');
 const { query } = require('../../config/database');
+const { computeBranchSystemSalesChannels } = require('../../utils/salesChannelHelper');
 const { 
     exportFinancialReportToPDF, 
     exportFinancialReportToExcel, 
@@ -564,33 +565,8 @@ const getGroupFinancialReport = async (req, res, next) => {
                 [endDate, branchId, startDate, endDate]
             );
 
-            // 6. Sales Channels
-            const systemSalesChannelsResult = await query(
-                `SELECT 
-                    sc.name,
-                    SUM(tsc.amount) as gross_amount,
-                    SUM(
-                        CASE 
-                            WHEN pm.is_taxable = 1 THEN ROUND((tsc.amount * 100) / 110)
-                            ELSE tsc.amount 
-                        END
-                    ) as amount
-                 FROM transaction_sales_channels tsc
-                 JOIN sales_channels sc ON tsc.sales_channel_id = sc.id
-                 JOIN transactions t ON tsc.transaction_id = t.id
-                 LEFT JOIN (
-                     SELECT tid.transaction_id, MAX(pm.is_taxable) as is_taxable
-                     FROM transaction_income_details tid
-                     JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                     GROUP BY tid.transaction_id
-                 ) pm ON t.id = pm.transaction_id
-                 WHERE t.branch_id = ?
-                   AND t.transaction_date BETWEEN ? AND ?
-                   AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-                   AND t.is_umum = true
-                 GROUP BY sc.name`,
-                [branchId, startDate, endDate]
-            );
+            // 6. Sales Channels (per-transaction PB1 reconciled)
+            const systemSalesChannelsResult = await computeBranchSystemSalesChannels(branchId, startDate, endDate);
 
             const masterSalesChannelsResult = await query(
                 `SELECT name FROM sales_channels WHERE branch_id = ? AND status_deleted = 0 AND is_active = 1`,
@@ -738,11 +714,41 @@ const getGroupFinancialReport = async (req, res, next) => {
         const piutangLabel = `PIUTANG ${new Date(year, month - 1, 1).toLocaleDateString('id-ID', { month: 'long', year: 'numeric' }).toUpperCase()}`;
         const isPiutangDisabled = disabledList.includes(piutangLabel) || disabledList.includes('PIUTANG');
 
-        // Map is_active into expenseBreakdown
-        const processedExpenseBreakdown = expenseBreakdown.map(item => ({
-            ...item,
-            is_active: !disabledList.includes(item.category_name)
-        }));
+        const savingsMetaByParent = {};
+        if (savedGroupReport?.expense_adjustments && Array.isArray(savedGroupReport.expense_adjustments)) {
+            savedGroupReport.expense_adjustments.forEach(adj => {
+                if (adj.is_savings_meta || adj.name === '__SAVINGS_META__') {
+                    let savingsNote = '';
+                    if (typeof adj.savings_note === 'string') {
+                        savingsNote = adj.savings_note.trim();
+                    } else if (Number(adj.allocation_amount) > 0 && Number(adj.allocation_days) > 0) {
+                        const formattedAmt = new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0 }).format(Number(adj.allocation_amount));
+                        savingsNote = `${formattedAmt} @ ${Number(adj.allocation_days)} Hari`;
+                    }
+                    savingsMetaByParent[adj.parent_category] = {
+                        savings_note: savingsNote,
+                        allocation_amount: Number(adj.allocation_amount) || 0,
+                        allocation_days: Number(adj.allocation_days) || 0,
+                        has_savings_meta: true
+                    };
+                }
+            });
+        }
+
+        // Map is_active and savings meta into expenseBreakdown
+        const processedExpenseBreakdown = expenseBreakdown.map(item => {
+            const sMeta = savingsMetaByParent[item.category_name];
+            return {
+                ...item,
+                is_active: !disabledList.includes(item.category_name),
+                ...(sMeta ? {
+                    savings_note: sMeta.savings_note,
+                    allocation_amount: sMeta.allocation_amount,
+                    allocation_days: sMeta.allocation_days,
+                    has_savings_meta: true
+                } : {})
+            };
+        });
 
         // Map is_active into incomeBreakdown
         const processedIncomeBreakdown = incomeBreakdown.map(item => ({

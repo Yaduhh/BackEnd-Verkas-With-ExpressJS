@@ -100,6 +100,7 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
       LEFT JOIN users u ON t.user_id = u.id
       WHERE t.branch_id = ? 
         AND t.status_deleted = 0
+        AND (t.is_draft = 0 OR t.is_draft IS NULL)
         AND t.type = 'income'
         AND t.transaction_date >= ?
         AND t.transaction_date <= ?
@@ -285,14 +286,35 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
           g.net_amount = g.gross_amount - g.pb1_amount;
         });
 
-        // 2. Reconcile PB1 differences between channel groups and t.pb1 (Single Source of Truth)
-        const tPb1 = parseFloat(t.pb1 || 0);
+        // 2. Reconcile PB1 differences between channel groups and authoritative transaction PB1 (Single Source of Truth)
+        const taxableIncomeRows = (t.income_details || []).filter(
+          (idRow) => idRow.is_taxable == 1 || idRow.is_taxable === true
+        );
+        const taxableIncomeSum = taxableIncomeRows.reduce(
+          (s, idRow) => s + (parseFloat(idRow.amount_app) || 0),
+          0
+        );
+        const effectiveTrxPb1 =
+          taxableIncomeRows.length > 0
+            ? Math.round((taxableIncomeSum * 10) / 110)
+            : parseFloat(t.pb1 || 0);
+
         const scPb1Sum = groupedChannels.reduce((sum, g) => sum + g.pb1_amount, 0);
         const taxableGroups = groupedChannels.filter(g => g.taxable_gross > 0);
 
-        if (tPb1 > 0 && Math.abs(tPb1 - scPb1Sum) > 0 && Math.abs(tPb1 - scPb1Sum) <= 2 && taxableGroups.length > 0) {
-          taxableGroups.sort((a, b) => b.taxable_gross - a.taxable_gross);
-          const diff = tPb1 - scPb1Sum;
+        if (
+          effectiveTrxPb1 > 0 &&
+          Math.abs(effectiveTrxPb1 - scPb1Sum) > 0 &&
+          Math.abs(effectiveTrxPb1 - scPb1Sum) <= 5 &&
+          taxableGroups.length > 0
+        ) {
+          const diff = effectiveTrxPb1 - scPb1Sum;
+          taxableGroups.sort((a, b) => {
+            const fracA = ((a.taxable_gross * 10) / 110 - a.pb1_amount) * Math.sign(diff);
+            const fracB = ((b.taxable_gross * 10) / 110 - b.pb1_amount) * Math.sign(diff);
+            if (Math.abs(fracB - fracA) > 0.0001) return fracB - fracA;
+            return b.taxable_gross - a.taxable_gross;
+          });
           taxableGroups[0].pb1_amount += diff;
           taxableGroups[0].net_amount = taxableGroups[0].gross_amount - taxableGroups[0].pb1_amount;
         }
