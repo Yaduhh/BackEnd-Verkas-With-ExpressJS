@@ -142,13 +142,21 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
       const trxIds = transactions.map(t => t.id);
       const placeholders = trxIds.map(() => '?').join(',');
 
-      // 1. Transaction sales channels
+      // 1. Transaction sales channels (prioritize tid_direct.payment_method_id as single source of truth)
       const tscRows = await query(
         `SELECT 
             tsc.id,
             tsc.transaction_id, 
             tsc.sales_channel_id, 
-            tsc.payment_method_id,
+            COALESCE(
+                tid_direct.payment_method_id,
+                tsc.payment_method_id,
+                CASE
+                    WHEN (SELECT COUNT(*) FROM transaction_income_details tid_c WHERE tid_c.transaction_id = t.id) = 1
+                    THEN (SELECT tid.payment_method_id FROM transaction_income_details tid WHERE tid.transaction_id = t.id LIMIT 1)
+                    ELSE NULL
+                END
+            ) AS payment_method_id,
             tsc.amount AS gross_amount,
             CASE 
                 WHEN pm.is_taxable = 1 THEN tsc.amount - ROUND((tsc.amount * 10) / 110)
@@ -167,8 +175,8 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
          JOIN transactions t ON tsc.transaction_id = t.id
          LEFT JOIN transaction_income_details tid_direct ON tsc.transaction_income_detail_id = tid_direct.id
          LEFT JOIN payment_methods pm ON COALESCE(
-             tsc.payment_method_id,
              tid_direct.payment_method_id,
+             tsc.payment_method_id,
              CASE
                  WHEN (SELECT COUNT(*) FROM transaction_income_details tid_c WHERE tid_c.transaction_id = t.id) = 1
                  THEN (SELECT tid.payment_method_id FROM transaction_income_details tid WHERE tid.transaction_id = t.id LIMIT 1)

@@ -69,12 +69,16 @@ class Transaction {
       }
     }
 
-    // Fetch sales channel details
+    // Fetch sales channel details (prioritize linked transaction_income_details payment_method_id as single source of truth)
     const salesChannelDetails = await query(
-      `SELECT tsc.*, sc.name as sales_channel_name, pm.name as payment_method_name, pm.is_taxable as payment_method_is_taxable
+      `SELECT tsc.id, tsc.transaction_id, tsc.sales_channel_id,
+              COALESCE(tid_direct.payment_method_id, tsc.payment_method_id) as payment_method_id,
+              tsc.transaction_income_detail_id, tsc.amount, tsc.created_at, tsc.updated_at,
+              sc.name as sales_channel_name, pm.name as payment_method_name, pm.is_taxable as payment_method_is_taxable
        FROM transaction_sales_channels tsc
        JOIN sales_channels sc ON tsc.sales_channel_id = sc.id
-       LEFT JOIN payment_methods pm ON tsc.payment_method_id = pm.id
+       LEFT JOIN transaction_income_details tid_direct ON tsc.transaction_income_detail_id = tid_direct.id
+       LEFT JOIN payment_methods pm ON COALESCE(tid_direct.payment_method_id, tsc.payment_method_id) = pm.id
        WHERE tsc.transaction_id = ?`,
       [id]
     );
@@ -698,10 +702,13 @@ class Transaction {
             let matchedIncomeDetailId = detail.transaction_income_detail_id || null;
             let matchedPaymentMethodId = detail.payment_method_id || null;
 
-            if (!matchedIncomeDetailId && detail.income_detail_index !== undefined && createdIncomeDetails[detail.income_detail_index]) {
+            if (detail.income_detail_index !== undefined && detail.income_detail_index !== null && createdIncomeDetails[detail.income_detail_index]) {
               matchedIncomeDetailId = createdIncomeDetails[detail.income_detail_index].id;
-              if (!matchedPaymentMethodId) {
-                matchedPaymentMethodId = createdIncomeDetails[detail.income_detail_index].payment_method_id;
+              matchedPaymentMethodId = createdIncomeDetails[detail.income_detail_index].payment_method_id;
+            } else if (!matchedIncomeDetailId && matchedPaymentMethodId) {
+              const matchingByPm = createdIncomeDetails.filter(cid => Number(cid.payment_method_id) === Number(matchedPaymentMethodId));
+              if (matchingByPm.length === 1) {
+                matchedIncomeDetailId = matchingByPm[0].id;
               }
             } else if (!matchedPaymentMethodId && createdIncomeDetails.length === 1) {
               matchedIncomeDetailId = createdIncomeDetails[0].id;
@@ -942,12 +949,12 @@ class Transaction {
       }
 
       // Handle income details
+      const createdIncomeDetails = [];
       if (incomeDetails !== undefined) {
         // Delete old details
         await conn.execute(`DELETE FROM transaction_income_details WHERE transaction_id = ?`, [id]);
 
         // Insert new details
-        const createdIncomeDetails = [];
         if (incomeDetails && incomeDetails.length > 0) {
           for (let i = 0; i < incomeDetails.length; i++) {
             const detail = incomeDetails[i];
@@ -970,7 +977,7 @@ class Transaction {
       if (salesChannelDetails !== undefined) {
         await conn.execute(`DELETE FROM transaction_sales_channels WHERE transaction_id = ?`, [id]);
         if (salesChannelDetails && salesChannelDetails.length > 0) {
-          let effectiveIncomeDetails = typeof createdIncomeDetails !== 'undefined' ? createdIncomeDetails : [];
+          let effectiveIncomeDetails = createdIncomeDetails.length > 0 ? createdIncomeDetails : [];
           if (effectiveIncomeDetails.length === 0) {
             const [existingTids] = await conn.execute(
               `SELECT id, payment_method_id FROM transaction_income_details WHERE transaction_id = ? ORDER BY id ASC`,
@@ -988,10 +995,22 @@ class Transaction {
               let matchedIncomeDetailId = detail.transaction_income_detail_id || null;
               let matchedPaymentMethodId = detail.payment_method_id || null;
 
-              if (!matchedIncomeDetailId && detail.income_detail_index !== undefined && effectiveIncomeDetails[detail.income_detail_index]) {
+              if (detail.income_detail_index !== undefined && detail.income_detail_index !== null && effectiveIncomeDetails[detail.income_detail_index]) {
                 matchedIncomeDetailId = effectiveIncomeDetails[detail.income_detail_index].id;
-                if (!matchedPaymentMethodId) {
-                  matchedPaymentMethodId = effectiveIncomeDetails[detail.income_detail_index].payment_method_id;
+                matchedPaymentMethodId = effectiveIncomeDetails[detail.income_detail_index].payment_method_id;
+              } else if (matchedIncomeDetailId) {
+                const matchedExisting = effectiveIncomeDetails.find(eid => Number(eid.id) === Number(matchedIncomeDetailId));
+                if (matchedExisting) {
+                  matchedPaymentMethodId = matchedExisting.payment_method_id;
+                } else {
+                  matchedIncomeDetailId = null;
+                }
+              }
+
+              if (!matchedIncomeDetailId && matchedPaymentMethodId) {
+                const matchingByPm = effectiveIncomeDetails.filter(eid => Number(eid.payment_method_id) === Number(matchedPaymentMethodId));
+                if (matchingByPm.length === 1) {
+                  matchedIncomeDetailId = matchingByPm[0].id;
                 }
               } else if (!matchedPaymentMethodId && effectiveIncomeDetails.length === 1) {
                 matchedIncomeDetailId = effectiveIncomeDetails[0].id;
