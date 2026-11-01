@@ -65,25 +65,44 @@ const persistExternalAttachment = async (item, branchId) => {
     const destFilePath = path.join(destDir, originalFilename);
     const verKasRelativeUrl = `/uploads/${branchId}/pengeluaran/${originalFilename}`;
 
-    // 1. Try copying from local filesystem if Bosgil uploads directory exists
-    const bsgUploadsDir = path.resolve(__dirname, '../../../Backend-BSG-Express/uploads');
-    let localSourcePath = null;
-
-    if (urlPath.includes('/uploads/')) {
-      const subPath = urlPath.substring(urlPath.indexOf('/uploads/') + '/uploads/'.length);
-      const candidate = path.join(bsgUploadsDir, subPath);
-      if (fs.existsSync(candidate)) {
-        localSourcePath = candidate;
-      }
+    if (fs.existsSync(destFilePath) && fs.statSync(destFilePath).size > 0) {
+      return {
+        title: itemTitle,
+        url: verKasRelativeUrl
+      };
     }
 
-    if (!localSourcePath) {
+    // 1. Try copying from local filesystem if Bosgil uploads directory exists
+    const candidateDirs = [
+      process.env.BOSGIL_UPLOADS_DIR,
+      '/www/wwwroot/bosgilgrup.vegaanggara.com/backend/uploads',
+      path.resolve(__dirname, '../../bosgilgrup.vegaanggara.com/backend/uploads'),
+      '/www/wwwroot/bosgilgrup-staging.vegaanggara.com/backend/uploads',
+      path.resolve(__dirname, '../../../Backend-BSG-Express/uploads')
+    ].filter(Boolean);
+
+    let localSourcePath = null;
+
+    for (const bsgUploadsDir of candidateDirs) {
+      if (!fs.existsSync(bsgUploadsDir)) continue;
+
+      if (urlPath.includes('/uploads/')) {
+        const subPath = urlPath.substring(urlPath.indexOf('/uploads/') + '/uploads/'.length);
+        const candidate = path.join(bsgUploadsDir, subPath);
+        if (fs.existsSync(candidate)) {
+          localSourcePath = candidate;
+          break;
+        }
+      }
+
       const candidateImages = path.join(bsgUploadsDir, 'data-pengajuan/images', originalFilename);
       const candidateDocs = path.join(bsgUploadsDir, 'data-pengajuan/documents', originalFilename);
       if (fs.existsSync(candidateImages)) {
         localSourcePath = candidateImages;
+        break;
       } else if (fs.existsSync(candidateDocs)) {
         localSourcePath = candidateDocs;
+        break;
       }
     }
 
