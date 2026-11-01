@@ -116,6 +116,18 @@ class ApiKey {
     return result.affectedRows > 0;
   }
 
+  // Activate/Reactivate key
+  static async activate(id, ownerId = null) {
+    let sql = 'UPDATE api_keys SET is_active = 1 WHERE id = ?';
+    const params = [id];
+    if (ownerId) {
+      sql += ' AND owner_id = ?';
+      params.push(ownerId);
+    }
+    const result = await query(sql, params);
+    return result.affectedRows > 0;
+  }
+
   // Delete key
   static async delete(id, ownerId = null) {
     let sql = 'DELETE FROM api_keys WHERE id = ?';

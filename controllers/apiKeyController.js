@@ -67,7 +67,8 @@ const apiKeyController = {
     try {
       const { id } = req.params;
       const isMaster = req.user && req.user.role === 'master';
-      const success = await ApiKey.revoke(id, isMaster ? null : req.userId);
+      const targetOwnerId = (req.user?.role === 'admin' && req.user?.created_by) ? req.user.created_by : req.userId;
+      const success = await ApiKey.revoke(id, isMaster ? null : targetOwnerId);
       if (!success) {
         return res.status(404).json({
           success: false,
@@ -85,12 +86,37 @@ const apiKeyController = {
     }
   },
 
+  // Activate/Reactivate key
+  activate: async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const isMaster = req.user && req.user.role === 'master';
+      const targetOwnerId = (req.user?.role === 'admin' && req.user?.created_by) ? req.user.created_by : req.userId;
+      const success = await ApiKey.activate(id, isMaster ? null : targetOwnerId);
+      if (!success) {
+        return res.status(404).json({
+          success: false,
+          message: 'API Key tidak ditemukan'
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: 'API Key berhasil diaktifkan kembali'
+      });
+    } catch (error) {
+      console.error('[ApiKeyController activate Error]:', error);
+      next(error);
+    }
+  },
+
   // Delete key
   delete: async (req, res, next) => {
     try {
       const { id } = req.params;
       const isMaster = req.user && req.user.role === 'master';
-      const success = await ApiKey.delete(id, isMaster ? null : req.userId);
+      const targetOwnerId = (req.user?.role === 'admin' && req.user?.created_by) ? req.user.created_by : req.userId;
+      const success = await ApiKey.delete(id, isMaster ? null : targetOwnerId);
       if (!success) {
         return res.status(404).json({
           success: false,

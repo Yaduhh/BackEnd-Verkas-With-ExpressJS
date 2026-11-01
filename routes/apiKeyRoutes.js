@@ -32,6 +32,7 @@ router.use((req, res, next) => {
 router.get('/', apiKeyController.getAll);
 router.post('/', apiKeyController.create);
 router.put('/:id/revoke', apiKeyController.revoke);
+router.put('/:id/activate', apiKeyController.activate);
 router.delete('/:id', apiKeyController.delete);
 
 module.exports = router;
