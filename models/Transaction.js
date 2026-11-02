@@ -744,11 +744,11 @@ class Transaction {
   }
 
   // Update transaction
-  static async update(id, { type, categoryId, amount, totalCustomer, apc, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, isSavings, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, incomeDetails, salesChannelDetails, productItems, isPb1Payment, isDraft }) {
+  static async update(id, { branchId, type, categoryId, amount, totalCustomer, apc, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, isSavings, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, incomeDetails, salesChannelDetails, productItems, isPb1Payment, isDraft }) {
     await dbTransaction(async (conn) => {
       // Get old transaction data first to reverse allocation
       const [oldRows] = await conn.execute(
-        'SELECT category_id, bank_account_id, type, amount, is_savings, is_draft FROM transactions WHERE id = ?',
+        'SELECT branch_id, category_id, bank_account_id, type, amount, is_savings, is_draft FROM transactions WHERE id = ?',
         [id]
       );
       const oldTx = oldRows[0];
@@ -760,6 +760,10 @@ class Transaction {
       const updates = [];
       const params = [];
 
+      if (branchId !== undefined && branchId !== null) {
+        updates.push('branch_id = ?');
+        params.push(parseInt(branchId));
+      }
       if (type !== undefined) {
         updates.push('type = ?');
         params.push(type);

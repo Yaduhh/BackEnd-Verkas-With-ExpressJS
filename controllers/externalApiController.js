@@ -72,6 +72,16 @@ const persistExternalAttachment = async (item, branchId) => {
       };
     }
 
+    // 0. If moving across VerKas branches, check VerKas's own uploads folder first
+    const verkasSelfCandidate = path.resolve(__dirname, '..', urlPath.replace(/^\/+/, ''));
+    if (fs.existsSync(verkasSelfCandidate) && fs.statSync(verkasSelfCandidate).isFile()) {
+      fs.copyFileSync(verkasSelfCandidate, destFilePath);
+      return {
+        title: itemTitle,
+        url: verKasRelativeUrl
+      };
+    }
+
     // 1. Try copying from local filesystem if Bosgil uploads directory exists
     const candidateDirs = [
       process.env.BOSGIL_UPLOADS_DIR,
@@ -95,15 +105,20 @@ const persistExternalAttachment = async (item, branchId) => {
         }
       }
 
-      const candidateImages = path.join(bsgUploadsDir, 'data-pengajuan/images', originalFilename);
-      const candidateDocs = path.join(bsgUploadsDir, 'data-pengajuan/documents', originalFilename);
-      if (fs.existsSync(candidateImages)) {
-        localSourcePath = candidateImages;
-        break;
-      } else if (fs.existsSync(candidateDocs)) {
-        localSourcePath = candidateDocs;
-        break;
+      const candidateSubPaths = [
+        path.join('data-pengajuan/images', originalFilename),
+        path.join('data-pengajuan/documents', originalFilename),
+        path.join('general/images', originalFilename),
+        path.join('general/documents', originalFilename)
+      ];
+      for (const relCandidate of candidateSubPaths) {
+        const fullCandidate = path.join(bsgUploadsDir, relCandidate);
+        if (fs.existsSync(fullCandidate)) {
+          localSourcePath = fullCandidate;
+          break;
+        }
       }
+      if (localSourcePath) break;
     }
 
     if (localSourcePath && fs.existsSync(localSourcePath)) {
@@ -633,9 +648,41 @@ const externalApiController = {
         });
       }
 
-      // Validate Category
+      // Validate Category (and auto-resolve if category_id belongs to a different branch)
       let finalCategoryId = category_id ? parseInt(category_id) : null;
       let finalCategoryName = category || '';
+
+      if (finalCategoryId) {
+        const catRecord = await Category.findById(finalCategoryId);
+        if (
+          !catRecord ||
+          catRecord.status_deleted ||
+          (catRecord.branch_id !== null &&
+            catRecord.branch_id !== undefined &&
+            parseInt(catRecord.branch_id) !== parseInt(finalBranchId))
+        ) {
+          // Category belongs to old branch or was deleted -> resolve by name in target branch
+          const lookupName = (category || catRecord?.name || '').trim();
+          finalCategoryId = null;
+          if (lookupName) {
+            const catRows = await query(
+              `SELECT id, name FROM categories 
+               WHERE (branch_id = ? OR branch_id IS NULL) 
+                 AND LOWER(TRIM(name)) = LOWER(TRIM(?))
+                 AND status_deleted = 0
+               ORDER BY CASE WHEN branch_id = ? THEN 0 ELSE 1 END, id ASC
+               LIMIT 1`,
+              [finalBranchId, lookupName, finalBranchId]
+            );
+            if (catRows.length > 0) {
+              finalCategoryId = catRows[0].id;
+              finalCategoryName = catRows[0].name;
+            }
+          }
+        } else if (!finalCategoryName) {
+          finalCategoryName = catRecord.name;
+        }
+      }
 
       if (!finalCategoryId && category) {
         // Try finding category by name in this branch or default
@@ -644,16 +691,14 @@ const externalApiController = {
            WHERE (branch_id = ? OR branch_id IS NULL) 
              AND LOWER(TRIM(name)) = LOWER(TRIM(?))
              AND status_deleted = 0
+           ORDER BY CASE WHEN branch_id = ? THEN 0 ELSE 1 END, id ASC
            LIMIT 1`,
-          [finalBranchId, category.trim()]
+          [finalBranchId, category.trim(), finalBranchId]
         );
         if (catRows.length > 0) {
           finalCategoryId = catRows[0].id;
           finalCategoryName = catRows[0].name;
         }
-      } else if (finalCategoryId && !finalCategoryName) {
-        const catRecord = await Category.findById(finalCategoryId);
-        if (catRecord) finalCategoryName = catRecord.name;
       }
 
       // If category still not found, fallback to default or first available expense category
@@ -678,17 +723,49 @@ const externalApiController = {
         }
       }
 
-      // Validate Bank Account
+      // Validate Bank Account (auto-fallback to target branch account if bank_account_id belongs to old branch)
       let finalBankAccountId = bank_account_id ? parseInt(bank_account_id) : null;
+      let resolvedBankAccount = null;
+
+      if (finalBankAccountId) {
+        const targetAccount = await BankAccount.findById(finalBankAccountId);
+        if (
+          targetAccount &&
+          targetAccount.is_active &&
+          parseInt(targetAccount.branch_id) === parseInt(finalBranchId)
+        ) {
+          resolvedBankAccount = targetAccount;
+        } else {
+          // Account belongs to previous branch or is inactive -> pick matching account in target branch
+          const preferredType =
+            targetAccount?.type ||
+            (Boolean(is_savings) ? 'savings' : type === 'income' ? 'income' : 'operational');
+          const preferredAccounts = await BankAccount.findAll(finalBranchId, preferredType);
+          if (preferredAccounts.length > 0) {
+            resolvedBankAccount = preferredAccounts[0];
+            finalBankAccountId = resolvedBankAccount.id;
+          } else {
+            finalBankAccountId = null;
+          }
+        }
+      }
+
       if (!finalBankAccountId) {
-        // Auto-select first operational/income bank account of the branch if not specified
-        const branchAccounts = await BankAccount.findAll(finalBranchId, type === 'income' ? 'income' : 'operational');
+        // Auto-select first operational/income/savings bank account of the branch if not specified
+        const defaultType = Boolean(is_savings)
+          ? 'savings'
+          : type === 'income'
+          ? 'income'
+          : 'operational';
+        const branchAccounts = await BankAccount.findAll(finalBranchId, defaultType);
         if (branchAccounts.length > 0) {
-          finalBankAccountId = branchAccounts[0].id;
+          resolvedBankAccount = branchAccounts[0];
+          finalBankAccountId = resolvedBankAccount.id;
         } else {
           const allBranchAccounts = await BankAccount.findAll(finalBranchId);
           if (allBranchAccounts.length > 0) {
-            finalBankAccountId = allBranchAccounts[0].id;
+            resolvedBankAccount = allBranchAccounts[0];
+            finalBankAccountId = resolvedBankAccount.id;
           } else {
             return res.status(400).json({
               success: false,
@@ -696,14 +773,105 @@ const externalApiController = {
             });
           }
         }
-      } else {
-        // Verify account exists
-        const targetAccount = await BankAccount.findById(finalBankAccountId);
-        if (!targetAccount || targetAccount.branch_id !== parseInt(finalBranchId)) {
-          return res.status(400).json({
-            success: false,
-            message: `Rekening kas ID ${finalBankAccountId} tidak ditemukan atau bukan milik cabang ini.`
-          });
+      }
+
+      // Normalize savings_details & product_items across branches if needed
+      let normalizedSavingsDetails = undefined;
+      if (Array.isArray(savings_details)) {
+        normalizedSavingsDetails = [];
+        for (const sd of savings_details) {
+          if (!sd || !parseFloat(sd.amount || 0)) continue;
+          let sdCatId = sd.category_id ? parseInt(sd.category_id) : null;
+          let sdCatName = sd.category_name || '';
+          if (sdCatId) {
+            const sdCatRecord = await Category.findById(sdCatId);
+            if (
+              !sdCatRecord ||
+              sdCatRecord.status_deleted ||
+              (sdCatRecord.branch_id !== null &&
+                sdCatRecord.branch_id !== undefined &&
+                parseInt(sdCatRecord.branch_id) !== parseInt(finalBranchId))
+            ) {
+              const lookupSdName = (sdCatName || sdCatRecord?.name || '').trim();
+              sdCatId = null;
+              if (lookupSdName) {
+                const matchedSdRows = await query(
+                  `SELECT id, name FROM categories
+                   WHERE (branch_id = ? OR branch_id IS NULL)
+                     AND LOWER(TRIM(name)) = LOWER(TRIM(?))
+                     AND status_deleted = 0
+                   ORDER BY CASE WHEN branch_id = ? THEN 0 ELSE 1 END, id ASC
+                   LIMIT 1`,
+                  [finalBranchId, lookupSdName, finalBranchId]
+                );
+                if (matchedSdRows.length > 0) {
+                  sdCatId = matchedSdRows[0].id;
+                  sdCatName = matchedSdRows[0].name;
+                }
+              }
+            }
+          }
+          if (sdCatId) {
+            normalizedSavingsDetails.push({
+              ...sd,
+              category_id: sdCatId,
+              category_name: sdCatName,
+              amount: parseFloat(sd.amount)
+            });
+          }
+        }
+      }
+
+      let normalizedProductItems = undefined;
+      if (Array.isArray(product_items)) {
+        normalizedProductItems = [];
+        for (const item of product_items) {
+          if (!item || !parseFloat(item.amount || 0)) continue;
+          let prodId = item.product_id ? parseInt(item.product_id) : null;
+          let brandId = item.brand_id ? parseInt(item.brand_id) : null;
+          if (prodId) {
+            const prodRows = await query(
+              `SELECT id, branch_id, name FROM products WHERE id = ? AND status_deleted = 0 LIMIT 1`,
+              [prodId]
+            );
+            const prodRec = prodRows[0];
+            if (!prodRec || parseInt(prodRec.branch_id) !== parseInt(finalBranchId)) {
+              const lookupProdName = (item.product_name || prodRec?.name || '').trim();
+              prodId = null;
+              brandId = null;
+              if (lookupProdName) {
+                const newBranchProdRows = await query(
+                  `SELECT id, name FROM products
+                   WHERE branch_id = ? AND LOWER(TRIM(name)) = LOWER(TRIM(?)) AND status_deleted = 0
+                   LIMIT 1`,
+                  [finalBranchId, lookupProdName]
+                );
+                if (newBranchProdRows.length > 0) {
+                  prodId = newBranchProdRows[0].id;
+                  const lookupBrandName = (item.brand_name || '').trim();
+                  if (lookupBrandName) {
+                    const newBrandRows = await query(
+                      `SELECT id FROM product_brands
+                       WHERE product_id = ? AND LOWER(TRIM(name)) = LOWER(TRIM(?)) AND status_deleted = 0
+                       LIMIT 1`,
+                      [prodId, lookupBrandName]
+                    );
+                    if (newBrandRows.length > 0) {
+                      brandId = newBrandRows[0].id;
+                    }
+                  }
+                }
+              }
+            }
+          }
+          if (prodId) {
+            normalizedProductItems.push({
+              ...item,
+              product_id: prodId,
+              brand_id: brandId,
+              amount: parseFloat(item.amount)
+            });
+          }
         }
       }
 
@@ -751,6 +919,22 @@ const externalApiController = {
       if (external_reference_id) {
         const existingTx = await Transaction.findByExternalReference(external_reference_id);
         if (existingTx) {
+          const isBranchMoved = parseInt(existingTx.branch_id) !== parseInt(finalBranchId);
+          if (isBranchMoved && existingTx.transaction_date) {
+            const oldDateObj = new Date(existingTx.transaction_date);
+            if (!isNaN(oldDateObj.getTime())) {
+              const oldMonth = oldDateObj.getMonth() + 1;
+              const oldYear = oldDateObj.getFullYear();
+              const isOldBranchLocked = await LockedPeriod.isLocked(existingTx.branch_id, oldMonth, oldYear);
+              if (isOldBranchLocked) {
+                return res.status(403).json({
+                  success: false,
+                  message: `Pembukuan cabang asal untuk periode ${oldMonth}/${oldYear} sudah dikunci di VerKas sehingga transaksi tidak dapat dipindahkan.`
+                });
+              }
+            }
+          }
+
           const isUmumVal = is_umum !== undefined
             ? (is_umum === true || is_umum === 1 || is_umum === '1' || is_umum === 'true')
             : (existingTx.is_umum !== 0 && existingTx.is_umum !== false);
@@ -767,9 +951,10 @@ const externalApiController = {
               : parsedAmount;
 
           const oldDataObj = {
+            branch_id: existingTx.branch_id,
             type: existingTx.type,
             amount: existingTx.amount,
-            category: finalCategoryName,
+            category: existingTx.category_name || finalCategoryName,
             note: existingTx.note,
             date: existingTx.transaction_date,
             lampiran: existingTx.lampiran,
@@ -777,6 +962,7 @@ const externalApiController = {
           };
 
           const newDataObj = {
+            branch_id: parseInt(finalBranchId),
             type: existingTx.type,
             amount: finalTxAmount,
             category: finalCategoryName,
@@ -787,20 +973,21 @@ const externalApiController = {
           };
 
           await Transaction.update(existingTx.id, {
+            branchId: parseInt(finalBranchId),
             amount: finalTxAmount,
             transactionDate: txDate,
             categoryId: finalCategoryId,
             bankAccountId: finalBankAccountId,
             isUmum: isUmumVal,
             isSavings: is_savings !== undefined
-              ? (Boolean(is_savings) || (Array.isArray(savings_details) && savings_details.length > 0))
+              ? (Boolean(is_savings) || (Array.isArray(normalizedSavingsDetails) && normalizedSavingsDetails.length > 0))
               : undefined,
             note: note ? note.trim() : existingTx.note,
             lampiran: formattedLampiran !== null ? formattedLampiran : existingTx.lampiran,
-            savingsDetails: Array.isArray(savings_details)
-              ? savings_details
+            savingsDetails: Array.isArray(normalizedSavingsDetails)
+              ? normalizedSavingsDetails
               : (is_savings === false ? [] : undefined),
-            productItems: Array.isArray(product_items) ? product_items : undefined
+            productItems: Array.isArray(normalizedProductItems) ? normalizedProductItems : undefined
           });
 
           // Ensure transactions.user_id reflects the PO creator in VerKas
@@ -810,6 +997,8 @@ const externalApiController = {
 
           const finalReason = sync_reason
             ? `${sync_reason} (${actorName})`
+            : isBranchMoved
+            ? `Sinkronisasi Pembaruan & Perpindahan Cabang PO dari Bosgil (${actorName})`
             : `Sinkronisasi Pembaruan PO dari Bosgil (${actorName})`;
 
           // Log to activity history table (Audit Trail)
@@ -830,8 +1019,10 @@ const externalApiController = {
               branch_id: parseInt(finalBranchId),
               amount: finalTxAmount,
               date: txDate,
+              category_id: finalCategoryId,
               category: finalCategoryName,
               bank_account_id: finalBankAccountId,
+              bank_account_name: resolvedBankAccount ? resolvedBankAccount.name : null,
               external_reference_id: existingTx.external_reference_id,
               creator_verkas_user: creatorResolved,
               actor_verkas_user: actorResolved
@@ -854,9 +1045,9 @@ const externalApiController = {
         paidAmount: paid_amount ? parseFloat(paid_amount) : null,
         remainingDebt: remaining_debt ? parseFloat(remaining_debt) : null,
         mitraPiutangId: mitra_piutang_id ? parseInt(mitra_piutang_id) : null,
-        isSavings: Boolean(is_savings) || (Array.isArray(savings_details) && savings_details.length > 0),
-        savingsDetails: Array.isArray(savings_details) ? savings_details : [],
-        productItems: Array.isArray(product_items) ? product_items : [],
+        isSavings: Boolean(is_savings) || (Array.isArray(normalizedSavingsDetails) && normalizedSavingsDetails.length > 0),
+        savingsDetails: Array.isArray(normalizedSavingsDetails) ? normalizedSavingsDetails : [],
+        productItems: Array.isArray(normalizedProductItems) ? normalizedProductItems : [],
         note: note ? note.trim() : `[External Sync] ${type === 'income' ? 'Pemasukan' : 'Pengeluaran'} ${finalCategoryName}`,
         transactionDate: txDate,
         lampiran: formattedLampiran,

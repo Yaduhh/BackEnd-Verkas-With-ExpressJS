@@ -12,9 +12,9 @@ async function exportPDFToJPEG(pdfPath) {
     throw new Error('PDF file does not exist');
   }
 
-  // Convert PDF pages to PNG buffers
+  // Convert PDF pages to PNG buffers at Ultra HD scale (4x = ~288 DPI)
   const pages = await pdfToPng(pdfPath, {
-    viewportScale: 2.0, // High quality HD render
+    viewportScale: 4.0, // Ultra HD 4x render so text & numbers never look blurry/pixelated
     returnPageContent: true
   });
 
@@ -25,31 +25,38 @@ async function exportPDFToJPEG(pdfPath) {
   // Trim each page individually first to remove empty top/bottom space on each sheet
   const trimmedPages = await Promise.all(
     pages.map(async (page) => {
-      return await sharp(page.content)
+      return await sharp(page.content, { limitInputPixels: false })
         .trim({ background: '#ffffff', threshold: 10 })
-        .png()
+        .png({ compressionLevel: 1 })
         .toBuffer();
     })
   );
 
+  const marginSize = 90;
+  const jpegOptions = {
+    quality: 100,
+    chromaSubsampling: '4:4:4', // Prevent color subsampling blur on colored text/numbers
+    mozjpeg: true
+  };
+
   // If only 1 page, directly convert PNG to JPEG and add margins
   if (trimmedPages.length === 1) {
-    return await sharp(trimmedPages[0])
+    return await sharp(trimmedPages[0], { limitInputPixels: false })
       .extend({
-        top: 50,
-        bottom: 50,
-        left: 50,
-        right: 50,
+        top: marginSize,
+        bottom: marginSize,
+        left: marginSize,
+        right: marginSize,
         background: { r: 255, g: 255, b: 255, alpha: 1 }
       })
-      .jpeg({ quality: 95 })
+      .jpeg(jpegOptions)
       .toBuffer();
   }
 
   // If multiple pages, retrieve their dimensions after trimming
   const pageMetas = await Promise.all(
     trimmedPages.map(async (buffer) => {
-      const metadata = await sharp(buffer).metadata();
+      const metadata = await sharp(buffer, { limitInputPixels: false }).metadata();
       return {
         buffer,
         width: metadata.width,
@@ -60,7 +67,7 @@ async function exportPDFToJPEG(pdfPath) {
 
   const maxWidth = Math.max(...pageMetas.map(p => p.width));
   // Add a small spacing gap between pages so they flow naturally
-  const pageGap = 30;
+  const pageGap = 60;
   const totalHeight = pageMetas.reduce((sum, p) => sum + p.height, 0) + (pageMetas.length - 1) * pageGap;
 
   let currentY = 0;
@@ -80,22 +87,23 @@ async function exportPDFToJPEG(pdfPath) {
       height: totalHeight,
       channels: 4,
       background: { r: 255, g: 255, b: 255, alpha: 1 }
-    }
+    },
+    limitInputPixels: false
   })
     .composite(compositeArray)
-    .png()
+    .png({ compressionLevel: 1 })
     .toBuffer();
 
   // Add final margins around the combined image
-  return await sharp(combinedPng)
+  return await sharp(combinedPng, { limitInputPixels: false })
     .extend({
-      top: 50,
-      bottom: 50,
-      left: 50,
-      right: 50,
+      top: marginSize,
+      bottom: marginSize,
+      left: marginSize,
+      right: marginSize,
       background: { r: 255, g: 255, b: 255, alpha: 1 }
     })
-    .jpeg({ quality: 95 })
+    .jpeg(jpegOptions)
     .toBuffer();
 }
 

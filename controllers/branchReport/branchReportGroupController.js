@@ -929,23 +929,16 @@ const exportGroupImage = async (req, res, next) => {
             }
         );
 
-        const imagePath = await exportPDFToJPEG(pdfPath, filename);
-        // fs imported above
-        if (!fs.existsSync(imagePath)) {
-            return res.status(500).json({ success: false, message: 'File gambar gagal dibuat' });
-        }
+        const jpegBuffer = await exportPDFToJPEG(pdfPath);
+
+        // Clean up temp PDF immediately
+        fs.unlink(pdfPath, (err) => {
+            if (err) console.error('[EXPORT GROUP IMAGE] Error deleting temp PDF:', err);
+        });
 
         res.setHeader('Content-Type', 'image/jpeg');
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-        const fileStream = fs.createReadStream(imagePath);
-        fileStream.pipe(res);
-        fileStream.on('end', () => {
-            setTimeout(() => {
-                fs.unlink(imagePath, () => {});
-                fs.unlink(pdfPath, () => {});
-            }, 10000);
-        });
+        res.end(jpegBuffer);
     } catch (error) {
         next(error);
     }
