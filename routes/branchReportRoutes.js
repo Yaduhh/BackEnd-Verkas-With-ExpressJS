@@ -7,6 +7,8 @@ const {
     saveGroupReport,
     exportGroupPdf,
     exportGroupImage,
+    exportGroupInvestorPdf,
+    exportGroupInvestorImage,
     exportGroupExcel,
     exportGroupBagiHasilPdf,
     updateReport,
@@ -15,6 +17,8 @@ const {
     exportBagiHasilPdf,
     exportSavingsPdf,
     exportImage,
+    exportInvestorPdf,
+    exportInvestorImage,
     getBagiHasilTemplates,
     createBagiHasilTemplate,
     updateBagiHasilTemplate,
@@ -47,12 +51,16 @@ router.put('/consolidated/report', saveGroupReport);
 router.put('/consolidated/financial-report', saveGroupReport);
 router.get('/consolidated/export', exportGroupPdf);
 router.get('/consolidated/export-image', exportGroupImage);
+router.get('/consolidated/export-investor-pdf', exportGroupInvestorPdf);
+router.get('/consolidated/export-investor-image', exportGroupInvestorImage);
 router.get('/consolidated/export-excel', exportGroupExcel);
 router.get('/consolidated/export-bagi-hasil-pdf', exportGroupBagiHasilPdf);
 router.get('/group/report', getGroupFinancialReport);
 router.put('/group/report', saveGroupReport);
 router.get('/group/export', exportGroupPdf);
 router.get('/group/export-image', exportGroupImage);
+router.get('/group/export-investor-pdf', exportGroupInvestorPdf);
+router.get('/group/export-investor-image', exportGroupInvestorImage);
 router.get('/group/export-excel', exportGroupExcel);
 router.get('/group/export-bagi-hasil-pdf', exportGroupBagiHasilPdf);
 
@@ -64,6 +72,12 @@ router.get('/:branchId/export', exportPdf);
 
 // GET /api/branch-reports/:branchId/export-image?month=2&year=2026&workingDays=25
 router.get('/:branchId/export-image', exportImage);
+
+// GET /api/branch-reports/:branchId/export-investor-pdf?month=2&year=2026&workingDays=25
+router.get('/:branchId/export-investor-pdf', exportInvestorPdf);
+
+// GET /api/branch-reports/:branchId/export-investor-image?month=2&year=2026&workingDays=25
+router.get('/:branchId/export-investor-image', exportInvestorImage);
 
 // GET /api/branch-reports/:branchId/export-excel?month=2&year=2026&workingDays=25
 router.get('/:branchId/export-excel', exportExcel);

@@ -2297,11 +2297,465 @@ async function exportSavingsReportToPDF(reportData, filename, branchName, select
     });
 }
 
+/**
+ * Export Financial Report for Investor to PDF (Times New Roman, Single Bordered Box Layout)
+ * Does not modify the standard exportFinancialReportToPDF.
+ */
+async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, workingDays, options = {}) {
+    const filepath = path.join(EXPORTS_DIR, filename);
+
+    const fontRegular = 'Times-Roman';
+    const fontBold = 'Times-Bold';
+
+    const formatCurrencyForPDF = (amount) => {
+        if (amount === null || amount === undefined || isNaN(amount)) return '-';
+        return new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(Math.round(Number(amount)));
+    };
+
+    const formatPctNum = (val, base) => {
+        if (!base || base === 0 || !val) return '-';
+        const p = ((Number(val) / Number(base)) * 100).toFixed(2);
+        return p.replace('.', ',');
+    };
+
+    const toTitleCase = (str) =>
+        String(str || '')
+            .toLowerCase()
+            .replace(/\b\w/g, (c) => c.toUpperCase());
+
+    const year = dateObj.getFullYear();
+    const month = dateObj.getMonth();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const monthNameUpper = String(getMonthName(month) || '').toUpperCase();
+    const prevMonthDate = new Date(year, month - 1, 1);
+    const prevMonthOnlyTitle = toTitleCase(getMonthName(prevMonthDate.getMonth()) || '');
+
+    const headerTitle = (
+        options.branchCode && options.branchCode !== 'GABUNGAN'
+            ? options.branchCode
+            : branchLabel || 'LAPORAN'
+    ).toUpperCase();
+
+    // 1. Income Data
+    const omzetItem = (data.income_breakdown || []).find((it) => {
+        const n = (it.category_name || '').toLowerCase();
+        return (n.includes('omzet') || n.includes('omset')) && !n.includes('lain');
+    });
+    const totalOmzetNet = omzetItem ? Number(omzetItem.total_net ?? omzetItem.total) || 0 : 0;
+
+    const otherIncomes = (data.income_breakdown || []).filter((it) => {
+        const n = (it.category_name || '').toLowerCase();
+        return n.includes('lain') || (!n.includes('omzet') && !n.includes('omset'));
+    });
+    const otherIncomeTotal = otherIncomes.reduce((s, it) => s + (Number(it.total_net ?? it.total) || 0), 0);
+    const pelunasanPiutang = Number(data.pelunasan_piutang_bulan_lalu) || 0;
+    const totalPemasukanFinal = totalOmzetNet + otherIncomeTotal + pelunasanPiutang;
+
+    // 2. Sales Channels
+    const rawSalesChannels = Array.isArray(data.sales_channels) ? data.sales_channels : [];
+    const salesChannelRows = rawSalesChannels.map((sc) => {
+        let scName = String(sc.name || sc.channel_name || '').trim();
+        scName = scName.replace(/^(omzet|omset|oz)\s+/i, '').trim();
+        const amt = Number(sc.amount) || 0;
+        return { name: scName, amount: amt };
+    });
+
+    // 3. Expenses (Unified list following expense_order, including Piutang & Simpanan)
+    const isSimpananItem = (name) => {
+        const ln = String(name || '').toLowerCase();
+        return ln.startsWith('kas ') || ln.startsWith('k.s.o') || ln.includes('simpanan');
+    };
+    const isPiutangItem = (name) => {
+        const ln = String(name || '').toLowerCase();
+        return ln.startsWith('piutang') || ln.includes('mitra piutang');
+    };
+
+    const piutangAmount =
+        data.piutang_mitra !== undefined && data.piutang_mitra !== null && !isNaN(Number(data.piutang_mitra))
+            ? Number(data.piutang_mitra)
+            : data.total_piutang_mitra !== undefined && data.total_piutang_mitra !== null && !isNaN(Number(data.total_piutang_mitra))
+            ? Number(data.total_piutang_mitra)
+            : 0;
+
+    const rawExpList = (data.expense_breakdown || []).filter((ex) => !isPiutangItem(ex.category_name));
+
+    // Group parent categories with their immediate sub-items / adjustments
+    const parentGroups = [];
+    rawExpList.forEach((ex) => {
+        if (ex.is_sub_item || ex.is_adjustment) {
+            if (parentGroups.length > 0) {
+                parentGroups[parentGroups.length - 1].children.push(ex);
+            } else {
+                parentGroups.push({ parent: ex, children: [] });
+            }
+        } else {
+            parentGroups.push({ parent: ex, children: [] });
+        }
+    });
+
+    // Determine where to place Piutang row based on data.expense_order
+    const piutangGroup = {
+        parent: {
+            category_name: 'Piutang',
+            total: piutangAmount,
+            is_piutang: true,
+        },
+        children: [],
+    };
+
+    const savedOrder = Array.isArray(data.expense_order) ? data.expense_order : [];
+    const piutangOrderIdx = savedOrder.findIndex((k) => String(k || '').toUpperCase().startsWith('PIUTANG'));
+
+    const orderedGroups = [];
+    let piutangInserted = false;
+
+    if (piutangOrderIdx !== -1) {
+        const keysBeforePiutang = new Set(
+            savedOrder.slice(0, piutangOrderIdx).map((k) => String(k || '').toLowerCase().trim())
+        );
+        parentGroups.forEach((g) => {
+            const gKey = String(g.parent.category_name || '').toLowerCase().trim();
+            if (!piutangInserted && !keysBeforePiutang.has(gKey)) {
+                orderedGroups.push(piutangGroup);
+                piutangInserted = true;
+            }
+            orderedGroups.push(g);
+        });
+        if (!piutangInserted) {
+            orderedGroups.push(piutangGroup);
+            piutangInserted = true;
+        }
+    } else {
+        // Default: place Piutang after regular non-simpanan categories, before Simpanan categories
+        parentGroups.forEach((g) => {
+            if (!piutangInserted && isSimpananItem(g.parent.category_name)) {
+                orderedGroups.push(piutangGroup);
+                piutangInserted = true;
+            }
+            orderedGroups.push(g);
+        });
+        if (!piutangInserted) {
+            orderedGroups.push(piutangGroup);
+            piutangInserted = true;
+        }
+    }
+
+    const effectiveDays = Number(workingDays) || daysInMonth;
+    const flatExpenseRows = [];
+    let mainNo = 1;
+
+    orderedGroups.forEach((g) => {
+        const p = g.parent;
+        let displayName = String(p.category_name || '').trim();
+        if (isSimpananItem(displayName)) {
+            let sNote = p.savings_note ? String(p.savings_note).trim() : '';
+            if (!sNote && Number(p.total) > 0 && effectiveDays > 0) {
+                const perDay = Math.round(Number(p.total) / effectiveDays);
+                sNote = `${formatCurrencyForPDF(perDay)} @ ${effectiveDays} Hari`;
+            }
+            if (sNote && !displayName.includes('(')) {
+                displayName = `${displayName} ( ${sNote} )`;
+            }
+        }
+        flatExpenseRows.push({
+            no: String(mainNo++),
+            name: displayName,
+            amount: Number(p.total) || 0,
+            isSub: false,
+        });
+
+        g.children.forEach((ch) => {
+            flatExpenseRows.push({
+                no: '',
+                name: String(ch.category_name || '').trim(),
+                amount: Number(ch.total) || 0,
+                isSub: true,
+            });
+        });
+    });
+
+    const purePengeluaran =
+        data.pure_pengeluaran !== undefined && data.pure_pengeluaran !== null
+            ? Number(data.pure_pengeluaran)
+            : rawExpList
+                  .filter((x) => !x.is_sub_item)
+                  .reduce((s, x) => s + (Number(x.total) || 0), 0);
+    const totalPengeluaranFinal = purePengeluaran + piutangAmount;
+    const profitFinal = totalPemasukanFinal - totalPengeluaranFinal;
+
+    // 4. Bagi Hasil Rows
+    const bagiHasilRows = [];
+    if (Array.isArray(data.bagi_hasil) && data.bagi_hasil.length > 0) {
+        data.bagi_hasil.forEach((bh) => {
+            const bhTitle = String(bh.title || '').trim();
+            const bhPct = bh.percentage !== undefined && bh.percentage !== null ? bh.percentage : 0;
+            const bhAmt = Number(bh.amount) || 0;
+            if (bhTitle || bhAmt > 0) {
+                bagiHasilRows.push({
+                    label: `${bhTitle} ( ${bhPct}% )`,
+                    amount: bhAmt,
+                    isSub: false,
+                });
+            }
+            if (Array.isArray(bh.subItems)) {
+                bh.subItems
+                    .filter((s) => s && s.is_active !== false)
+                    .forEach((sub) => {
+                        const subTitle = String(sub.title || '').trim();
+                        const subPct = sub.percentage !== undefined && sub.percentage !== null ? sub.percentage : 0;
+                        const subAmt = (Number(sub.amount) || 0) + (Number(sub.subsidi) || 0);
+                        if (subTitle || subAmt > 0) {
+                            bagiHasilRows.push({
+                                label: `${subTitle} ( ${subPct}% )`,
+                                amount: subAmt,
+                                isSub: true,
+                            });
+                        }
+                    });
+            }
+        });
+    }
+    if (bagiHasilRows.length === 0) {
+        bagiHasilRows.push({
+            label: `${toTitleCase(headerTitle)} ( 100% )`,
+            amount: profitFinal,
+            isSub: false,
+        });
+    }
+
+    // Calculate required page height so everything always fits inside 1 single outer box
+    const baseFontSize = 11;
+    const titleFontSize = 15.5;
+    const rowH = 20;
+    const totalEstimatedHeight =
+        125 + // Top header + margins
+        3 * rowH + // 3 main income rows
+        (salesChannelRows.length + 1) * rowH +
+        16 +
+        (flatExpenseRows.length + 1) * (rowH + 2) +
+        16 +
+        2 * rowH + // Total Biaya Pengeluaran & Profit
+        18 +
+        (bagiHasilRows.length + 1) * rowH +
+        20 +
+        3 * rowH + // Nilai Stok Persedian
+        70;
+
+    const pageWidth = 660;
+    const pageHeight = Math.max(841.89, totalEstimatedHeight);
+    const margin = 22;
+
+    const doc = new PDFDocument({
+        margin,
+        size: [pageWidth, pageHeight],
+        info: {
+            Title: `Laporan Investor - ${branchLabel}`,
+            Author: 'VERKAS',
+        },
+    });
+
+    const writeStream = fs.createWriteStream(filepath);
+    doc.pipe(writeStream);
+
+    const contentWidth = pageWidth - 2 * margin; // 616
+    let y = 26;
+
+    // --- HEADER (Outside Box) ---
+    doc.fillColor('#000000').font(fontBold).fontSize(titleFontSize);
+    doc.text('Lap. Keu', margin, y, { width: contentWidth, align: 'center' });
+    y += 20;
+    doc.text(headerTitle, margin, y, { width: contentWidth, align: 'center' });
+    y += 26;
+
+    doc.font(fontRegular).fontSize(baseFontSize);
+    doc.text('PER TANGGAL', margin, y);
+    doc.text(`:   01 - ${String(daysInMonth).padStart(2, '0')} ${monthNameUpper} ${year}`, margin + 290, y);
+    y += 20;
+
+    doc.text('JUMLAH HARI KERJA', margin, y);
+    doc.text(`:   ${effectiveDays} HARI`, margin + 290, y);
+    y += 24;
+
+    // --- TOP HORIZONTAL DIVIDER LINE ---
+    const boxStartY = y;
+    doc.save();
+    doc.moveTo(margin, boxStartY).lineTo(margin + contentWidth, boxStartY).lineWidth(0.85).strokeColor('#000000').stroke();
+    doc.restore();
+    y += 9;
+
+    // Column X coordinates (relative to margin)
+    const xPadLeft = margin;
+    const xNo = margin + 4;
+    const wNo = 26;
+    const xItemName = margin + 34;
+    const wItemName = 252;
+
+    // Middle Columns (Sales Channel, Pengeluaran items, Bagi Hasil, Stok) — shifted further right
+    const xMidEq = margin + 290;
+    const xMidRp = margin + 306;
+    const xMidAmt = margin + 324;
+    const wMidAmt = 76;
+    const xMidPct = margin + 404;
+    const wMidPct = 40;
+    const xMidPctSym = margin + 447;
+
+    // Right Summary Columns (Omzet, Pendapatan Lainnya, Pelunasan Piutang, Total Pengeluaran, Profit)
+    const xRightRp = margin + 462;
+    const xRightAmt = margin + 480;
+    const wRightAmt = 82;
+    const xRightPct = margin + 568;
+    const wRightPct = 34;
+    const xRightPctSym = margin + 604;
+
+    // 1. Top 3 Income Rows
+    doc.font(fontBold).fontSize(baseFontSize).fillColor('#000000');
+    doc.text('Omzet Penjualan', xPadLeft, y);
+    doc.text('Rp', xRightRp, y);
+    doc.text(totalOmzetNet > 0 ? formatCurrencyForPDF(totalOmzetNet) : '0', xRightAmt, y, { width: wRightAmt, align: 'right' });
+    doc.font(fontRegular).fontSize(baseFontSize);
+    doc.text(totalOmzetNet > 0 ? '100' : '0', xRightPct, y, { width: wRightPct, align: 'right' });
+    doc.text('%', xRightPctSym, y);
+    y += rowH + 2;
+
+    doc.font(fontBold).fontSize(baseFontSize);
+    doc.text('Pendapatan Lainnya', xPadLeft, y);
+    doc.text('Rp', xRightRp, y);
+    doc.text(otherIncomeTotal > 0 ? formatCurrencyForPDF(otherIncomeTotal) : '0', xRightAmt, y, { width: wRightAmt, align: 'right' });
+    y += rowH + 2;
+
+    doc.font(fontBold).fontSize(baseFontSize);
+    doc.text(`Pelunasan Piutang Bulan ${prevMonthOnlyTitle}`, xPadLeft, y);
+    doc.text('Rp', xRightRp, y);
+    doc.text(pelunasanPiutang > 0 ? formatCurrencyForPDF(pelunasanPiutang) : '0', xRightAmt, y, { width: wRightAmt, align: 'right' });
+    y += rowH + 4;
+
+    // 2. Sales Chanel Section
+    doc.font(fontBold).fontSize(baseFontSize).text('Sales Chanel', xPadLeft, y);
+    y += rowH + 1;
+
+    doc.font(fontRegular).fontSize(baseFontSize);
+    salesChannelRows.forEach((sc) => {
+        const hasVal = Math.abs(sc.amount) > 0.01;
+        const pctStr = hasVal && totalOmzetNet > 0 ? formatPctNum(sc.amount, totalOmzetNet) : '-';
+
+        doc.text(sc.name, xItemName, y, { width: wItemName, lineBreak: false });
+        doc.text('=', xMidEq, y, { width: 12, align: 'center' });
+        doc.text('Rp', xMidRp, y);
+        doc.text(hasVal ? formatCurrencyForPDF(sc.amount) : '-', xMidAmt, y, { width: wMidAmt, align: 'right' });
+        doc.text(pctStr, xMidPct, y, { width: wMidPct, align: 'right' });
+        doc.text('%', xMidPctSym, y);
+        y += rowH;
+    });
+
+    y += 4;
+
+    // 3. Pengeluaran Section
+    doc.font(fontBold).fontSize(baseFontSize).text('Pengeluaran', xPadLeft, y);
+    y += rowH + 1;
+
+    const expPctBase = totalOmzetNet > 0 ? totalOmzetNet : totalPemasukanFinal;
+    doc.font(fontRegular).fontSize(baseFontSize);
+
+    flatExpenseRows.forEach((row) => {
+        const hasVal = Math.abs(row.amount) > 0.01;
+        const pctStr = hasVal && expPctBase > 0 ? formatPctNum(row.amount, expPctBase) : '-';
+
+        const nameHeight = doc.heightOfString(row.name, { width: wItemName });
+        const curRowH = Math.max(rowH, nameHeight + 5);
+
+        if (row.no) {
+            doc.text(row.no, xNo, y, { width: wNo, align: 'center' });
+        }
+        doc.text(row.name, xItemName, y, { width: wItemName });
+        doc.text('=', xMidEq, y, { width: 12, align: 'center' });
+        doc.text('Rp', xMidRp, y);
+        doc.text(hasVal ? formatCurrencyForPDF(row.amount) : '-', xMidAmt, y, { width: wMidAmt, align: 'right' });
+        doc.text(pctStr, xMidPct, y, { width: wMidPct, align: 'right' });
+        doc.text('%', xMidPctSym, y);
+
+        y += curRowH;
+    });
+
+    y += 5;
+
+    // 4. Total Biaya Pengeluaran & Profit
+    const totalExpPctStr = totalPemasukanFinal > 0 ? formatPctNum(totalPengeluaranFinal, totalPemasukanFinal) : '0,00';
+    const profitPctStr = totalPemasukanFinal > 0 ? formatPctNum(profitFinal, totalPemasukanFinal) : '0,00';
+
+    doc.font(fontRegular).fontSize(baseFontSize);
+    doc.text('Total Biaya Pengeluaran', margin + 230, y, { width: 226, align: 'right' });
+    doc.text('Rp', xRightRp, y);
+    doc.text(formatCurrencyForPDF(totalPengeluaranFinal), xRightAmt, y, { width: wRightAmt, align: 'right' });
+    doc.text(totalExpPctStr, xRightPct, y, { width: wRightPct, align: 'right' });
+    doc.text('%', xRightPctSym, y);
+    y += rowH - 2;
+
+    // Horizontal line under Total Biaya Pengeluaran amount
+    doc.save();
+    doc.strokeColor('#000000').lineWidth(1).moveTo(xRightRp, y).lineTo(xRightAmt + wRightAmt + 2, y).stroke();
+    doc.restore();
+    y += 6;
+
+    doc.font(fontBold).fontSize(baseFontSize);
+    doc.text('Profit', margin + 230, y, { width: 226, align: 'right' });
+    doc.text('Rp', xRightRp, y);
+    doc.text(formatCurrencyForPDF(profitFinal), xRightAmt, y, { width: wRightAmt, align: 'right' });
+    doc.font(fontRegular).fontSize(baseFontSize);
+    doc.text(profitPctStr, xRightPct, y, { width: wRightPct, align: 'right' });
+    doc.text('%', xRightPctSym, y);
+    y += rowH + 6;
+
+    // 5. Bagi Hasil Section
+    doc.font(fontRegular).fontSize(baseFontSize);
+    doc.text('Bagi Hasil', xItemName, y);
+    doc.text('Profit', xMidAmt, y, { width: wMidAmt, align: 'center' });
+    y += rowH + 2;
+
+    bagiHasilRows.forEach((bh) => {
+        doc.text(bh.label, bh.isSub ? xItemName + 10 : xItemName, y, { width: bh.isSub ? wItemName - 10 : wItemName });
+        doc.text('=', xMidEq, y, { width: 12, align: 'center' });
+        doc.text('Rp', xMidRp, y);
+        doc.text(formatCurrencyForPDF(bh.amount), xMidAmt, y, { width: wMidAmt, align: 'right' });
+        y += rowH;
+    });
+
+    y += 14;
+
+    // 6. Nilai Stok Persedian Section
+    const stokAwalNum = parseFloat(data.stok_awal) || 0;
+    const stokAkhirNum = parseFloat(data.stok_akhir) || 0;
+
+    doc.font(fontRegular).fontSize(baseFontSize);
+    doc.text('Nilai Stok Persedian', xItemName, y);
+    y += rowH + 2;
+
+    doc.text('Awal', xItemName, y);
+    doc.text(':', xMidEq, y, { width: 12, align: 'center' });
+    doc.text('Rp', xMidRp, y);
+    doc.text(stokAwalNum > 0 ? formatCurrencyForPDF(stokAwalNum) : '-', xMidAmt, y, { width: wMidAmt, align: 'right' });
+    y += rowH;
+
+    doc.text('Akhir', xItemName, y);
+    doc.text(':', xMidEq, y, { width: 12, align: 'center' });
+    doc.text('Rp', xMidRp, y);
+    doc.text(stokAkhirNum > 0 ? formatCurrencyForPDF(stokAkhirNum) : '-', xMidAmt, y, { width: wMidAmt, align: 'right' });
+    y += rowH + 8;
+
+    doc.end();
+
+    return new Promise((resolve, reject) => {
+        writeStream.on('finish', () => resolve(filepath));
+        writeStream.on('error', reject);
+        doc.on('error', reject);
+    });
+}
+
 module.exports = {
     exportToPDF,
     exportBukuKasToPDF,
     exportCategoryToPDF,
     exportFinancialReportToPDF,
+    exportInvestorReportToPDF,
     exportBagiHasilToPDF,
     exportSavingsReportToPDF
 };

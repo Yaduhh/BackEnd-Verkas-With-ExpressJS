@@ -25,6 +25,7 @@ module.exports = {
   exportBukuKasToPDF: pdf.exportBukuKasToPDF,
   exportCategoryToPDF: pdf.exportCategoryToPDF,
   exportFinancialReportToPDF: pdf.exportFinancialReportToPDF,
+  exportInvestorReportToPDF: pdf.exportInvestorReportToPDF,
   exportBagiHasilToPDF: pdf.exportBagiHasilToPDF,
   exportSavingsReportToPDF: pdf.exportSavingsReportToPDF,
   exportPDFToJPEG: image.exportPDFToJPEG

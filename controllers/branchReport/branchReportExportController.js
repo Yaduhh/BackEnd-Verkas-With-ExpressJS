@@ -6,6 +6,7 @@ const Transaction = require('../../models/Transaction');
 const { getSingleBranchReportExportData } = require('./branchReportCoreController');
 const {
     exportFinancialReportToPDF,
+    exportInvestorReportToPDF,
     exportFinancialReportToExcel,
     exportPDFToJPEG,
     exportBagiHasilToPDF,
@@ -411,10 +412,139 @@ const exportSavingsPdf = async (req, res, next) => {
     }
 };
 
+/**
+ * GET /api/branch-reports/:branchId/export-investor-pdf?month=2&year=2026
+ */
+const exportInvestorPdf = async (req, res, next) => {
+    try {
+        const { branchId } = req.params;
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+        const workingDays = parseInt(req.query.workingDays) || 25;
+
+        const {
+            branch,
+            workingDays: actualWorkingDays,
+            dataForPdf,
+            branchCodeOrName,
+            selectedMonthDate
+        } = await getSingleBranchReportExportData(branchId, month, year, workingDays, req);
+
+        const filename = generateFilename('PDF', `Laporan_Investor_${branchCodeOrName}`);
+
+        try {
+            const userName = req.user.name || req.user.email;
+            const filepath = await exportInvestorReportToPDF(
+                dataForPdf,
+                filename,
+                branchCodeOrName,
+                selectedMonthDate,
+                actualWorkingDays,
+                {
+                    printedBy: userName,
+                    branchCode: branch.code,
+                    branchName: branch.name
+                }
+            );
+
+            if (!fs.existsSync(filepath)) {
+                return res.status(500).json({ success: false, message: 'File PDF Investor gagal dibuat' });
+            }
+
+            res.setHeader('Content-Type', getMimeType('PDF') || 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+            const fileStream = fs.createReadStream(filepath);
+            fileStream.pipe(res);
+
+            fileStream.on('end', () => {
+                setTimeout(() => {
+                    fs.unlink(filepath, (err) => {
+                        if (err) console.error(`[EXPORT INVESTOR] Error deleting temp file:`, err);
+                    });
+                }, 10000);
+            });
+        } catch (pdfError) {
+            console.error(`[EXPORT INVESTOR] PDF Gen Error:`, pdfError);
+            return res.status(500).json({ success: false, message: 'Gagal memproses PDF Investor: ' + pdfError.message });
+        }
+    } catch (error) {
+        if (error.statusCode) {
+            return res.status(error.statusCode).json({ success: false, message: error.message });
+        }
+        console.error(`[EXPORT INVESTOR] Global Controller Error:`, error);
+        next(error);
+    }
+};
+
+/**
+ * GET /api/branch-reports/:branchId/export-investor-image?month=2&year=2026
+ */
+const exportInvestorImage = async (req, res, next) => {
+    try {
+        const { branchId } = req.params;
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+        const workingDays = parseInt(req.query.workingDays) || 25;
+
+        const {
+            branch,
+            workingDays: actualWorkingDays,
+            dataForPdf,
+            branchCodeOrName,
+            selectedMonthDate
+        } = await getSingleBranchReportExportData(branchId, month, year, workingDays, req);
+
+        const filename = generateFilename('PDF', `Laporan_Investor_${branchCodeOrName}`);
+
+        try {
+            const userName = req.user.name || req.user.email;
+            const filepath = await exportInvestorReportToPDF(
+                dataForPdf,
+                filename,
+                branchCodeOrName,
+                selectedMonthDate,
+                actualWorkingDays,
+                {
+                    printedBy: userName,
+                    branchCode: branch.code,
+                    branchName: branch.name
+                }
+            );
+
+            if (!fs.existsSync(filepath)) {
+                return res.status(500).json({ success: false, message: 'File PDF Investor gagal dibuat' });
+            }
+
+            const jpegBuffer = await exportPDFToJPEG(filepath);
+
+            fs.unlink(filepath, (err) => {
+                if (err) console.error(`[EXPORT INVESTOR IMAGE] Error deleting temp PDF:`, err);
+            });
+
+            const jpegFilename = filename.replace(/\.pdf$/i, '.jpg');
+            res.setHeader('Content-Type', 'image/jpeg');
+            res.setHeader('Content-Disposition', `attachment; filename="${jpegFilename}"`);
+            res.end(jpegBuffer);
+        } catch (pdfError) {
+            console.error(`[EXPORT INVESTOR IMAGE] Image Gen Error:`, pdfError);
+            return res.status(500).json({ success: false, message: 'Gagal memproses gambar Investor: ' + pdfError.message });
+        }
+    } catch (error) {
+        if (error.statusCode) {
+            return res.status(error.statusCode).json({ success: false, message: error.message });
+        }
+        console.error(`[EXPORT INVESTOR IMAGE] Global Controller Error:`, error);
+        next(error);
+    }
+};
+
 module.exports = {
     exportPdf,
     exportExcel,
     exportImage,
+    exportInvestorPdf,
+    exportInvestorImage,
     exportBagiHasilPdf,
     exportSavingsPdf
 };

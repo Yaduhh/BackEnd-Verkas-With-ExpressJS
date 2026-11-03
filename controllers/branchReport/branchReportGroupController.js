@@ -6,6 +6,7 @@ const { query } = require('../../config/database');
 const { computeBranchSystemSalesChannels } = require('../../utils/salesChannelHelper');
 const { 
     exportFinancialReportToPDF, 
+    exportInvestorReportToPDF,
     exportFinancialReportToExcel, 
     exportPDFToJPEG, 
     exportBagiHasilToPDF,
@@ -1311,12 +1312,128 @@ const exportGroupBagiHasilPdf = async (req, res, next) => {
     }
 };
 
+/**
+ * GET /api/branch-reports/consolidated/export-investor-pdf
+ */
+const exportGroupInvestorPdf = async (req, res, next) => {
+    try {
+        const { group_name } = req.query;
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+        const workingDays = parseInt(req.query.workingDays) || 25;
+
+        const fakeReq = { ...req, query: { ...req.query }, _returnReportOnly: true };
+        const reportData = await getGroupFinancialReport(fakeReq, res, next);
+        if (!reportData) return res.status(404).json({ success: false, message: 'Tidak ada data buku kas dalam grup ini' });
+
+        const groupLabel = group_name ? `Grup_${group_name.replace(/\s+/g, '_')}` : 'Grup_Gabungan';
+        const filename = generateFilename('PDF', `Laporan_Investor_${groupLabel}`);
+        const selectedMonthDate = new Date(year, month - 1, 1);
+
+        const dataForPdf = {
+            ...reportData,
+            working_days: workingDays,
+            expense_breakdown: buildGroupExportExpenseBreakdown(reportData),
+            income_breakdown: (reportData.income_breakdown || []).filter(item => item.is_active !== false),
+            piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.piutang_mitra,
+            total_piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.total_piutang_mitra
+        };
+
+        const filepath = await exportInvestorReportToPDF(
+            dataForPdf,
+            filename,
+            group_name || 'GABUNGAN',
+            selectedMonthDate,
+            workingDays,
+            {
+                printedBy: req.user?.name || req.user?.email || 'Owner',
+                branchCode: 'GABUNGAN',
+                branchName: group_name ? `Grup: ${group_name}` : 'Semua Buku Kas'
+            }
+        );
+
+        if (!fs.existsSync(filepath)) {
+            return res.status(500).json({ success: false, message: 'File PDF Investor gagal dibuat' });
+        }
+
+        res.setHeader('Content-Type', getMimeType('PDF') || 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+        const fileStream = fs.createReadStream(filepath);
+        fileStream.pipe(res);
+        fileStream.on('end', () => {
+            setTimeout(() => {
+                fs.unlink(filepath, () => {});
+            }, 10000);
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * GET /api/branch-reports/consolidated/export-investor-image
+ */
+const exportGroupInvestorImage = async (req, res, next) => {
+    try {
+        const { group_name } = req.query;
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+        const workingDays = parseInt(req.query.workingDays) || 25;
+
+        const fakeReq = { ...req, query: { ...req.query }, _returnReportOnly: true };
+        const reportData = await getGroupFinancialReport(fakeReq, res, next);
+        if (!reportData) return res.status(404).json({ success: false, message: 'Tidak ada data buku kas dalam grup ini' });
+
+        const groupLabel = group_name ? `Grup_${group_name.replace(/\s+/g, '_')}` : 'Grup_Gabungan';
+        const filename = generateFilename('JPEG', `Laporan_Investor_${groupLabel}`);
+        const pdfFilename = generateFilename('PDF', `Laporan_Investor_${groupLabel}`);
+        const selectedMonthDate = new Date(year, month - 1, 1);
+
+        const dataForPdf = {
+            ...reportData,
+            working_days: workingDays,
+            expense_breakdown: buildGroupExportExpenseBreakdown(reportData),
+            income_breakdown: (reportData.income_breakdown || []).filter(item => item.is_active !== false),
+            piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.piutang_mitra,
+            total_piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.total_piutang_mitra
+        };
+
+        const pdfPath = await exportInvestorReportToPDF(
+            dataForPdf,
+            pdfFilename,
+            group_name || 'GABUNGAN',
+            selectedMonthDate,
+            workingDays,
+            {
+                printedBy: req.user?.name || req.user?.email || 'Owner',
+                branchCode: 'GABUNGAN',
+                branchName: group_name ? `Grup: ${group_name}` : 'Semua Buku Kas'
+            }
+        );
+
+        const jpegBuffer = await exportPDFToJPEG(pdfPath);
+
+        fs.unlink(pdfPath, (err) => {
+            if (err) console.error('[EXPORT GROUP INVESTOR IMAGE] Error deleting temp PDF:', err);
+        });
+
+        res.setHeader('Content-Type', 'image/jpeg');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.end(jpegBuffer);
+    } catch (error) {
+        next(error);
+    }
+};
+
 module.exports = {
     getConsolidatedReport,
     getGroupFinancialReport,
     saveGroupReport,
     exportGroupPdf,
     exportGroupImage,
+    exportGroupInvestorPdf,
+    exportGroupInvestorImage,
     exportGroupExcel,
     exportGroupBagiHasilPdf
 };
