@@ -828,7 +828,8 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
 
     const pemasukanPcts = reconcilePercentages(pemasukanRows.map(r => r.amount), totalPemasukanFinal);
     pemasukanRows.forEach((row, idx) => {
-        renderDataRow(pemIdx++, row.name, row.amount, true, 'FFFFFFFF', 1, 'center', pemasukanPcts[idx] / 100);
+        const pemRowBg = idx % 2 === 0 ? 'FFEBF1DE' : 'FFFFFFFF';
+        renderDataRow(pemIdx++, row.name, row.amount, true, pemRowBg, 1, 'center', pemasukanPcts[idx] / 100);
     });
 
     // 3. PENGELUARAN SECTION
@@ -903,19 +904,28 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
 
     renderSubHeader('Uraian');
 
-    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-    let expLetterIdx = 0;
+    let expNumberIdx = 0;
+    let expSubIdx = 0;
+    let expVisualRowIdx = 0;
 
     regularExpenses.forEach(ex => {
         const isChild = Boolean(ex.is_adjustment || ex.is_sub_item);
-        const letter = isChild ? '' : (letters[expLetterIdx++] || String(expLetterIdx));
+        if (!isChild) {
+            expNumberIdx++;
+            expSubIdx = 0;
+        } else {
+            expSubIdx++;
+        }
+        const rowNo = isChild ? '' : String(expNumberIdx);
+        const subCode = isChild ? `${expNumberIdx}.${expSubIdx}` : '';
         const amt = Number(ex.total) || 0;
+        const expRowBg = (expVisualRowIdx++ % 2 === 0) ? 'FFF2DCDB' : 'FFFFFFFF';
         renderDataRow(
-            letter,
-            isChild ? `  — ${ex.category_name}` : ex.category_name,
+            rowNo,
+            isChild ? `  ${subCode}   ${ex.category_name}` : ex.category_name,
             amt,
             !isChild,
-            'FFFFFFFF',
+            expRowBg,
             isChild ? 2 : 1,
             'center'
         );
@@ -924,14 +934,15 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
     // Simpanan Expenses (if any)
     if (simpananExpenses.length > 0) {
         const totalSimpananAmt = simpananExpenses.reduce((sum, s) => sum + (Number(s.total) || 0), 0);
-        const simpananLetter = letters[expLetterIdx++] || 'H';
+        const simpananNo = String(++expNumberIdx);
+        const simpananParentBg = (expVisualRowIdx++ % 2 === 0) ? 'FFF2DCDB' : 'FFFFFFFF';
 
         // Parent Row for Simpanan
-        renderDataRow(simpananLetter, 'Total Simpanan', totalSimpananAmt, true, 'FFFFFFFF', 1, 'center');
+        renderDataRow(simpananNo, 'Total Simpanan', totalSimpananAmt, true, simpananParentBg, 1, 'center');
 
-        // Sub-items for Simpanan (same style as sub-kategori, with lowercase g1, g2...)
+        // Sub-items for Simpanan (same style as sub-kategori, with 7.1, 7.2...)
         simpananExpenses.forEach((sx, sIdx) => {
-            const subCode = `${simpananLetter.toLowerCase()}${sIdx + 1}`;
+            const subCode = `${simpananNo}.${sIdx + 1}`;
             const sAmt = Number(sx.total) || 0;
             let sTitle = sx.category_name;
             const customNote = typeof sx.savings_note === 'string' ? sx.savings_note.trim() : '';
@@ -951,7 +962,8 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
                     sTitle = `${sx.category_name} ( ${allocDays} Hari )`;
                 }
             }
-            renderDataRow('', `  ${subCode}   ${sTitle}`, sAmt, false, 'FFFAEBE5', 2, 'center');
+            const subRowBg = (expVisualRowIdx++ % 2 === 0) ? 'FFF2DCDB' : 'FFFFFFFF';
+            renderDataRow('', `  ${subCode}   ${sTitle}`, sAmt, false, subRowBg, 2, 'center');
         });
     }
 

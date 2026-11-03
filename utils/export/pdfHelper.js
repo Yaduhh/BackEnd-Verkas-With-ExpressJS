@@ -1246,10 +1246,11 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         const { rowHeight: curH, fittedFontSize } = getFlexibleCellMetrics(row.name, wName, { font: fontBold, fontSize: 8.5, paddingLeft: 8, baseHeight: rowH });
         checkNewPage(curH);
         const percStr = pemasukanPcts[idx].toFixed(2).replace('.', ',') + '%';
-        drawCell(margin, y, wNo, curH, { bg: '#ffffff', text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
-        drawCell(margin + wNo, y, wName, curH, { bg: '#ffffff', text: row.name, font: fontBold, fontSize: fittedFontSize, paddingLeft: 8 });
-        drawCell(margin + wNo + wName, y, wAmount, curH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(row.amount), font: fontBold, fontSize: 8.5 });
-        drawCell(margin + wNo + wName + wAmount, y, wPerc, curH, { bg: '#ffffff', text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
+        const pemRowBg = idx % 2 === 0 ? '#ebf1de' : '#ffffff';
+        drawCell(margin, y, wNo, curH, { bg: pemRowBg, text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
+        drawCell(margin + wNo, y, wName, curH, { bg: pemRowBg, text: row.name, font: fontBold, fontSize: fittedFontSize, paddingLeft: 8 });
+        drawCell(margin + wNo + wName, y, wAmount, curH, { bg: pemRowBg, rpPrefix: true, rpAmount: formatCurrencyForPDF(row.amount), font: fontBold, fontSize: 8.5 });
+        drawCell(margin + wNo + wName + wAmount, y, wPerc, curH, { bg: pemRowBg, text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
         y += curH;
     });
 
@@ -1328,24 +1329,33 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     drawCell(margin + wNo + wName + wAmount, y, wPerc, subHeaderH, { bg: '#ffffff', text: 'Persentase', font: fontBold, fontSize: 8.5, align: 'center' });
     y += subHeaderH;
 
-    // Render regular expenses with A, B, C, D...
-    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-    let expLetterIdx = 0;
+    // Render regular expenses with 1, 2, 3, 4...
+    let expNumberIdx = 0;
+    let expSubIdx = 0;
+    let expVisualRowIdx = 0;
 
     regularExpenses.forEach(ex => {
         const isChild = Boolean(ex.is_adjustment || ex.is_sub_item);
-        const letter = isChild ? '' : (letters[expLetterIdx++] || String(expLetterIdx));
+        if (!isChild) {
+            expNumberIdx++;
+            expSubIdx = 0;
+        } else {
+            expSubIdx++;
+        }
+        const rowNo = isChild ? '' : String(expNumberIdx);
+        const subCode = isChild ? `${expNumberIdx}.${expSubIdx}` : '';
         const amt = Number(ex.total) || 0;
         const percStr = formatPercent(amt, totalPemasukanFinal);
-        const prefixText = isChild ? '  — ' : '';
+        const prefixText = isChild ? `  ${subCode}   ` : '';
         const rowFont = isChild ? fontRegular : fontBold;
+        const rowBg = (expVisualRowIdx++ % 2 === 0) ? '#f2dcdb' : '#ffffff';
         const { rowHeight: curH, fittedFontSize } = getFlexibleCellMetrics(ex.category_name, wName, { font: rowFont, fontSize: 8.5, paddingLeft: 8, baseHeight: rowH, prefixText });
         checkNewPage(curH);
 
-        drawCell(margin, y, wNo, curH, { bg: '#ffffff', text: letter, font: fontBold, fontSize: 8.5, align: 'center' });
-        drawCell(margin + wNo, y, wName, curH, { bg: '#ffffff', text: ex.category_name, prefixText, font: rowFont, fontSize: fittedFontSize, paddingLeft: 8 });
-        drawCell(margin + wNo + wName, y, wAmount, curH, { bg: '#ffffff', rpPrefix: amt > 0, rpAmount: amt > 0 ? formatCurrencyForPDF(amt) : '-', font: rowFont, fontSize: 8.5 });
-        drawCell(margin + wNo + wName + wAmount, y, wPerc, curH, { bg: '#ffffff', text: percStr, font: rowFont, fontSize: 8.5, align: 'center' });
+        drawCell(margin, y, wNo, curH, { bg: rowBg, text: rowNo, font: fontBold, fontSize: 8.5, align: 'center' });
+        drawCell(margin + wNo, y, wName, curH, { bg: rowBg, text: ex.category_name, prefixText, font: rowFont, fontSize: fittedFontSize, paddingLeft: 8 });
+        drawCell(margin + wNo + wName, y, wAmount, curH, { bg: rowBg, rpPrefix: amt > 0, rpAmount: amt > 0 ? formatCurrencyForPDF(amt) : '-', font: rowFont, fontSize: 8.5 });
+        drawCell(margin + wNo + wName + wAmount, y, wPerc, curH, { bg: rowBg, text: percStr, font: rowFont, fontSize: 8.5, align: 'center' });
         y += curH;
     });
 
@@ -1353,19 +1363,20 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     if (simpananExpenses.length > 0) {
         const totalSimpananAmt = simpananExpenses.reduce((sum, s) => sum + (Number(s.total) || 0), 0);
         const totalSimpananPerc = formatPercent(totalSimpananAmt, totalPemasukanFinal);
-        const simpananLetter = letters[expLetterIdx++] || 'H';
+        const simpananNo = String(++expNumberIdx);
+        const simpananParentBg = (expVisualRowIdx++ % 2 === 0) ? '#f2dcdb' : '#ffffff';
 
-        // Parent Row for Simpanan (Bold, white background)
+        // Parent Row for Simpanan (Bold, alternating background)
         checkNewPage(rowH);
-        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: simpananLetter, font: fontBold, fontSize: 8.5, align: 'center' });
-        drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: 'Total Simpanan', font: fontBold, fontSize: 8.5, paddingLeft: 8 });
-        drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(totalSimpananAmt), font: fontBold, fontSize: 8.5 });
-        drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: totalSimpananPerc, font: fontBold, fontSize: 8.5, align: 'center' });
+        drawCell(margin, y, wNo, rowH, { bg: simpananParentBg, text: simpananNo, font: fontBold, fontSize: 8.5, align: 'center' });
+        drawCell(margin + wNo, y, wName, rowH, { bg: simpananParentBg, text: 'Total Simpanan', font: fontBold, fontSize: 8.5, paddingLeft: 8 });
+        drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: simpananParentBg, rpPrefix: true, rpAmount: formatCurrencyForPDF(totalSimpananAmt), font: fontBold, fontSize: 8.5 });
+        drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: simpananParentBg, text: totalSimpananPerc, font: fontBold, fontSize: 8.5, align: 'center' });
         y += rowH;
 
-        // Sub-items for Simpanan (same style as sub-kategori, with lowercase g1, g2...)
+        // Sub-items for Simpanan (same style as sub-kategori, with 7.1, 7.2...)
         simpananExpenses.forEach((sx, sIdx) => {
-            const subCode = `${simpananLetter.toLowerCase()}${sIdx + 1}`;
+            const subCode = `${simpananNo}.${sIdx + 1}`;
             const sAmt = Number(sx.total) || 0;
             const sPerc = formatPercent(sAmt, totalPemasukanFinal);
 
@@ -1390,10 +1401,11 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
             const { rowHeight: curH, fittedFontSize } = getFlexibleCellMetrics(sTitle, wName, { font: fontRegular, fontSize: 8.5, paddingLeft: 8, baseHeight: rowH, prefixText });
             checkNewPage(curH);
 
-            drawCell(margin, y, wNo, curH, { bg: '#faebe5', text: '', font: fontRegular, fontSize: 8.5, align: 'center' });
-            drawCell(margin + wNo, y, wName, curH, { bg: '#faebe5', text: sTitle, prefixText, font: fontRegular, fontSize: fittedFontSize, paddingLeft: 8 });
-            drawCell(margin + wNo + wName, y, wAmount, curH, { bg: '#faebe5', rpPrefix: sAmt > 0, rpAmount: sAmt > 0 ? formatCurrencyForPDF(sAmt) : '-', font: fontRegular, fontSize: 8.5 });
-            drawCell(margin + wNo + wName + wAmount, y, wPerc, curH, { bg: '#faebe5', text: sPerc, font: fontRegular, fontSize: 8.5, align: 'center' });
+            const subRowBg = (expVisualRowIdx++ % 2 === 0) ? '#f2dcdb' : '#ffffff';
+            drawCell(margin, y, wNo, curH, { bg: subRowBg, text: '', font: fontRegular, fontSize: 8.5, align: 'center' });
+            drawCell(margin + wNo, y, wName, curH, { bg: subRowBg, text: sTitle, prefixText, font: fontRegular, fontSize: fittedFontSize, paddingLeft: 8 });
+            drawCell(margin + wNo + wName, y, wAmount, curH, { bg: subRowBg, rpPrefix: sAmt > 0, rpAmount: sAmt > 0 ? formatCurrencyForPDF(sAmt) : '-', font: fontRegular, fontSize: 8.5 });
+            drawCell(margin + wNo + wName + wAmount, y, wPerc, curH, { bg: subRowBg, text: sPerc, font: fontRegular, fontSize: 8.5, align: 'center' });
             y += curH;
         });
     }
