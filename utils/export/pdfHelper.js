@@ -428,8 +428,16 @@ async function exportCategoryToPDF(data, filename, branchName, options = {}) {
     const contentWidth = pageWidth - 2 * margin;
     let y = margin;
 
-    const fontBold = 'Helvetica-Bold';
-    const fontRegular = 'Helvetica';
+    let fontBold = 'Helvetica-Bold';
+    let fontRegular = 'Helvetica';
+    const arialRegPath = path.join(__dirname, 'fonts', 'Arial.ttf');
+    const arialBoldPath = path.join(__dirname, 'fonts', 'Arial-Bold.ttf');
+    if (fs.existsSync(arialRegPath) && fs.existsSync(arialBoldPath)) {
+        doc.registerFont('EmbeddedSans-Regular', arialRegPath);
+        doc.registerFont('EmbeddedSans-Bold', arialBoldPath);
+        fontRegular = 'EmbeddedSans-Regular';
+        fontBold = 'EmbeddedSans-Bold';
+    }
 
     const INDONESIAN_MONTHS = [
         'JANUARI', 'FEBRUARI', 'MARET', 'APRIL', 'MEI', 'JUNI',
@@ -968,8 +976,16 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     const contentWidth = pageWidth - 2 * margin; // 535.28
     let y = margin;
 
-    const fontBold = 'Helvetica-Bold';
-    const fontRegular = 'Helvetica';
+    let fontBold = 'Helvetica-Bold';
+    let fontRegular = 'Helvetica';
+    const arialRegPath = path.join(__dirname, 'fonts', 'Arial.ttf');
+    const arialBoldPath = path.join(__dirname, 'fonts', 'Arial-Bold.ttf');
+    if (fs.existsSync(arialRegPath) && fs.existsSync(arialBoldPath)) {
+        doc.registerFont('EmbeddedSans-Regular', arialRegPath);
+        doc.registerFont('EmbeddedSans-Bold', arialBoldPath);
+        fontRegular = 'EmbeddedSans-Regular';
+        fontBold = 'EmbeddedSans-Bold';
+    }
 
     const checkNewPage = (h) => {
         if (y + h > doc.page.height - 35) {
@@ -2006,8 +2022,16 @@ async function exportBagiHasilToPDF(report, filename, branchName, selectedMonthD
     const contentWidth = pageWidth - 2 * margin;
     let y = margin;
 
-    const fontBold = 'Helvetica-Bold';
-    const fontRegular = 'Helvetica';
+    let fontBold = 'Helvetica-Bold';
+    let fontRegular = 'Helvetica';
+    const arialRegPath = path.join(__dirname, 'fonts', 'Arial.ttf');
+    const arialBoldPath = path.join(__dirname, 'fonts', 'Arial-Bold.ttf');
+    if (fs.existsSync(arialRegPath) && fs.existsSync(arialBoldPath)) {
+        doc.registerFont('EmbeddedSans-Regular', arialRegPath);
+        doc.registerFont('EmbeddedSans-Bold', arialBoldPath);
+        fontRegular = 'EmbeddedSans-Regular';
+        fontBold = 'EmbeddedSans-Bold';
+    }
 
     const monthLabel = getMonthName(selectedMonthDate.getMonth());
     const yearLabel = selectedMonthDate.getFullYear();
@@ -2145,8 +2169,16 @@ async function exportSavingsReportToPDF(reportData, filename, branchName, select
         return new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(amount);
     };
 
-    const fontBold = 'Helvetica-Bold';
-    const fontRegular = 'Helvetica';
+    let fontBold = 'Helvetica-Bold';
+    let fontRegular = 'Helvetica';
+    const arialRegPath = path.join(__dirname, 'fonts', 'Arial.ttf');
+    const arialBoldPath = path.join(__dirname, 'fonts', 'Arial-Bold.ttf');
+    if (fs.existsSync(arialRegPath) && fs.existsSync(arialBoldPath)) {
+        doc.registerFont('EmbeddedSans-Regular', arialRegPath);
+        doc.registerFont('EmbeddedSans-Bold', arialBoldPath);
+        fontRegular = 'EmbeddedSans-Regular';
+        fontBold = 'EmbeddedSans-Bold';
+    }
 
     const monthIndex = selectedMonthDate.getMonth();
     const year = selectedMonthDate.getFullYear();
@@ -2304,8 +2336,15 @@ async function exportSavingsReportToPDF(reportData, filename, branchName, select
 async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, workingDays, options = {}) {
     const filepath = path.join(EXPORTS_DIR, filename);
 
-    const fontRegular = 'Times-Roman';
-    const fontBold = 'Times-Bold';
+    let fontRegular = 'Times-Roman';
+    let fontBold = 'Times-Bold';
+    const tnrRegPath = path.join(__dirname, 'fonts', 'TimesNewRoman.ttf');
+    const tnrBoldPath = path.join(__dirname, 'fonts', 'TimesNewRoman-Bold.ttf');
+    const hasEmbeddedTnr = fs.existsSync(tnrRegPath) && fs.existsSync(tnrBoldPath);
+    if (hasEmbeddedTnr) {
+        fontRegular = 'EmbeddedTimes-Regular';
+        fontBold = 'EmbeddedTimes-Bold';
+    }
 
     const formatCurrencyForPDF = (amount) => {
         if (amount === null || amount === undefined || isNaN(amount)) return '-';
@@ -2494,28 +2533,21 @@ async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, w
             const bhTitle = String(bh.title || '').trim();
             const bhPct = bh.percentage !== undefined && bh.percentage !== null ? bh.percentage : 0;
             const bhAmt = Number(bh.amount) || 0;
+            const activeSubs = Array.isArray(bh.subItems)
+                ? bh.subItems
+                      .filter((s) => s && s.is_active !== false && (String(s.title || '').trim() || Number(s.amount) > 0 || Number(s.percentage) > 0))
+                      .map((sub) => ({
+                          pct: sub.percentage !== undefined && sub.percentage !== null ? sub.percentage : 0,
+                          amount: (Number(sub.amount) || 0) + (Number(sub.subsidi) || 0),
+                      }))
+                : [];
+
             if (bhTitle || bhAmt > 0) {
                 bagiHasilRows.push({
                     label: `${bhTitle} ( ${bhPct}% )`,
                     amount: bhAmt,
-                    isSub: false,
+                    activeSubs,
                 });
-            }
-            if (Array.isArray(bh.subItems)) {
-                bh.subItems
-                    .filter((s) => s && s.is_active !== false)
-                    .forEach((sub) => {
-                        const subTitle = String(sub.title || '').trim();
-                        const subPct = sub.percentage !== undefined && sub.percentage !== null ? sub.percentage : 0;
-                        const subAmt = (Number(sub.amount) || 0) + (Number(sub.subsidi) || 0);
-                        if (subTitle || subAmt > 0) {
-                            bagiHasilRows.push({
-                                label: `${subTitle} ( ${subPct}% )`,
-                                amount: subAmt,
-                                isSub: true,
-                            });
-                        }
-                    });
             }
         });
     }
@@ -2523,7 +2555,7 @@ async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, w
         bagiHasilRows.push({
             label: `${toTitleCase(headerTitle)} ( 100% )`,
             amount: profitFinal,
-            isSub: false,
+            activeSubs: [],
         });
     }
 
@@ -2531,6 +2563,10 @@ async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, w
     const baseFontSize = 11;
     const titleFontSize = 15.5;
     const rowH = 20;
+    const bagiHasilTotalVisualRows = bagiHasilRows.reduce(
+        (sum, r) => sum + Math.max(1, Array.isArray(r.activeSubs) ? r.activeSubs.length : 1),
+        0
+    );
     const totalEstimatedHeight =
         125 + // Top header + margins
         3 * rowH + // 3 main income rows
@@ -2540,7 +2576,7 @@ async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, w
         16 +
         2 * rowH + // Total Biaya Pengeluaran & Profit
         18 +
-        (bagiHasilRows.length + 1) * rowH +
+        (bagiHasilTotalVisualRows + 1) * rowH +
         20 +
         3 * rowH + // Nilai Stok Persedian
         70;
@@ -2560,6 +2596,11 @@ async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, w
 
     const writeStream = fs.createWriteStream(filepath);
     doc.pipe(writeStream);
+
+    if (hasEmbeddedTnr) {
+        doc.registerFont('EmbeddedTimes-Regular', tnrRegPath);
+        doc.registerFont('EmbeddedTimes-Bold', tnrBoldPath);
+    }
 
     const contentWidth = pageWidth - 2 * margin; // 616
     let y = 26;
@@ -2627,11 +2668,14 @@ async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, w
     doc.text(otherIncomeTotal > 0 ? formatCurrencyForPDF(otherIncomeTotal) : '0', xRightAmt, y, { width: wRightAmt, align: 'right' });
     y += rowH + 2;
 
-    doc.font(fontBold).fontSize(baseFontSize);
-    doc.text(`Pelunasan Piutang Bulan ${prevMonthOnlyTitle}`, xPadLeft, y);
-    doc.text('Rp', xRightRp, y);
-    doc.text(pelunasanPiutang > 0 ? formatCurrencyForPDF(pelunasanPiutang) : '0', xRightAmt, y, { width: wRightAmt, align: 'right' });
-    y += rowH + 4;
+    if (pelunasanPiutang > 0) {
+        doc.font(fontBold).fontSize(baseFontSize);
+        doc.text(`Pelunasan Piutang Bulan ${prevMonthOnlyTitle}`, xPadLeft, y);
+        doc.text('Rp', xRightRp, y);
+        doc.text(formatCurrencyForPDF(pelunasanPiutang), xRightAmt, y, { width: wRightAmt, align: 'right' });
+        y += rowH + 2;
+    }
+    y += 2;
 
     // 2. Sales Chanel Section
     doc.font(fontBold).fontSize(baseFontSize).text('Sales Chanel', xPadLeft, y);
@@ -2715,11 +2759,53 @@ async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, w
     doc.text('Profit', xMidAmt, y, { width: wMidAmt, align: 'center' });
     y += rowH + 2;
 
+    // Helper to draw a solid black right arrow (➔)
+    const drawRightArrow = (arrowX, arrowCenterY) => {
+        const shaftLen = 13;
+        const shaftThick = 2.6;
+        const headLen = 6.5;
+        const headHalfH = 4.2;
+        doc.save();
+        doc.fillColor('#000000');
+        // Shaft
+        doc.rect(arrowX, arrowCenterY - shaftThick / 2, shaftLen, shaftThick).fill();
+        // Arrowhead triangle
+        doc.polygon(
+            [arrowX + shaftLen - 0.5, arrowCenterY - headHalfH],
+            [arrowX + shaftLen + headLen, arrowCenterY],
+            [arrowX + shaftLen - 0.5, arrowCenterY + headHalfH]
+        ).fill();
+        doc.restore();
+    };
+
+    const xSubArrow = margin + 414;
+    const xSubPct = margin + 440;
+    const wSubPct = 36;
+    const xSubRp = margin + 486;
+    const xSubAmt = margin + 506;
+    const wSubAmt = 78;
+
     bagiHasilRows.forEach((bh) => {
-        doc.text(bh.label, bh.isSub ? xItemName + 10 : xItemName, y, { width: bh.isSub ? wItemName - 10 : wItemName });
+        doc.font(fontRegular).fontSize(baseFontSize).fillColor('#000000');
+        doc.text(bh.label, xItemName, y, { width: wItemName });
         doc.text('=', xMidEq, y, { width: 12, align: 'center' });
         doc.text('Rp', xMidRp, y);
         doc.text(formatCurrencyForPDF(bh.amount), xMidAmt, y, { width: wMidAmt, align: 'right' });
+
+        if (Array.isArray(bh.activeSubs) && bh.activeSubs.length > 0) {
+            bh.activeSubs.forEach((sub, sIdx) => {
+                if (sIdx > 0) {
+                    y += rowH;
+                }
+                drawRightArrow(xSubArrow, y + baseFontSize * 0.48);
+                doc.font(fontBold).fontSize(baseFontSize).fillColor('#000000');
+                doc.text(`${sub.pct}%`, xSubPct, y, { width: wSubPct, align: 'right' });
+                doc.text('Rp', xSubRp, y);
+                doc.text(formatCurrencyForPDF(sub.amount), xSubAmt, y, { width: wSubAmt, align: 'right' });
+            });
+            doc.font(fontRegular).fontSize(baseFontSize);
+        }
+
         y += rowH;
     });
 
@@ -2734,13 +2820,13 @@ async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, w
     y += rowH + 2;
 
     doc.text('Awal', xItemName, y);
-    doc.text(':', xMidEq, y, { width: 12, align: 'center' });
+    doc.text('=', xMidEq, y, { width: 12, align: 'center' });
     doc.text('Rp', xMidRp, y);
     doc.text(stokAwalNum > 0 ? formatCurrencyForPDF(stokAwalNum) : '-', xMidAmt, y, { width: wMidAmt, align: 'right' });
     y += rowH;
 
     doc.text('Akhir', xItemName, y);
-    doc.text(':', xMidEq, y, { width: 12, align: 'center' });
+    doc.text('=', xMidEq, y, { width: 12, align: 'center' });
     doc.text('Rp', xMidRp, y);
     doc.text(stokAkhirNum > 0 ? formatCurrencyForPDF(stokAkhirNum) : '-', xMidAmt, y, { width: wMidAmt, align: 'right' });
     y += rowH + 8;
