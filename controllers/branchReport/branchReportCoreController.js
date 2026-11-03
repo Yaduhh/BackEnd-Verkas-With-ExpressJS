@@ -1202,8 +1202,29 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
         const piutangLabel = `PIUTANG ${currentMonthName.toUpperCase()}`;
 
         if (report.expense_order && Array.isArray(report.expense_order)) {
+            const normBase = (str) => String(str || '').toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+            const actualCategoryNames = sortedCategories.map(c => c.category_name);
+            const normalizedOrder = [...report.expense_order];
+
+            actualCategoryNames.forEach(actualName => {
+                if (!normalizedOrder.includes(actualName)) {
+                    const actualBase = normBase(actualName);
+                    const orphanIdx = normalizedOrder.findIndex(savedName => {
+                        if (actualCategoryNames.includes(savedName)) return false;
+                        const savedBase = normBase(savedName);
+                        if (actualBase && savedBase && actualBase.length >= 4 && savedBase.length >= 4) {
+                            return actualBase === savedBase || actualBase.startsWith(savedBase) || savedBase.startsWith(actualBase);
+                        }
+                        return false;
+                    });
+                    if (orphanIdx !== -1) {
+                        normalizedOrder[orphanIdx] = actualName;
+                    }
+                }
+            });
+
             const orderMap = {};
-            report.expense_order.forEach((name, idx) => { orderMap[name] = idx; });
+            normalizedOrder.forEach((name, idx) => { orderMap[name] = idx; });
 
             sortedCategories.sort((a, b) => {
                 const orderA = orderMap[a.category_name] !== undefined ? orderMap[a.category_name] : 1000;

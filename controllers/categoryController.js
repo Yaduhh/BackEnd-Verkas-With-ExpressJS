@@ -2,6 +2,7 @@ const Category = require('../models/Category');
 const Branch = require('../models/Branch');
 const LogService = require('../services/logService');
 const SavingsAllocation = require('../models/SavingsAllocation');
+const { query } = require('../config/database');
 
 const getAll = async (req, res, next) => {
   try {
@@ -173,6 +174,141 @@ const update = async (req, res, next) => {
     const changes = {};
     if (name !== undefined && existing.name !== name) {
       changes.name = { old: existing.name, new: name };
+
+      // Propagate category rename into saved report orders, adjustments, and templates
+      try {
+        const oldName = existing.name;
+        const newName = category.name;
+        const branchFilterSql = existing.branch_id ? 'AND branch_id = ?' : '';
+        const branchParams = existing.branch_id ? [existing.branch_id] : [];
+
+        // 1. Update branch_reports (expense_order & expense_adjustments)
+        const reportRows = await query(
+          `SELECT id, expense_order, expense_adjustments FROM branch_reports
+           WHERE (expense_order LIKE ? OR expense_adjustments LIKE ?) ${branchFilterSql}`,
+          [`%${oldName}%`, `%${oldName}%`, ...branchParams]
+        );
+        for (const r of reportRows) {
+          let updatedOrder = null;
+          let updatedAdjs = null;
+
+          if (r.expense_order) {
+            try {
+              const parsedOrder = typeof r.expense_order === 'string' ? JSON.parse(r.expense_order) : r.expense_order;
+              if (Array.isArray(parsedOrder) && parsedOrder.includes(oldName)) {
+                updatedOrder = JSON.stringify(parsedOrder.map(item => (item === oldName ? newName : item)));
+              }
+            } catch (e) {}
+          }
+
+          if (r.expense_adjustments) {
+            try {
+              const parsedAdjs = typeof r.expense_adjustments === 'string' ? JSON.parse(r.expense_adjustments) : r.expense_adjustments;
+              if (Array.isArray(parsedAdjs) && parsedAdjs.some(a => a && a.parent_category === oldName)) {
+                updatedAdjs = JSON.stringify(parsedAdjs.map(a => (a && a.parent_category === oldName ? { ...a, parent_category: newName } : a)));
+              }
+            } catch (e) {}
+          }
+
+          if (updatedOrder !== null || updatedAdjs !== null) {
+            await query(
+              `UPDATE branch_reports SET
+                 expense_order = COALESCE(?, expense_order),
+                 expense_adjustments = COALESCE(?, expense_adjustments)
+               WHERE id = ?`,
+              [updatedOrder, updatedAdjs, r.id]
+            );
+          }
+        }
+
+        // 2. Update expense_order_templates
+        const tplRows = await query(
+          `SELECT id, template_data FROM expense_order_templates
+           WHERE template_data LIKE ? ${branchFilterSql}`,
+          [`%${oldName}%`, ...branchParams]
+        );
+        for (const t of tplRows) {
+          try {
+            const parsedTpl = typeof t.template_data === 'string' ? JSON.parse(t.template_data) : t.template_data;
+            let changed = false;
+            if (Array.isArray(parsedTpl)) {
+              if (parsedTpl.includes(oldName)) {
+                const newArr = parsedTpl.map(item => (item === oldName ? newName : item));
+                await query(`UPDATE expense_order_templates SET template_data = ? WHERE id = ?`, [JSON.stringify(newArr), t.id]);
+              }
+            } else if (parsedTpl && typeof parsedTpl === 'object') {
+              const nextTpl = { ...parsedTpl };
+              if (Array.isArray(nextTpl.order) && nextTpl.order.includes(oldName)) {
+                nextTpl.order = nextTpl.order.map(item => (item === oldName ? newName : item));
+                changed = true;
+              }
+              if (Array.isArray(nextTpl.disabledCategories) && nextTpl.disabledCategories.includes(oldName)) {
+                nextTpl.disabledCategories = nextTpl.disabledCategories.map(item => (item === oldName ? newName : item));
+                changed = true;
+              }
+              if (nextTpl.savingsAllocations && typeof nextTpl.savingsAllocations === 'object' && nextTpl.savingsAllocations[oldName] !== undefined) {
+                const nextSavings = { ...nextTpl.savingsAllocations, [newName]: nextTpl.savingsAllocations[oldName] };
+                delete nextSavings[oldName];
+                nextTpl.savingsAllocations = nextSavings;
+                changed = true;
+              }
+              if (changed) {
+                await query(`UPDATE expense_order_templates SET template_data = ? WHERE id = ?`, [JSON.stringify(nextTpl), t.id]);
+              }
+            }
+          } catch (e) {}
+        }
+
+        // 3. Update group_reports
+        const groupRows = await query(
+          `SELECT id, expense_order, expense_adjustments, disabled_categories FROM group_reports
+           WHERE expense_order LIKE ? OR expense_adjustments LIKE ? OR disabled_categories LIKE ?`,
+          [`%${oldName}%`, `%${oldName}%`, `%${oldName}%`]
+        );
+        for (const gr of groupRows) {
+          let updatedOrder = null;
+          let updatedAdjs = null;
+          let updatedDisabled = null;
+
+          if (gr.expense_order) {
+            try {
+              const parsedOrder = typeof gr.expense_order === 'string' ? JSON.parse(gr.expense_order) : gr.expense_order;
+              if (Array.isArray(parsedOrder) && parsedOrder.includes(oldName)) {
+                updatedOrder = JSON.stringify(parsedOrder.map(item => (item === oldName ? newName : item)));
+              }
+            } catch (e) {}
+          }
+          if (gr.expense_adjustments) {
+            try {
+              const parsedAdjs = typeof gr.expense_adjustments === 'string' ? JSON.parse(gr.expense_adjustments) : gr.expense_adjustments;
+              if (Array.isArray(parsedAdjs) && parsedAdjs.some(a => a && a.parent_category === oldName)) {
+                updatedAdjs = JSON.stringify(parsedAdjs.map(a => (a && a.parent_category === oldName ? { ...a, parent_category: newName } : a)));
+              }
+            } catch (e) {}
+          }
+          if (gr.disabled_categories) {
+            try {
+              const parsedDis = typeof gr.disabled_categories === 'string' ? JSON.parse(gr.disabled_categories) : gr.disabled_categories;
+              if (Array.isArray(parsedDis) && parsedDis.includes(oldName)) {
+                updatedDisabled = JSON.stringify(parsedDis.map(item => (item === oldName ? newName : item)));
+              }
+            } catch (e) {}
+          }
+
+          if (updatedOrder !== null || updatedAdjs !== null || updatedDisabled !== null) {
+            await query(
+              `UPDATE group_reports SET
+                 expense_order = COALESCE(?, expense_order),
+                 expense_adjustments = COALESCE(?, expense_adjustments),
+                 disabled_categories = COALESCE(?, disabled_categories)
+               WHERE id = ?`,
+              [updatedOrder, updatedAdjs, updatedDisabled, gr.id]
+            );
+          }
+        }
+      } catch (syncErr) {
+        console.error('Error syncing category rename to reports:', syncErr);
+      }
     }
     if (code !== undefined && existing.code !== code) {
       changes.code = { old: existing.code, new: code };
