@@ -531,23 +531,32 @@ const getReport = async (req, res, next) => {
             });
         }
 
+        const fullReport = {
+            ...report,
+            omzet_total: finalOmzetTotal,
+            pengeluaran_total: systemPengeluaran,
+            profit: finalProfit,
+            pelunasan_piutang_bulan_lalu: pelunasanPiutangBulanLalu,
+            prev_month_label: prevMonthName,
+            income_breakdown: incomeBreakdown,
+            expense_breakdown: expenseBreakdown,
+            system_sales_channels: systemSalesChannels,
+            master_sales_channels: masterSalesChannelsResult,
+            unallocated_omzet: omzetWithoutChannels
+        };
+
+        if (req._returnReportOnly) {
+            return fullReport;
+        }
+
         return res.json({
             success: true,
             data: {
-                report: {
-                    ...report,
-                    profit: finalProfit,
-                    pelunasan_piutang_bulan_lalu: pelunasanPiutangBulanLalu,
-                    prev_month_label: prevMonthName,
-                    income_breakdown: incomeBreakdown,
-                    expense_breakdown: expenseBreakdown,
-                    system_sales_channels: systemSalesChannels,
-                    master_sales_channels: masterSalesChannelsResult,
-                    unallocated_omzet: omzetWithoutChannels
-                },
+                report: fullReport,
             },
         });
     } catch (error) {
+        if (req._returnReportOnly) throw error;
         next(error);
     }
 };
@@ -593,217 +602,20 @@ const updateReport = async (req, res, next) => {
             return res.status(404).json({ success: false, message: 'Laporan tidak ditemukan, fetch dulu' });
         }
 
-        // Recalculate profit consistently with getReport
-        const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
-        const daysInMonth = new Date(year, month, 0).getDate();
-        const endDate = `${year}-${String(month).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
-
-        const incomeResult = await query(
-            `SELECT 
-                SUM(
-                    CASE 
-                        WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
-                        ELSE (t.amount + COALESCE(future_ref.amount, 0)) 
-                    END
-                ) as total_gross,
-                SUM(
-                    COALESCE((
-                        SELECT SUM(tid.amount_app)
-                        FROM transaction_income_details tid
-                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
-                    ), 0)
-                ) as taxable_amount,
-                SUM(
-                    COALESCE((
-                        SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
-                        FROM transaction_income_details tid
-                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
-                    ), t.pb1, 0)
-                ) as total_pb1
-             FROM transactions t
-             LEFT JOIN categories c ON t.category_id = c.id
-             LEFT JOIN (
-                 SELECT transaction_id, SUM(amount) as amount 
-                 FROM transaction_refunds 
-                 WHERE refund_date > ? 
-                 GROUP BY transaction_id
-             ) future_ref ON t.id = future_ref.transaction_id
-             WHERE t.branch_id = ? 
-               AND t.type = 'income' 
-               AND t.transaction_date BETWEEN ? AND ? 
-               AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-               AND t.is_umum = true
-               AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)`,
-            [endDate, branchId, startDate, endDate]
-        );
-
-        const pastIncomeRefundsResult = await query(
-            `SELECT COALESCE(SUM(tr.amount), 0) as total_past_refunds
-             FROM transaction_refunds tr
-             JOIN transactions t ON tr.transaction_id = t.id
-             WHERE t.branch_id = ?
-               AND t.type = 'income'
-               AND tr.refund_date BETWEEN ? AND ?
-               AND t.transaction_date < ?
-               AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-               AND t.is_umum = true`,
-            [branchId, startDate, endDate, startDate]
-        );
-        const pastIncomeRefunds = parseFloat(pastIncomeRefundsResult[0]?.total_past_refunds || 0);
-
-        const systemOmzetGross = (parseFloat(incomeResult[0].total_gross) || 0) - pastIncomeRefunds;
-        const systemTaxable = parseFloat(incomeResult[0].taxable_amount) || 0;
-        const systemPb1 = incomeResult[0]?.total_pb1 !== undefined && incomeResult[0]?.total_pb1 !== null
-            ? parseFloat(incomeResult[0].total_pb1) || 0
-            : Math.round((systemTaxable * 10) / 110);
-        const systemOmzet = systemOmzetGross - systemPb1;
-
-        // Recalculate net expense consistently with getReport logic
-        const folderResult = await query(
-            `SELECT SUM(total) as grand_total FROM (
-                /* 1. Pengeluaran Reguler & Retur dalam periode */
-                SELECT 
-                    (CASE 
-                        WHEN t.type = 'expense' THEN 
-                            (CASE WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) ELSE (t.amount + COALESCE(future_ref.amount, 0)) END) + COALESCE(t.pb1, 0)
-                        ELSE 
-                            -(t.amount + COALESCE(future_ref.amount, 0) + COALESCE(t.pb1, 0))
-                    END) as total 
-                FROM transactions t 
-                LEFT JOIN categories c ON t.category_id = c.id 
-                LEFT JOIN (
-                    SELECT transaction_id, SUM(amount) as amount 
-                    FROM transaction_refunds 
-                    WHERE refund_date > ? 
-                    GROUP BY transaction_id
-                ) future_ref ON t.id = future_ref.transaction_id
-                WHERE t.branch_id = ? 
-                  AND t.transaction_date BETWEEN ? AND ? 
-                  AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-                  AND t.is_umum = true
-                  AND (t.is_savings = 0 OR t.is_savings IS NULL)
-                  AND (
-                    t.type = 'expense' 
-                    OR (t.type = 'income' AND t.category_id IN (
-                       SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false
-                    ))
-                  )
-
-                UNION ALL
-
-                /* 2. Rincian Simpanan */
-                SELECT tsd.amount as total
-                FROM transaction_savings_details tsd
-                JOIN transactions t ON tsd.transaction_id = t.id
-                JOIN categories c ON tsd.category_id = c.id
-                WHERE t.branch_id = ? 
-                  AND t.transaction_date BETWEEN ? AND ? 
-                  AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-                  AND t.is_umum = true
-                  AND t.type = 'expense'
-                  AND t.is_savings = 1
-
-                UNION ALL
-
-                /* 3. Refund yang terjadi di periode ini untuk transaksi pengeluaran sebelum startDate */
-                SELECT -tr.amount as total
-                FROM transaction_refunds tr
-                JOIN transactions t ON tr.transaction_id = t.id
-                WHERE t.branch_id = ?
-                  AND t.type = 'expense'
-                  AND tr.refund_date BETWEEN ? AND ?
-                  AND t.transaction_date < ?
-                  AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-                  AND t.is_umum = true
-                  AND (t.is_savings = 0 OR t.is_savings IS NULL)
-            ) as subtotals`,
-            [endDate, branchId, startDate, endDate, branchId, branchId, startDate, endDate, branchId, startDate, endDate, startDate]
-        );
-        const folderPengeluaran = parseFloat(folderResult[0].grand_total) || 0;
-
-        const mitraPiutangResult = await query(
-            `SELECT (
-                SELECT COALESCE(SUM(t.remaining_debt + COALESCE((
-                  SELECT SUM(tr.amount)
-                  FROM transaction_repayments tr
-                  WHERE tr.transaction_id = t.id
-                    AND tr.payment_date > ?
-                ), 0)), 0)
-                FROM transactions t
-                JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
-                WHERE mp.branch_id = ? AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL) AND mp.deleted_at IS NULL
-                AND t.transaction_date BETWEEN ? AND ?
-                AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
-              ) + (
-                SELECT COALESCE(SUM(tmd.remaining_debt + COALESCE((
-                  SELECT SUM(tr.amount)
-                  FROM transaction_repayments tr
-                  WHERE tr.transaction_id = t.id
-                    AND tr.mitra_piutang_id = mp.id
-                    AND tr.payment_date > ?
-                ), 0)), 0)
-                FROM transaction_mitra_details tmd
-                JOIN transactions t ON tmd.transaction_id = t.id
-                JOIN mitra_piutang mp ON tmd.mitra_piutang_id = mp.id
-                WHERE mp.branch_id = ? AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL) AND mp.deleted_at IS NULL
-                AND t.transaction_date BETWEEN ? AND ?
-              ) as total_piutang`,
-            [
-              endDate + ' 23:59:59',
-              branchId,
-              startDate + ' 00:00:00',
-              endDate + ' 23:59:59',
-              endDate + ' 23:59:59',
-              branchId,
-              startDate + ' 00:00:00',
-              endDate + ' 23:59:59'
-            ]
-        );
-        const totalPiutangMitra = parseFloat(mitraPiutangResult[0].total_piutang) || 0;
-        const systemPengeluaran = folderPengeluaran + totalPiutangMitra;
-
-        const debtRepaymentResult = await query(
-            `SELECT SUM(tr.amount) as total FROM transaction_repayments tr JOIN transactions t ON tr.transaction_id = t.id WHERE tr.payment_date BETWEEN ? AND ? AND t.transaction_date < ? AND t.branch_id = ? AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)`,
-            [startDate, endDate, startDate, branchId]
-        );
-        const pelunasanPiutangBulanLalu = parseFloat(debtRepaymentResult[0].total) || 0;
-
-        // Total Income = Folders + Previous Month Repayments
-        const finalOmzetTotal = systemOmzet + pelunasanPiutangBulanLalu;
-
-        await BranchReport.upsert(branchId, month, year, {
-            omzetTotal: finalOmzetTotal,
-            pengeluaranTotal: systemPengeluaran
-        });
-
-        const finalProfit = finalOmzetTotal - systemPengeluaran;
-
-        // Fetch system sales channels (NET after PB1, per-transaction reconciled)
-        const systemSalesChannels = await computeBranchSystemSalesChannels(branchId, startDate, endDate);
-
-        const masterSalesChannelsResult = await query(
-            `SELECT id, name, is_active FROM sales_channels
-             WHERE branch_id = ?
-               AND status_deleted = 0
-               AND is_active = 1
-             ORDER BY name ASC`,
-            [branchId]
-        );
+        // Recalculate and return full report consistently with getReport
+        const fakeReq = {
+            ...req,
+            params: { branchId },
+            query: { ...req.query, month, year },
+            _returnReportOnly: true
+        };
+        const fullUpdatedReport = await getReport(fakeReq, res, next);
 
         return res.json({
             success: true,
             message: 'Laporan berhasil disimpan',
             data: {
-                report: {
-                    ...updated,
-                    omzet_total: finalOmzetTotal,
-                    profit: finalProfit,
-                    pelunasan_piutang_bulan_lalu: pelunasanPiutangBulanLalu,
-                    system_sales_channels: systemSalesChannels,
-                    master_sales_channels: masterSalesChannelsResult
-                },
+                report: fullUpdatedReport,
             },
         });
     } catch (error) {
