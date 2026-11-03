@@ -1159,7 +1159,7 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
     renderStokRow('Nilai Stok Akhir', stokAkhirNum, hasStokAkhir);
 
     const hasStokData = hasStokAwal || hasStokAkhir;
-    const selisihStok = stokAwalNum - stokAkhirNum;
+    const selisihStok = stokAkhirNum - stokAwalNum;
     renderStokRow('Selisih Nilai Stok', selisihStok, hasStokData);
 
     // Ensure output filepath

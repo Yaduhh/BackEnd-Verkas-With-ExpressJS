@@ -1517,7 +1517,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         (data.stok_awal !== null && data.stok_awal !== undefined && data.stok_awal !== '') ||
         (data.stok_akhir !== null && data.stok_akhir !== undefined && data.stok_akhir !== '')
     );
-    const selisihStok = stokAwalNum - stokAkhirNum;
+    const selisihStok = stokAkhirNum - stokAwalNum;
 
     drawCell(margin, y, wNo + wName, rowH, { bg: '#ffffff', text: 'Selisih Nilai Stok', font: fontRegular, fontSize: 8.5, paddingLeft: 8 });
     drawCell(margin + wNo + wName, y, wAmount + wPerc, rowH, { 
