@@ -1674,6 +1674,44 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
                     pct
                 });
             } else {
+                const elbowX = isRight ? cx + r + 32 : cx - r - 32;
+                const endX = isRight ? elbowX + 28 : elbowX - 28;
+                const textX = isRight ? endX + 12 : endX - 12;
+                const maxLabelWidth = isRight ? (width - 28 - textX) : (textX - 28);
+
+                let cleanName = String(item.name || '')
+                    .replace(/\(\s*Grab,\s*Go\s*Food,\s*Dll\s*\)/i, '(Grab/GoFood/dll)')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+
+                let titleLines = [cleanName];
+                const estSingleWidth = doc.font(fontBold).fontSize(42).widthOfString(cleanName) * 1.12;
+                const parenIdx = cleanName.indexOf('(');
+                if (parenIdx > 2 && (estSingleWidth > maxLabelWidth * 0.88 || cleanName.length > 18)) {
+                    const beforeParen = cleanName.slice(0, parenIdx).trim();
+                    const parenPart = cleanName.slice(parenIdx).trim();
+                    if (beforeParen && parenPart) {
+                        titleLines = [beforeParen, parenPart];
+                    }
+                } else if (estSingleWidth > maxLabelWidth || cleanName.length > 21) {
+                    const words = cleanName.split(' ');
+                    if (words.length >= 2) {
+                        let bestSplit = 1;
+                        let bestDiff = Infinity;
+                        for (let i = 1; i < words.length; i++) {
+                            const l1 = words.slice(0, i).join(' ');
+                            const l2 = words.slice(i).join(' ');
+                            const diff = Math.abs(l1.length - l2.length);
+                            if (diff < bestDiff) {
+                                bestDiff = diff;
+                                bestSplit = i;
+                            }
+                        }
+                        titleLines = [words.slice(0, bestSplit).join(' '), words.slice(bestSplit).join(' ')];
+                    }
+                }
+
+                const isTwoLineTitle = titleLines.length > 1;
                 calloutItems.push({
                     item,
                     pct,
@@ -1683,6 +1721,9 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
                     x_edge: cx + r * Math.cos(midAngle),
                     y_edge: cy + r * Math.sin(midAngle),
                     isRight,
+                    titleLines,
+                    topExtent: isTwoLineTitle ? 98 : 56,
+                    bottomExtent: isTwoLineTitle ? 56 : 52,
                     initialY: cy + (r + 60) * Math.sin(midAngle)
                 });
 
@@ -1706,32 +1747,47 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         const lefts = calloutItems.filter(d => !d.isRight).sort((a, b) => a.initialY - b.initialY);
         const rights = calloutItems.filter(d => d.isRight).sort((a, b) => a.initialY - b.initialY);
 
-        const baseGap = 120;
         function relax(list) {
             if (list.length === 0) return;
-            const minAllowedY = 75;
-            const maxAllowedY = height - 75;
-            const minGap = list.length > 1
-                ? Math.min(baseGap, (maxAllowedY - minAllowedY) / (list.length - 1))
-                : baseGap;
+            const minAllowedTop = 28;
+            const maxAllowedBottom = height - 28;
+            let totalNeeded = 0;
+            for (let i = 0; i < list.length; i++) {
+                totalNeeded += list[i].topExtent + list[i].bottomExtent;
+            }
+            const availSpan = maxAllowedBottom - minAllowedTop;
+            const extraPadding = list.length > 1
+                ? Math.min(18, Math.max(4, (availSpan - totalNeeded) / (list.length - 1)))
+                : 14;
+            const scaleFactor = totalNeeded > availSpan ? (availSpan / totalNeeded) : 1;
+
+            const pairGap = (idxA, idxB) => ((list[idxA].bottomExtent + list[idxB].topExtent) * scaleFactor) + extraPadding;
+
+            const firstMinY = minAllowedTop + list[0].topExtent * scaleFactor;
+            const lastMaxY = maxAllowedBottom - list[list.length - 1].bottomExtent * scaleFactor;
+
+            if (list[0].initialY < firstMinY) list[0].initialY = firstMinY;
             for (let i = 1; i < list.length; i++) {
-                if (list[i].initialY < list[i - 1].initialY + minGap) {
-                    list[i].initialY = list[i - 1].initialY + minGap;
+                const reqY = list[i - 1].initialY + pairGap(i - 1, i);
+                if (list[i].initialY < reqY) {
+                    list[i].initialY = reqY;
                 }
             }
-            if (list[list.length - 1].initialY > maxAllowedY) {
-                list[list.length - 1].initialY = maxAllowedY;
+            if (list[list.length - 1].initialY > lastMaxY) {
+                list[list.length - 1].initialY = lastMaxY;
                 for (let i = list.length - 2; i >= 0; i--) {
-                    if (list[i].initialY > list[i + 1].initialY - minGap) {
-                        list[i].initialY = list[i + 1].initialY - minGap;
+                    const maxY = list[i + 1].initialY - pairGap(i, i + 1);
+                    if (list[i].initialY > maxY) {
+                        list[i].initialY = maxY;
                     }
                 }
             }
-            if (list[0].initialY < minAllowedY) {
-                list[0].initialY = minAllowedY;
+            if (list[0].initialY < firstMinY) {
+                list[0].initialY = firstMinY;
                 for (let i = 1; i < list.length; i++) {
-                    if (list[i].initialY < list[i - 1].initialY + minGap) {
-                        list[i].initialY = list[i - 1].initialY + minGap;
+                    const reqY = list[i - 1].initialY + pairGap(i - 1, i);
+                    if (list[i].initialY < reqY) {
+                        list[i].initialY = reqY;
                     }
                 }
             }
@@ -1770,33 +1826,40 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
             const textX = isR ? endX + 12 : endX - 12;
             const maxLabelWidth = isR ? (width - 28 - textX) : (textX - 28);
 
-            let cleanName = d.item.name
-                .replace(/\(\s*Grab,\s*Go\s*Food,\s*Dll\s*\)/i, '(Grab/GoFood/dll)')
-                .replace(/Biaya Marketplace/i, 'Marketplace')
-                .trim();
-
-            const baseTitleSize = 42;
-            const estTitleWidth = doc.font(fontBold).fontSize(baseTitleSize).widthOfString(cleanName) * 1.08;
+            const titleLines = d.titleLines || [d.item.name];
+            const baseTitleSize = titleLines.length > 1 ? 40 : 42;
+            const longestTitleLine = titleLines.reduce((a, b) => (a.length >= b.length ? a : b), '');
+            const estTitleWidth = doc.font(fontBold).fontSize(baseTitleSize).widthOfString(longestTitleLine) * 1.12;
             const titleFontSize = estTitleWidth > maxLabelWidth
-                ? Math.max(24, Math.floor((maxLabelWidth / estTitleWidth) * baseTitleSize))
+                ? Math.max(26, Math.floor((maxLabelWidth / estTitleWidth) * baseTitleSize))
                 : baseTitleSize;
-            const estTitleWidthAfterScale = doc.font(fontBold).fontSize(titleFontSize).widthOfString(cleanName) * 1.08;
-            const titleLengthAttr = estTitleWidthAfterScale > maxLabelWidth
-                ? ` textLength="${Math.floor(maxLabelWidth)}" lengthAdjust="spacingAndGlyphs"`
-                : '';
 
             const baseSubSize = 36;
             const rawSubText = `${d.amtStr} (${d.pctStr})`;
-            const estSubWidth = doc.font(fontBold).fontSize(baseSubSize).widthOfString(rawSubText) * 1.08;
+            const estSubWidth = doc.font(fontBold).fontSize(baseSubSize).widthOfString(rawSubText) * 1.12;
             const subFontSize = estSubWidth > maxLabelWidth
-                ? Math.max(22, Math.floor((maxLabelWidth / estSubWidth) * baseSubSize))
+                ? Math.max(24, Math.floor((maxLabelWidth / estSubWidth) * baseSubSize))
                 : baseSubSize;
+
+            let titleSvg = '';
+            if (titleLines.length > 1) {
+                titleSvg = `
+                    <text x="${textX.toFixed(1)}" y="${(yFinal - 54).toFixed(1)}" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="${titleFontSize}" text-anchor="${textAnchor}">${escapeXml(titleLines[0])}</text>
+                    <text x="${textX.toFixed(1)}" y="${(yFinal - 8).toFixed(1)}" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="${titleFontSize}" text-anchor="${textAnchor}">${escapeXml(titleLines[1])}</text>
+                `;
+            } else {
+                titleSvg = `
+                    <text x="${textX.toFixed(1)}" y="${(yFinal - 14).toFixed(1)}" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="${titleFontSize}" text-anchor="${textAnchor}">${escapeXml(titleLines[0])}</text>
+                `;
+            }
+
+            const subY = titleLines.length > 1 ? (yFinal + 38) : (yFinal + 36);
 
             calloutsSvg += `
                 <polyline points="${d.x_edge.toFixed(1)},${d.y_edge.toFixed(1)} ${elbowX.toFixed(1)},${yFinal.toFixed(1)} ${endX.toFixed(1)},${yFinal.toFixed(1)}" fill="none" stroke="${d.item.color}" stroke-width="4.5" />
                 <circle cx="${d.x_edge.toFixed(1)}" cy="${d.y_edge.toFixed(1)}" r="9" fill="${d.item.color}" stroke="#ffffff" stroke-width="2" />
-                <text x="${textX.toFixed(1)}" y="${(yFinal - 14).toFixed(1)}" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="${titleFontSize}" text-anchor="${textAnchor}"${titleLengthAttr}>${escapeXml(cleanName)}</text>
-                <text x="${textX.toFixed(1)}" y="${(yFinal + 36).toFixed(1)}" fill="#4b5563" font-family="Arial, Helvetica, sans-serif" font-size="${subFontSize}" text-anchor="${textAnchor}">${d.amtStr} <tspan font-weight="bold" fill="${d.item.color}">(${d.pctStr})</tspan></text>
+                ${titleSvg}
+                <text x="${textX.toFixed(1)}" y="${subY.toFixed(1)}" fill="#4b5563" font-family="Arial, Helvetica, sans-serif" font-size="${subFontSize}" text-anchor="${textAnchor}">${d.amtStr} <tspan font-weight="bold" fill="${d.item.color}">(${d.pctStr})</tspan></text>
             `;
         });
 
