@@ -991,11 +991,68 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         return p.replace('.', ',') + '%';
     };
 
+    const reconcilePercentages = (amounts, base) => {
+        if (!base || base <= 0 || !Array.isArray(amounts) || amounts.length === 0) {
+            return (amounts || []).map(() => 0);
+        }
+        const rawBps = amounts.map(a => ((Math.max(0, Number(a) || 0) / base) * 10000));
+        const roundedBps = rawBps.map(bp => Math.round(bp));
+        const sumAmounts = amounts.reduce((s, a) => s + Math.max(0, Number(a) || 0), 0);
+
+        if (Math.abs(sumAmounts - base) <= Math.max(2, base * 0.0001)) {
+            let diff = 10000 - roundedBps.reduce((s, bp) => s + bp, 0);
+            if (diff !== 0) {
+                const step = diff > 0 ? 1 : -1;
+                const indices = amounts.map((_, idx) => idx).sort((a, b) => {
+                    const aSubstantial = roundedBps[a] >= 10 ? 1 : 0;
+                    const bSubstantial = roundedBps[b] >= 10 ? 1 : 0;
+                    if (aSubstantial !== bSubstantial) return bSubstantial - aSubstantial;
+                    const remA = (rawBps[a] - roundedBps[a]) * step;
+                    const remB = (rawBps[b] - roundedBps[b]) * step;
+                    if (Math.abs(remB - remA) > 1e-9) return remB - remA;
+                    return (Number(amounts[b]) || 0) - (Number(amounts[a]) || 0);
+                });
+                let i = 0;
+                while (diff !== 0 && indices.length > 0 && i < indices.length * 4) {
+                    const targetIdx = indices[i % indices.length];
+                    if (roundedBps[targetIdx] + step >= 0) {
+                        roundedBps[targetIdx] += step;
+                        diff -= step;
+                    }
+                    i++;
+                }
+            }
+        }
+        return roundedBps.map(bp => bp / 100);
+    };
+
     // Column dimensions for table layout
-    const wNo = 34;
-    const wName = 286.28;
-    const wAmount = 140;
-    const wPerc = 75;
+    const wNo = 30;
+    const wName = 315.28;
+    const wAmount = 128;
+    const wPerc = 62;
+
+    const getFlexibleCellMetrics = (text, width, { font = fontRegular, fontSize = 8.5, paddingLeft = 8, paddingRight = 5, baseHeight = 18, minFontSize = 7.2, prefixText = '' } = {}) => {
+        const str = String(text || '');
+        const pStr = String(prefixText || '');
+        const availWidth = Math.max(20, width - paddingLeft - paddingRight);
+        doc.font(font).fontSize(fontSize);
+        const fullOneLineWidth = doc.widthOfString(pStr + str);
+        if (fullOneLineWidth <= availWidth) {
+            return { rowHeight: baseHeight, fittedFontSize: fontSize };
+        }
+        const scaledSize = (availWidth / fullOneLineWidth) * fontSize;
+        if (scaledSize >= minFontSize) {
+            return { rowHeight: baseHeight, fittedFontSize: Math.floor(scaledSize * 10) / 10 };
+        }
+        const wrapFontSize = 7.5;
+        doc.font(font).fontSize(wrapFontSize);
+        const pWidth = pStr ? doc.widthOfString(pStr) : 0;
+        const bodyWidth = Math.max(20, availWidth - pWidth);
+        const wrappedHeight = doc.heightOfString(str, { width: bodyWidth, lineGap: 1 });
+        const dynamicHeight = Math.max(baseHeight, Math.ceil(wrappedHeight) + 8);
+        return { rowHeight: dynamicHeight, fittedFontSize: wrapFontSize };
+    };
 
     const drawCell = (x, currentY, width, height, cellOpts = {}) => {
         const {
@@ -1003,6 +1060,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
             border = '#000000',
             borderWidth = 0.5,
             text = '',
+            prefixText = '',
             font = fontRegular,
             fontSize = 8.5,
             textColor = '#000000',
@@ -1027,9 +1085,26 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
             doc.text('Rp', x + paddingLeft, textY, { width: 22, align: 'left', lineBreak: false });
             doc.text(String(rpAmount), x + 22, textY, { width: width - 22 - paddingRight, align: 'right', lineBreak: false });
         } else if (text !== undefined && text !== null && text !== '') {
+            const str = String(text);
             doc.font(font).fontSize(fontSize).fillColor(textColor);
             const textWidth = width - paddingLeft - paddingRight;
-            doc.text(String(text), x + paddingLeft, textY, { width: textWidth, align: align, lineBreak: false });
+            if (prefixText) {
+                const pStr = String(prefixText);
+                const pWidth = doc.widthOfString(pStr);
+                const bodyWidth = Math.max(20, textWidth - pWidth);
+                const bodyHeight = doc.heightOfString(str, { width: bodyWidth, lineGap: 1 });
+                const bodyY = bodyHeight > fontSize * 1.4
+                    ? currentY + Math.max(2, (height - bodyHeight) / 2) - 0.5
+                    : textY;
+                doc.text(pStr, x + paddingLeft, bodyY, { width: pWidth + 2, align: 'left', lineBreak: false });
+                doc.text(str, x + paddingLeft + pWidth, bodyY, { width: bodyWidth, align: align, lineGap: 1 });
+            } else {
+                const blockHeight = doc.heightOfString(str, { width: textWidth, lineGap: 1 });
+                const blockY = blockHeight > fontSize * 1.4
+                    ? currentY + Math.max(2, (height - blockHeight) / 2) - 0.5
+                    : textY;
+                doc.text(str, x + paddingLeft, blockY, { width: textWidth, align: align, lineGap: 1 });
+            }
         }
     };
 
@@ -1123,43 +1198,26 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     });
     const totalSalesChannels = salesChannelsList.reduce((sum, sc) => sum + (Number(sc.amount) || 0), 0);
 
+    const pemasukanRows = [];
+
     // A) Sales channels
     if (salesChannelsList.length === 0) {
         if (totalOmzetNet > 0) {
-            checkNewPage(rowH);
-            const percStr = formatPercent(totalOmzetNet, totalPemasukanFinal);
-            drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
-            drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: 'Omzet Penjualan', font: fontBold, fontSize: 8.5, paddingLeft: 8 });
-            drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(totalOmzetNet), font: fontBold, fontSize: 8.5 });
-            drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
-            y += rowH;
+            pemasukanRows.push({ name: 'Omzet Penjualan', amount: totalOmzetNet });
         }
     } else {
         salesChannelsList.forEach((sc) => {
-            checkNewPage(rowH);
             let scName = (sc.name || sc.channel_name || '').trim();
             // Remove redundant 'Omzet' / 'Omset' prefix if present so channel names like 'Oz Dine In' remain clean
             scName = scName.replace(/^(omzet|omset)\s+/i, '');
             const amt = Number(sc.amount) || 0;
-            const percStr = formatPercent(amt, totalPemasukanFinal);
-
-            drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
-            drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: scName, font: fontBold, fontSize: 8.5, paddingLeft: 8 });
-            drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(amt), font: fontBold, fontSize: 8.5 });
-            drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
-            y += rowH;
+            pemasukanRows.push({ name: scName, amount: amt });
         });
 
         // If there is unallocated omzet not covered by the channels
         const unallocatedOmzet = totalOmzetNet - totalSalesChannels;
         if (unallocatedOmzet >= 1) {
-            checkNewPage(rowH);
-            const percStr = formatPercent(unallocatedOmzet, totalPemasukanFinal);
-            drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
-            drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: 'Omzet Belum Teralokasi Channel', font: fontBold, fontSize: 8.5, paddingLeft: 8 });
-            drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(unallocatedOmzet), font: fontBold, fontSize: 8.5 });
-            drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
-            y += rowH;
+            pemasukanRows.push({ name: 'Omzet Belum Teralokasi Channel', amount: unallocatedOmzet });
         }
     }
 
@@ -1169,33 +1227,31 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         return n.includes('lain') || (!n.includes('omzet') && !n.includes('omset'));
     });
     otherIncomes.forEach(it => {
-        checkNewPage(rowH);
         const amt = Number(it.total) || 0;
-        const percStr = formatPercent(amt, totalPemasukanFinal);
         const displayName = (it.category_name || '').toLowerCase().includes('lain')
             ? 'Pendapatan Lain-lain'
             : it.category_name;
-
-        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
-        drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: displayName, font: fontBold, fontSize: 8.5, paddingLeft: 8 });
-        drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(amt), font: fontBold, fontSize: 8.5 });
-        drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
-        y += rowH;
+        pemasukanRows.push({ name: displayName, amount: amt });
     });
 
     // C) Pelunasan Piutang Bulan Lalu (if any)
     if (data.pelunasan_piutang_bulan_lalu && Number(data.pelunasan_piutang_bulan_lalu) > 0) {
-        checkNewPage(rowH);
         const amt = Number(data.pelunasan_piutang_bulan_lalu);
-        const percStr = formatPercent(amt, totalPemasukanFinal);
         const label = `Pelunasan Piutang ${data.prev_month_label || 'Bulan Lalu'}`;
-
-        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
-        drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: label, font: fontBold, fontSize: 8.5, paddingLeft: 8 });
-        drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(amt), font: fontBold, fontSize: 8.5 });
-        drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
-        y += rowH;
+        pemasukanRows.push({ name: label, amount: amt });
     }
+
+    const pemasukanPcts = reconcilePercentages(pemasukanRows.map(r => r.amount), totalPemasukanFinal);
+    pemasukanRows.forEach((row, idx) => {
+        const { rowHeight: curH, fittedFontSize } = getFlexibleCellMetrics(row.name, wName, { font: fontBold, fontSize: 8.5, paddingLeft: 8, baseHeight: rowH });
+        checkNewPage(curH);
+        const percStr = pemasukanPcts[idx].toFixed(2).replace('.', ',') + '%';
+        drawCell(margin, y, wNo, curH, { bg: '#ffffff', text: `${pemIdx++}`, font: fontBold, fontSize: 8.5, align: 'center' });
+        drawCell(margin + wNo, y, wName, curH, { bg: '#ffffff', text: row.name, font: fontBold, fontSize: fittedFontSize, paddingLeft: 8 });
+        drawCell(margin + wNo + wName, y, wAmount, curH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(row.amount), font: fontBold, fontSize: 8.5 });
+        drawCell(margin + wNo + wName + wAmount, y, wPerc, curH, { bg: '#ffffff', text: percStr, font: fontBold, fontSize: 8.5, align: 'center' });
+        y += curH;
+    });
 
     // 3. PENGELUARAN SECTION
     const isSimpananItem = (name) => {
@@ -1277,17 +1333,20 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     let expLetterIdx = 0;
 
     regularExpenses.forEach(ex => {
-        checkNewPage(rowH);
         const isChild = Boolean(ex.is_adjustment || ex.is_sub_item);
         const letter = isChild ? '' : (letters[expLetterIdx++] || String(expLetterIdx));
         const amt = Number(ex.total) || 0;
         const percStr = formatPercent(amt, totalPemasukanFinal);
+        const prefixText = isChild ? '  — ' : '';
+        const rowFont = isChild ? fontRegular : fontBold;
+        const { rowHeight: curH, fittedFontSize } = getFlexibleCellMetrics(ex.category_name, wName, { font: rowFont, fontSize: 8.5, paddingLeft: 8, baseHeight: rowH, prefixText });
+        checkNewPage(curH);
 
-        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: letter, font: fontBold, fontSize: 8.5, align: 'center' });
-        drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: isChild ? `  — ${ex.category_name}` : ex.category_name, font: isChild ? fontRegular : fontBold, fontSize: 8.5, paddingLeft: 8 });
-        drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: amt > 0, rpAmount: amt > 0 ? formatCurrencyForPDF(amt) : '-', font: isChild ? fontRegular : fontBold, fontSize: 8.5 });
-        drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: isChild ? fontRegular : fontBold, fontSize: 8.5, align: 'center' });
-        y += rowH;
+        drawCell(margin, y, wNo, curH, { bg: '#ffffff', text: letter, font: fontBold, fontSize: 8.5, align: 'center' });
+        drawCell(margin + wNo, y, wName, curH, { bg: '#ffffff', text: ex.category_name, prefixText, font: rowFont, fontSize: fittedFontSize, paddingLeft: 8 });
+        drawCell(margin + wNo + wName, y, wAmount, curH, { bg: '#ffffff', rpPrefix: amt > 0, rpAmount: amt > 0 ? formatCurrencyForPDF(amt) : '-', font: rowFont, fontSize: 8.5 });
+        drawCell(margin + wNo + wName + wAmount, y, wPerc, curH, { bg: '#ffffff', text: percStr, font: rowFont, fontSize: 8.5, align: 'center' });
+        y += curH;
     });
 
     // Render Simpanan (if any)
@@ -1306,7 +1365,6 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
         // Sub-items for Simpanan (same style as sub-kategori, with lowercase g1, g2...)
         simpananExpenses.forEach((sx, sIdx) => {
-            checkNewPage(rowH);
             const subCode = `${simpananLetter.toLowerCase()}${sIdx + 1}`;
             const sAmt = Number(sx.total) || 0;
             const sPerc = formatPercent(sAmt, totalPemasukanFinal);
@@ -1328,11 +1386,15 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
                 }
             }
 
-            drawCell(margin, y, wNo, rowH, { bg: '#faebe5', text: '', font: fontRegular, fontSize: 8.5, align: 'center' });
-            drawCell(margin + wNo, y, wName, rowH, { bg: '#faebe5', text: `  ${subCode}   ${sTitle}`, font: fontRegular, fontSize: 8.5, paddingLeft: 8 });
-            drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#faebe5', rpPrefix: sAmt > 0, rpAmount: sAmt > 0 ? formatCurrencyForPDF(sAmt) : '-', font: fontRegular, fontSize: 8.5 });
-            drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#faebe5', text: sPerc, font: fontRegular, fontSize: 8.5, align: 'center' });
-            y += rowH;
+            const prefixText = `  ${subCode}   `;
+            const { rowHeight: curH, fittedFontSize } = getFlexibleCellMetrics(sTitle, wName, { font: fontRegular, fontSize: 8.5, paddingLeft: 8, baseHeight: rowH, prefixText });
+            checkNewPage(curH);
+
+            drawCell(margin, y, wNo, curH, { bg: '#faebe5', text: '', font: fontRegular, fontSize: 8.5, align: 'center' });
+            drawCell(margin + wNo, y, wName, curH, { bg: '#faebe5', text: sTitle, prefixText, font: fontRegular, fontSize: fittedFontSize, paddingLeft: 8 });
+            drawCell(margin + wNo + wName, y, wAmount, curH, { bg: '#faebe5', rpPrefix: sAmt > 0, rpAmount: sAmt > 0 ? formatCurrencyForPDF(sAmt) : '-', font: fontRegular, fontSize: 8.5 });
+            drawCell(margin + wNo + wName + wAmount, y, wPerc, curH, { bg: '#faebe5', text: sPerc, font: fontRegular, fontSize: 8.5, align: 'center' });
+            y += curH;
         });
     }
 
@@ -1512,7 +1574,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
         const cx = width / 2;
         const cy = height / 2;
-        const r = 520;
+        const r = 495;
 
         if (validItems.length === 0 || sum === 0) {
             const svg = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
@@ -1548,9 +1610,10 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
             ? (2 * Math.PI * 0.2) / (smallCount || 1)
             : MIN_SLICE_RADIAN;
 
-        validItems.forEach((item) => {
+        const reconciledPcts = reconcilePercentages(validItems.map(it => it.amount), sum);
+        validItems.forEach((item, idx) => {
             const rawAngle = (item.amount / sum) * (2 * Math.PI);
-            const pct = (item.amount / sum) * 100;
+            const pct = reconciledPcts[idx];
             if (rawAngle < effectiveMinRadian) {
                 availableAngle -= effectiveMinRadian;
                 prepped.push({ item, pct, isMin: true, visualAngle: effectiveMinRadian });
@@ -1643,15 +1706,19 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         const lefts = calloutItems.filter(d => !d.isRight).sort((a, b) => a.initialY - b.initialY);
         const rights = calloutItems.filter(d => d.isRight).sort((a, b) => a.initialY - b.initialY);
 
-        const minGap = 120;
+        const baseGap = 120;
         function relax(list) {
             if (list.length === 0) return;
+            const minAllowedY = 75;
+            const maxAllowedY = height - 75;
+            const minGap = list.length > 1
+                ? Math.min(baseGap, (maxAllowedY - minAllowedY) / (list.length - 1))
+                : baseGap;
             for (let i = 1; i < list.length; i++) {
                 if (list[i].initialY < list[i - 1].initialY + minGap) {
                     list[i].initialY = list[i - 1].initialY + minGap;
                 }
             }
-            const maxAllowedY = height - 80;
             if (list[list.length - 1].initialY > maxAllowedY) {
                 list[list.length - 1].initialY = maxAllowedY;
                 for (let i = list.length - 2; i >= 0; i--) {
@@ -1660,7 +1727,6 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
                     }
                 }
             }
-            const minAllowedY = 80;
             if (list[0].initialY < minAllowedY) {
                 list[0].initialY = minAllowedY;
                 for (let i = 1; i < list.length; i++) {
@@ -1676,8 +1742,13 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
         let inSliceSvg = '';
         inSliceLabels.forEach(d => {
+            const maxInSliceWidth = r * 0.9;
+            const estInWidth = doc.font(fontBold).fontSize(48).widthOfString(String(d.name || '')) * 1.06;
+            const inNameSize = estInWidth > maxInSliceWidth
+                ? Math.max(30, Math.floor((maxInSliceWidth / estInWidth) * 48))
+                : 48;
             inSliceSvg += `
-                <text x="${d.tx.toFixed(1)}" y="${(d.ty - 50).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="48" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${escapeXml(d.name)}</text>
+                <text x="${d.tx.toFixed(1)}" y="${(d.ty - 50).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="${inNameSize}" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${escapeXml(d.name)}</text>
                 <text x="${d.tx.toFixed(1)}" y="${(d.ty + 18).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="60" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${d.pctStr}</text>
                 <text x="${d.tx.toFixed(1)}" y="${(d.ty + 78).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="42" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${d.amtStr}</text>
             `;
@@ -1693,21 +1764,39 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         [...lefts, ...rights].forEach(d => {
             const yFinal = d.initialY;
             const isR = d.isRight;
-            const elbowX = isR ? cx + r + 36 : cx - r - 36;
-            const endX = isR ? elbowX + 34 : elbowX - 34;
+            const elbowX = isR ? cx + r + 32 : cx - r - 32;
+            const endX = isR ? elbowX + 28 : elbowX - 28;
             const textAnchor = isR ? 'start' : 'end';
-            const textX = isR ? endX + 14 : endX - 14;
+            const textX = isR ? endX + 12 : endX - 12;
+            const maxLabelWidth = isR ? (width - 28 - textX) : (textX - 28);
+
             let cleanName = d.item.name
                 .replace(/\(\s*Grab,\s*Go\s*Food,\s*Dll\s*\)/i, '(Grab/GoFood/dll)')
                 .replace(/Biaya Marketplace/i, 'Marketplace')
                 .trim();
-            if (cleanName.length > 30) cleanName = cleanName.slice(0, 28) + '...';
+
+            const baseTitleSize = 42;
+            const estTitleWidth = doc.font(fontBold).fontSize(baseTitleSize).widthOfString(cleanName) * 1.08;
+            const titleFontSize = estTitleWidth > maxLabelWidth
+                ? Math.max(24, Math.floor((maxLabelWidth / estTitleWidth) * baseTitleSize))
+                : baseTitleSize;
+            const estTitleWidthAfterScale = doc.font(fontBold).fontSize(titleFontSize).widthOfString(cleanName) * 1.08;
+            const titleLengthAttr = estTitleWidthAfterScale > maxLabelWidth
+                ? ` textLength="${Math.floor(maxLabelWidth)}" lengthAdjust="spacingAndGlyphs"`
+                : '';
+
+            const baseSubSize = 36;
+            const rawSubText = `${d.amtStr} (${d.pctStr})`;
+            const estSubWidth = doc.font(fontBold).fontSize(baseSubSize).widthOfString(rawSubText) * 1.08;
+            const subFontSize = estSubWidth > maxLabelWidth
+                ? Math.max(22, Math.floor((maxLabelWidth / estSubWidth) * baseSubSize))
+                : baseSubSize;
 
             calloutsSvg += `
                 <polyline points="${d.x_edge.toFixed(1)},${d.y_edge.toFixed(1)} ${elbowX.toFixed(1)},${yFinal.toFixed(1)} ${endX.toFixed(1)},${yFinal.toFixed(1)}" fill="none" stroke="${d.item.color}" stroke-width="4.5" />
                 <circle cx="${d.x_edge.toFixed(1)}" cy="${d.y_edge.toFixed(1)}" r="9" fill="${d.item.color}" stroke="#ffffff" stroke-width="2" />
-                <text x="${textX.toFixed(1)}" y="${(yFinal - 14).toFixed(1)}" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="42" text-anchor="${textAnchor}">${escapeXml(cleanName)}</text>
-                <text x="${textX.toFixed(1)}" y="${(yFinal + 36).toFixed(1)}" fill="#4b5563" font-family="Arial, Helvetica, sans-serif" font-size="36" text-anchor="${textAnchor}">${d.amtStr} <tspan font-weight="bold" fill="${d.item.color}">(${d.pctStr})</tspan></text>
+                <text x="${textX.toFixed(1)}" y="${(yFinal - 14).toFixed(1)}" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="${titleFontSize}" text-anchor="${textAnchor}"${titleLengthAttr}>${escapeXml(cleanName)}</text>
+                <text x="${textX.toFixed(1)}" y="${(yFinal + 36).toFixed(1)}" fill="#4b5563" font-family="Arial, Helvetica, sans-serif" font-size="${subFontSize}" text-anchor="${textAnchor}">${d.amtStr} <tspan font-weight="bold" fill="${d.item.color}">(${d.pctStr})</tspan></text>
             `;
         });
 

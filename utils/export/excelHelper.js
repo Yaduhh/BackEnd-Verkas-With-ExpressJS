@@ -530,9 +530,10 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
     });
 
     // Column Setup (Matching the 4 columns of the PDF table)
+    let maxNameColWidth = 52;
     worksheet.columns = [
-        { key: 'no', width: 8 },
-        { key: 'name', width: 46 },
+        { key: 'no', width: 7 },
+        { key: 'name', width: maxNameColWidth },
         { key: 'amount', width: 24 },
         { key: 'percent', width: 15 }
     ];
@@ -692,8 +693,50 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
     });
     const totalSalesChannels = salesChannelsList.reduce((sum, sc) => sum + (Number(sc.amount) || 0), 0);
 
-    const renderDataRow = (noVal, nameVal, amtVal, isBold = true, bgArgb = 'FFFFFFFF', indent = 1, noAlign = 'center') => {
-        worksheet.getRow(currentRow).height = 18;
+    const reconcilePercentages = (amounts, base) => {
+        if (!base || base <= 0 || !Array.isArray(amounts) || amounts.length === 0) {
+            return (amounts || []).map(() => 0);
+        }
+        const rawBps = amounts.map(a => ((Math.max(0, Number(a) || 0) / base) * 10000));
+        const roundedBps = rawBps.map(bp => Math.round(bp));
+        const sumAmounts = amounts.reduce((s, a) => s + Math.max(0, Number(a) || 0), 0);
+
+        if (Math.abs(sumAmounts - base) <= Math.max(2, base * 0.0001)) {
+            let diff = 10000 - roundedBps.reduce((s, bp) => s + bp, 0);
+            if (diff !== 0) {
+                const step = diff > 0 ? 1 : -1;
+                const indices = amounts.map((_, idx) => idx).sort((a, b) => {
+                    const aSubstantial = roundedBps[a] >= 10 ? 1 : 0;
+                    const bSubstantial = roundedBps[b] >= 10 ? 1 : 0;
+                    if (aSubstantial !== bSubstantial) return bSubstantial - aSubstantial;
+                    const remA = (rawBps[a] - roundedBps[a]) * step;
+                    const remB = (rawBps[b] - roundedBps[b]) * step;
+                    if (Math.abs(remB - remA) > 1e-9) return remB - remA;
+                    return (Number(amounts[b]) || 0) - (Number(amounts[a]) || 0);
+                });
+                let i = 0;
+                while (diff !== 0 && indices.length > 0 && i < indices.length * 4) {
+                    const targetIdx = indices[i % indices.length];
+                    if (roundedBps[targetIdx] + step >= 0) {
+                        roundedBps[targetIdx] += step;
+                        diff -= step;
+                    }
+                    i++;
+                }
+            }
+        }
+        return roundedBps.map(bp => bp / 100);
+    };
+
+    const renderDataRow = (noVal, nameVal, amtVal, isBold = true, bgArgb = 'FFFFFFFF', indent = 1, noAlign = 'center', overridePctRatio = null) => {
+        const nameStr = String(nameVal || '');
+        const neededWidth = Math.min(78, nameStr.length + indent * 2 + 4);
+        if (neededWidth > maxNameColWidth) {
+            maxNameColWidth = neededWidth;
+            worksheet.getColumn(2).width = maxNameColWidth;
+        }
+        const estimatedLines = Math.max(1, Math.ceil((nameStr.length + indent * 2) / (maxNameColWidth - 2)));
+        worksheet.getRow(currentRow).height = estimatedLines > 1 ? Math.max(18, estimatedLines * 14 + 4) : 18;
 
         const cellA = worksheet.getCell(`A${currentRow}`);
         cellA.value = noVal !== undefined && noVal !== null ? String(noVal) : '';
@@ -707,7 +750,7 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
         const cellB = worksheet.getCell(`B${currentRow}`);
         cellB.value = nameVal;
         cellB.font = { name: fontName, size: 9, bold: isBold, color: { argb: 'FF000000' } };
-        cellB.alignment = { horizontal: 'left', vertical: 'middle', indent };
+        cellB.alignment = { horizontal: 'left', vertical: 'middle', indent, wrapText: true };
 
         const cellC = worksheet.getCell(`C${currentRow}`);
         if (typeof amtVal === 'number') {
@@ -720,7 +763,10 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
         cellC.alignment = { horizontal: 'right', vertical: 'middle' };
 
         const cellD = worksheet.getCell(`D${currentRow}`);
-        if (typeof amtVal === 'number' && totalPemasukanFinal > 0) {
+        if (overridePctRatio !== null && overridePctRatio !== undefined) {
+            cellD.value = overridePctRatio;
+            cellD.numFmt = percentFmt;
+        } else if (typeof amtVal === 'number' && totalPemasukanFinal > 0) {
             cellD.value = amtVal / totalPemasukanFinal;
             cellD.numFmt = percentFmt;
         } else {
@@ -742,20 +788,21 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
         currentRow++;
     };
 
+    const pemasukanRows = [];
     if (salesChannelsList.length === 0) {
         if (totalOmzetNet > 0) {
-            renderDataRow(pemIdx++, 'Omzet Penjualan', totalOmzetNet, true);
+            pemasukanRows.push({ name: 'Omzet Penjualan', amount: totalOmzetNet });
         }
     } else {
         salesChannelsList.forEach(sc => {
             let scName = (sc.name || sc.channel_name || '').trim().replace(/^(omzet|omset)\s+/i, '');
             const amt = Number(sc.amount) || 0;
-            renderDataRow(pemIdx++, scName, amt, true);
+            pemasukanRows.push({ name: scName, amount: amt });
         });
 
         const unallocatedOmzet = totalOmzetNet - totalSalesChannels;
         if (unallocatedOmzet >= 1) {
-            renderDataRow(pemIdx++, 'Omzet Belum Teralokasi Channel', unallocatedOmzet, true);
+            pemasukanRows.push({ name: 'Omzet Belum Teralokasi Channel', amount: unallocatedOmzet });
         }
     }
 
@@ -769,15 +816,20 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
         const displayName = (it.category_name || '').toLowerCase().includes('lain')
             ? 'Pendapatan Lain-lain'
             : it.category_name;
-        renderDataRow(pemIdx++, displayName, amt, true);
+        pemasukanRows.push({ name: displayName, amount: amt });
     });
 
     // Pelunasan Piutang Bulan Lalu
     if (data.pelunasan_piutang_bulan_lalu && Number(data.pelunasan_piutang_bulan_lalu) > 0) {
         const amt = Number(data.pelunasan_piutang_bulan_lalu);
         const label = `Pelunasan Piutang ${data.prev_month_label || 'Bulan Lalu'}`;
-        renderDataRow(pemIdx++, label, amt, true);
+        pemasukanRows.push({ name: label, amount: amt });
     }
+
+    const pemasukanPcts = reconcilePercentages(pemasukanRows.map(r => r.amount), totalPemasukanFinal);
+    pemasukanRows.forEach((row, idx) => {
+        renderDataRow(pemIdx++, row.name, row.amount, true, 'FFFFFFFF', 1, 'center', pemasukanPcts[idx] / 100);
+    });
 
     // 3. PENGELUARAN SECTION
     const isSimpananItem = (name) => {
