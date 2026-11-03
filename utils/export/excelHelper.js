@@ -685,7 +685,11 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
         return (n.includes('omzet') || n.includes('omset')) && !n.includes('lain');
     });
     const totalOmzetNet = omzetItems.reduce((sum, it) => sum + (Number(it.total) || 0), 0);
-    const salesChannelsList = data.sales_channels || [];
+    const salesChannelsList = [...(data.sales_channels || [])].sort((a, b) => {
+        const diff = (Number(b.amount) || 0) - (Number(a.amount) || 0);
+        if (diff !== 0) return diff;
+        return String(a.name || a.channel_name || '').localeCompare(String(b.name || b.channel_name || ''));
+    });
     const totalSalesChannels = salesChannelsList.reduce((sum, sc) => sum + (Number(sc.amount) || 0), 0);
 
     const renderDataRow = (noVal, nameVal, amtVal, isBold = true, bgArgb = 'FFFFFFFF', indent = 1, noAlign = 'center') => {
@@ -861,7 +865,7 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
             !isChild,
             'FFFFFFFF',
             isChild ? 2 : 1,
-            'left'
+            'center'
         );
     });
 
@@ -871,9 +875,9 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
         const simpananLetter = letters[expLetterIdx++] || 'H';
 
         // Parent Row for Simpanan
-        renderDataRow(simpananLetter, 'Total Simpanan', totalSimpananAmt, true, 'FFFFFFFF', 1, 'left');
+        renderDataRow(simpananLetter, 'Total Simpanan', totalSimpananAmt, true, 'FFFFFFFF', 1, 'center');
 
-        // Sub-items for Simpanan (Soft Peach background #FAEBE5)
+        // Sub-items for Simpanan (same style as sub-kategori, with lowercase g1, g2...)
         simpananExpenses.forEach((sx, sIdx) => {
             const subCode = `${simpananLetter.toLowerCase()}${sIdx + 1}`;
             const sAmt = Number(sx.total) || 0;
@@ -895,7 +899,7 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
                     sTitle = `${sx.category_name} ( ${allocDays} Hari )`;
                 }
             }
-            renderDataRow(subCode, sTitle, sAmt, false, 'FFFAEBE5', 2, 'right');
+            renderDataRow('', `  ${subCode}   ${sTitle}`, sAmt, false, 'FFFAEBE5', 2, 'center');
         });
     }
 
@@ -1105,38 +1109,6 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
     const hasStokData = hasStokAwal || hasStokAkhir;
     const selisihStok = stokAwalNum - stokAkhirNum;
     renderStokRow('Selisih Nilai Stok', selisihStok, hasStokData);
-
-    // 7. FOOTER / ATTACHMENT STATS
-    currentRow++; // Spacer row
-    if (data.attachment_stats && data.attachment_stats.total > 0) {
-        const stats = data.attachment_stats;
-        worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
-        const statsCell = worksheet.getCell(`A${currentRow}`);
-        statsCell.value = `Total Transaksi: ${stats.total} | Lengkap: ${stats.hijau || 0} | Kurang: ${stats.kuning || 0} | Kosong: ${stats.merah || 0} | Opsional: ${stats.abu || 0}`;
-        statsCell.font = { name: fontName, size: 8.5, italic: true, color: { argb: 'FF6B7280' } };
-        statsCell.alignment = { horizontal: 'center', vertical: 'middle' };
-        currentRow++;
-    }
-
-    const now = new Date();
-    const formattedDate = now.toLocaleDateString('id-ID', {
-        weekday: 'long',
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric'
-    });
-    const formattedTime = now.toLocaleTimeString('id-ID', {
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-    }).replace('.', ':');
-
-    const printedByText = options.printedBy ? ` oleh ${options.printedBy}` : '';
-    worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
-    const footerCell = worksheet.getCell(`A${currentRow}`);
-    footerCell.value = `Laporan ini dicetak pada ${formattedDate} pukul ${formattedTime}${printedByText}`;
-    footerCell.font = { name: fontName, size: 8, italic: true, color: { argb: 'FF9CA3AF' } };
-    footerCell.alignment = { horizontal: 'center', vertical: 'middle' };
 
     // Ensure output filepath
     const filepath = path.join(EXPORTS_DIR, filename);

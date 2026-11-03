@@ -523,6 +523,14 @@ const getReport = async (req, res, next) => {
         const taxWithoutChannels = Math.round((taxableWithoutChannels * 10) / 110);
         const omzetWithoutChannels = Math.max(0, grossWithoutChannels - taxWithoutChannels);
 
+        if (Array.isArray(report.sales_channels) && report.sales_channels.length > 0) {
+            report.sales_channels = [...report.sales_channels].sort((a, b) => {
+                const diff = (Number(b.amount) || 0) - (Number(a.amount) || 0);
+                if (diff !== 0) return diff;
+                return String(a.name || a.channel_name || '').localeCompare(String(b.name || b.channel_name || ''));
+            });
+        }
+
         return res.json({
             success: true,
             data: {
@@ -1333,6 +1341,14 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                 if (!exportSalesChannels.some(ec => (ec.name || ec.channel_name || '').toLowerCase().trim() === key)) {
                     exportSalesChannels.push({ name: s.name, amount: parseFloat(s.amount) || 0 });
                 }
+            });
+        }
+
+        if (Array.isArray(exportSalesChannels)) {
+            exportSalesChannels = [...exportSalesChannels].sort((a, b) => {
+                const diff = (Number(b.amount) || 0) - (Number(a.amount) || 0);
+                if (diff !== 0) return diff;
+                return String(a.name || a.channel_name || '').localeCompare(String(b.name || b.channel_name || ''));
             });
         }
 

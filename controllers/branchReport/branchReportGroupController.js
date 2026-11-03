@@ -873,7 +873,11 @@ const getGroupFinancialReport = async (req, res, next) => {
             expense_breakdown: processedExpenseBreakdown,
             disabled_categories: disabledList,
             sales_channels: (savedGroupReport?.sales_channels && savedGroupReport.sales_channels.length > 0)
-                ? savedGroupReport.sales_channels
+                ? [...savedGroupReport.sales_channels].sort((a, b) => {
+                    const diff = (Number(b.amount) || 0) - (Number(a.amount) || 0);
+                    if (diff !== 0) return diff;
+                    return String(a.name || a.channel_name || '').localeCompare(String(b.name || b.channel_name || ''));
+                })
                 : systemSalesChannels.map(s => ({ name: s.name, amount: s.amount })),
             system_sales_channels: systemSalesChannels,
             master_sales_channels: masterSalesChannels,

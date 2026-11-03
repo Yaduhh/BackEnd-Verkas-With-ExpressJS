@@ -1116,7 +1116,11 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     });
     const totalOmzetNet = omzetItems.reduce((sum, it) => sum + (Number(it.total) || 0), 0);
 
-    const salesChannelsList = data.sales_channels || [];
+    const salesChannelsList = [...(data.sales_channels || [])].sort((a, b) => {
+        const diff = (Number(b.amount) || 0) - (Number(a.amount) || 0);
+        if (diff !== 0) return diff;
+        return String(a.name || a.channel_name || '').localeCompare(String(b.name || b.channel_name || ''));
+    });
     const totalSalesChannels = salesChannelsList.reduce((sum, sc) => sum + (Number(sc.amount) || 0), 0);
 
     // A) Sales channels
@@ -1279,7 +1283,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         const amt = Number(ex.total) || 0;
         const percStr = formatPercent(amt, totalPemasukanFinal);
 
-        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: letter, font: fontBold, fontSize: 8.5, align: 'left', paddingLeft: 6 });
+        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: letter, font: fontBold, fontSize: 8.5, align: 'center' });
         drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: isChild ? `  — ${ex.category_name}` : ex.category_name, font: isChild ? fontRegular : fontBold, fontSize: 8.5, paddingLeft: 8 });
         drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: amt > 0, rpAmount: amt > 0 ? formatCurrencyForPDF(amt) : '-', font: isChild ? fontRegular : fontBold, fontSize: 8.5 });
         drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: isChild ? fontRegular : fontBold, fontSize: 8.5, align: 'center' });
@@ -1294,13 +1298,13 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
         // Parent Row for Simpanan (Bold, white background)
         checkNewPage(rowH);
-        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: simpananLetter, font: fontBold, fontSize: 8.5, align: 'left', paddingLeft: 6 });
+        drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: simpananLetter, font: fontBold, fontSize: 8.5, align: 'center' });
         drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: 'Total Simpanan', font: fontBold, fontSize: 8.5, paddingLeft: 8 });
         drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: true, rpAmount: formatCurrencyForPDF(totalSimpananAmt), font: fontBold, fontSize: 8.5 });
         drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: totalSimpananPerc, font: fontBold, fontSize: 8.5, align: 'center' });
         y += rowH;
 
-        // Sub-items for Simpanan (Soft Peach background #faebe5)
+        // Sub-items for Simpanan (same style as sub-kategori, with lowercase g1, g2...)
         simpananExpenses.forEach((sx, sIdx) => {
             checkNewPage(rowH);
             const subCode = `${simpananLetter.toLowerCase()}${sIdx + 1}`;
@@ -1324,10 +1328,10 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
                 }
             }
 
-            drawCell(margin, y, wNo, rowH, { bg: '#faebe5', text: subCode, font: fontRegular, fontSize: 8, align: 'right', paddingRight: 6 });
-            drawCell(margin + wNo, y, wName, rowH, { bg: '#faebe5', text: sTitle, font: fontRegular, fontSize: 8, paddingLeft: 8 });
-            drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#faebe5', rpPrefix: true, rpAmount: formatCurrencyForPDF(sAmt), font: fontRegular, fontSize: 8 });
-            drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#faebe5', text: sPerc, font: fontRegular, fontSize: 8, align: 'center' });
+            drawCell(margin, y, wNo, rowH, { bg: '#faebe5', text: '', font: fontRegular, fontSize: 8.5, align: 'center' });
+            drawCell(margin + wNo, y, wName, rowH, { bg: '#faebe5', text: `  ${subCode}   ${sTitle}`, font: fontRegular, fontSize: 8.5, paddingLeft: 8 });
+            drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#faebe5', rpPrefix: sAmt > 0, rpAmount: sAmt > 0 ? formatCurrencyForPDF(sAmt) : '-', font: fontRegular, fontSize: 8.5 });
+            drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#faebe5', text: sPerc, font: fontRegular, fontSize: 8.5, align: 'center' });
             y += rowH;
         });
     }
@@ -1462,38 +1466,6 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         fontSize: 8.5 
     });
     y += rowH;
-
-    // Attachment stats info & Footer
-    if (data.attachment_stats && data.attachment_stats.total > 0) {
-        checkNewPage(30);
-        y += 6;
-        const stats = data.attachment_stats;
-        doc.fontSize(7.5).font(fontRegular).fillColor('#6b7280');
-        const statsText = `Total Transaksi: ${stats.total} | Lengkap: ${stats.hijau || 0} | Kurang: ${stats.kuning || 0} | Kosong: ${stats.merah || 0} | Opsional: ${stats.abu || 0}`;
-        doc.text(statsText, margin, y, { align: 'center', width: contentWidth });
-        y += 12;
-    } else {
-        y += 10;
-    }
-
-    checkNewPage(20);
-    const now = new Date();
-    const formattedDate = now.toLocaleDateString('id-ID', {
-        weekday: 'long',
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric'
-    });
-    const formattedTime = now.toLocaleTimeString('id-ID', {
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-    }).replace('.', ':');
-
-    const printedByText = options.printedBy ? ` oleh ${options.printedBy}` : '';
-    const footerText = `Laporan ini dicetak pada ${formattedDate} pukul ${formattedTime}${printedByText}`;
-
-    doc.fontSize(7.5).font(fontRegular).fillColor('#9ca3af').text(footerText, margin, y, { align: 'center', width: contentWidth });
 
     // ==========================================
     // HALAMAN 2: GRAFIK LINGKARAN KEUANGAN (PEMASUKAN & PENGELUARAN DALAM 1 HALAMAN)
@@ -1655,7 +1627,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
                     const textR = pct > 8 ? r * 0.68 : r * 0.77;
                     const tx = cx + textR * Math.cos(midAngle);
                     const ty = cy + textR * Math.sin(midAngle);
-                    const fSize = pct > 10 ? 32 : (pct > 5 ? 28 : (pct >= 3.5 ? 24 : 20));
+                    const fSize = pct > 10 ? 38 : (pct > 5 ? 34 : (pct >= 3.5 ? 28 : 24));
                     inSlicePercentagesOnly.push({
                         pctStr,
                         tx,
@@ -1671,7 +1643,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         const lefts = calloutItems.filter(d => !d.isRight).sort((a, b) => a.initialY - b.initialY);
         const rights = calloutItems.filter(d => d.isRight).sort((a, b) => a.initialY - b.initialY);
 
-        const minGap = 90;
+        const minGap = 120;
         function relax(list) {
             if (list.length === 0) return;
             for (let i = 1; i < list.length; i++) {
@@ -1679,7 +1651,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
                     list[i].initialY = list[i - 1].initialY + minGap;
                 }
             }
-            const maxAllowedY = height - 70;
+            const maxAllowedY = height - 80;
             if (list[list.length - 1].initialY > maxAllowedY) {
                 list[list.length - 1].initialY = maxAllowedY;
                 for (let i = list.length - 2; i >= 0; i--) {
@@ -1688,7 +1660,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
                     }
                 }
             }
-            const minAllowedY = 70;
+            const minAllowedY = 80;
             if (list[0].initialY < minAllowedY) {
                 list[0].initialY = minAllowedY;
                 for (let i = 1; i < list.length; i++) {
@@ -1705,9 +1677,9 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         let inSliceSvg = '';
         inSliceLabels.forEach(d => {
             inSliceSvg += `
-                <text x="${d.tx.toFixed(1)}" y="${(d.ty - 42).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="40" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${escapeXml(d.name)}</text>
-                <text x="${d.tx.toFixed(1)}" y="${(d.ty + 15).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="52" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${d.pctStr}</text>
-                <text x="${d.tx.toFixed(1)}" y="${(d.ty + 68).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="34" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${d.amtStr}</text>
+                <text x="${d.tx.toFixed(1)}" y="${(d.ty - 50).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="48" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${escapeXml(d.name)}</text>
+                <text x="${d.tx.toFixed(1)}" y="${(d.ty + 18).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="60" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${d.pctStr}</text>
+                <text x="${d.tx.toFixed(1)}" y="${(d.ty + 78).toFixed(1)}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="42" text-anchor="middle" style="paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 3.5px;">${d.amtStr}</text>
             `;
         });
 
@@ -1721,21 +1693,21 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
         [...lefts, ...rights].forEach(d => {
             const yFinal = d.initialY;
             const isR = d.isRight;
-            const elbowX = isR ? cx + r + 50 : cx - r - 50;
-            const endX = isR ? elbowX + 45 : elbowX - 45;
+            const elbowX = isR ? cx + r + 36 : cx - r - 36;
+            const endX = isR ? elbowX + 34 : elbowX - 34;
             const textAnchor = isR ? 'start' : 'end';
             const textX = isR ? endX + 14 : endX - 14;
             let cleanName = d.item.name
                 .replace(/\(\s*Grab,\s*Go\s*Food,\s*Dll\s*\)/i, '(Grab/GoFood/dll)')
                 .replace(/Biaya Marketplace/i, 'Marketplace')
                 .trim();
-            if (cleanName.length > 34) cleanName = cleanName.slice(0, 32) + '...';
+            if (cleanName.length > 30) cleanName = cleanName.slice(0, 28) + '...';
 
             calloutsSvg += `
-                <polyline points="${d.x_edge.toFixed(1)},${d.y_edge.toFixed(1)} ${elbowX.toFixed(1)},${yFinal.toFixed(1)} ${endX.toFixed(1)},${yFinal.toFixed(1)}" fill="none" stroke="${d.item.color}" stroke-width="4" />
-                <circle cx="${d.x_edge.toFixed(1)}" cy="${d.y_edge.toFixed(1)}" r="8" fill="${d.item.color}" stroke="#ffffff" stroke-width="2" />
-                <text x="${textX.toFixed(1)}" y="${(yFinal - 10).toFixed(1)}" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="28" text-anchor="${textAnchor}">${escapeXml(cleanName)}</text>
-                <text x="${textX.toFixed(1)}" y="${(yFinal + 26).toFixed(1)}" fill="#4b5563" font-family="Arial, Helvetica, sans-serif" font-size="24" text-anchor="${textAnchor}">${d.amtStr} <tspan font-weight="bold" fill="${d.item.color}">(${d.pctStr})</tspan></text>
+                <polyline points="${d.x_edge.toFixed(1)},${d.y_edge.toFixed(1)} ${elbowX.toFixed(1)},${yFinal.toFixed(1)} ${endX.toFixed(1)},${yFinal.toFixed(1)}" fill="none" stroke="${d.item.color}" stroke-width="4.5" />
+                <circle cx="${d.x_edge.toFixed(1)}" cy="${d.y_edge.toFixed(1)}" r="9" fill="${d.item.color}" stroke="#ffffff" stroke-width="2" />
+                <text x="${textX.toFixed(1)}" y="${(yFinal - 14).toFixed(1)}" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="42" text-anchor="${textAnchor}">${escapeXml(cleanName)}</text>
+                <text x="${textX.toFixed(1)}" y="${(yFinal + 36).toFixed(1)}" fill="#4b5563" font-family="Arial, Helvetica, sans-serif" font-size="36" text-anchor="${textAnchor}">${d.amtStr} <tspan font-weight="bold" fill="${d.item.color}">(${d.pctStr})</tspan></text>
             `;
         });
 
@@ -1849,9 +1821,6 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     doc.image(expChartPng, pMargin, yP2 + headerStripHeight, { fit: [pContentWidth, chartImgHeight], align: 'center', valign: 'center' });
 
     yP2 += cardHeight + 6;
-
-    // Footer Page 2
-    doc.fontSize(7).font(fontRegular).fillColor('#9ca3af').text(footerText, pMargin, yP2, { align: 'center', width: pContentWidth });
 
     doc.end();
 
