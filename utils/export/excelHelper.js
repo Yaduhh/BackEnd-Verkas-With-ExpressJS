@@ -791,7 +791,9 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
     let detectedPiutangFromBreakdown = null;
 
     (data.expense_breakdown || []).forEach(ex => {
-        if (isSimpananItem(ex.category_name)) {
+        if (ex.is_sub_item || ex.is_adjustment) {
+            regularExpenses.push(ex);
+        } else if (isSimpananItem(ex.category_name)) {
             simpananExpenses.push(ex);
         } else if (isPiutangItem(ex.category_name)) {
             detectedPiutangFromBreakdown = ex;
@@ -810,7 +812,7 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
 
     const totalPengeluaran = (data.pure_pengeluaran !== undefined && data.pure_pengeluaran !== null)
         ? Number(data.pure_pengeluaran)
-        : (regularExpenses.reduce((s, x) => s + (Number(x.total) || 0), 0) + simpananExpenses.reduce((s, x) => s + (Number(x.total) || 0), 0));
+        : (regularExpenses.filter(x => !x.is_sub_item).reduce((s, x) => s + (Number(x.total) || 0), 0) + simpananExpenses.reduce((s, x) => s + (Number(x.total) || 0), 0));
     const totalExpPerc = totalPemasukanFinal > 0 ? (totalPengeluaran / totalPemasukanFinal) : 0;
 
     // Header bar (Red #E60000)
@@ -849,16 +851,16 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
     let expLetterIdx = 0;
 
     regularExpenses.forEach(ex => {
-        const isAdj = ex.is_adjustment;
-        const letter = isAdj ? '' : (letters[expLetterIdx++] || String(expLetterIdx));
+        const isChild = Boolean(ex.is_adjustment || ex.is_sub_item);
+        const letter = isChild ? '' : (letters[expLetterIdx++] || String(expLetterIdx));
         const amt = Number(ex.total) || 0;
         renderDataRow(
             letter,
-            isAdj ? `  — ${ex.category_name}` : ex.category_name,
+            isChild ? `  — ${ex.category_name}` : ex.category_name,
             amt,
-            !isAdj,
+            !isChild,
             'FFFFFFFF',
-            isAdj ? 2 : 1,
+            isChild ? 2 : 1,
             'left'
         );
     });

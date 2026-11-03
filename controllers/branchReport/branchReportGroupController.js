@@ -339,6 +339,8 @@ const getGroupFinancialReport = async (req, res, next) => {
         let totalPelunasanPiutang = 0;
         let totalUnallocatedOmzet = 0;
         const aggregatedExpensesMap = {};
+        const aggregatedCategoryItemsMap = {};
+        const aggregatedMasterProductsMap = {};
         const aggregatedIncomeMap = {};
         const aggregatedSalesChannelsMap = {};
         const masterSalesChannelsSet = new Set();
@@ -624,6 +626,54 @@ const getGroupFinancialReport = async (req, res, next) => {
                 totalMitraPiutangGroup += totalPiutangMitra;
             }
 
+            // Aggregate product items (Rincian Kategori) per branch
+            try {
+                const recordedProductItems = await query(
+                    `SELECT 
+                        COALESCE(c.name, pc.name, 'Lain-lain') as category_name,
+                        p.id as product_id,
+                        p.name as product_name,
+                        SUM(tpi.amount) as total_amount
+                     FROM transaction_product_items tpi
+                     JOIN products p ON tpi.product_id = p.id
+                     JOIN transactions t ON tpi.transaction_id = t.id
+                     LEFT JOIN categories c ON t.category_id = c.id
+                     LEFT JOIN categories pc ON p.category_id = pc.id
+                     WHERE t.branch_id = ?
+                       AND t.transaction_date BETWEEN ? AND ?
+                       AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
+                       AND t.is_umum = true
+                       AND t.type = 'expense'
+                     GROUP BY category_name, p.id, p.name
+                     HAVING total_amount > 0`,
+                    [branchId, startDate, endDate]
+                );
+                for (const item of recordedProductItems) {
+                    const catName = item.category_name;
+                    const pName = (item.product_name || '').trim();
+                    if (!pName) continue;
+                    if (!aggregatedCategoryItemsMap[catName]) aggregatedCategoryItemsMap[catName] = {};
+                    aggregatedCategoryItemsMap[catName][pName] = (aggregatedCategoryItemsMap[catName][pName] || 0) + (parseFloat(item.total_amount) || 0);
+                }
+
+                const branchProducts = await query(
+                    `SELECT p.name, c.name as category_name
+                     FROM products p
+                     JOIN categories c ON p.category_id = c.id
+                     WHERE p.branch_id = ? AND p.status_deleted = 0 AND p.is_active = 1`,
+                    [branchId]
+                );
+                for (const mp of branchProducts) {
+                    const catName = mp.category_name;
+                    const pName = (mp.name || '').trim();
+                    if (!catName || !pName) continue;
+                    if (!aggregatedMasterProductsMap[catName]) aggregatedMasterProductsMap[catName] = new Set();
+                    aggregatedMasterProductsMap[catName].add(pName);
+                }
+            } catch (e) {
+                console.error('Error aggregating group product items:', e);
+            }
+
             // Aggregated income map
             for (const inc of incomeBreakdownResult) {
                 const cat = inc.category_name;
@@ -682,7 +732,34 @@ const getGroupFinancialReport = async (req, res, next) => {
         }));
 
         const expenseBreakdown = Object.entries(aggregatedExpensesMap)
-            .map(([name, val]) => ({ category_name: name, total: val }))
+            .map(([name, val]) => {
+                const itemsObj = aggregatedCategoryItemsMap[name] || {};
+                const masterSet = aggregatedMasterProductsMap[name] || new Set();
+                const fullItemsMap = {};
+                for (const pName of masterSet) {
+                    fullItemsMap[pName] = itemsObj[pName] !== undefined ? itemsObj[pName] : 0;
+                }
+                for (const [pName, amt] of Object.entries(itemsObj)) {
+                    if (fullItemsMap[pName] === undefined) {
+                        fullItemsMap[pName] = amt;
+                    }
+                }
+                const items = Object.entries(fullItemsMap)
+                    .map(([pName, amt]) => ({
+                        product_name: pName,
+                        amount: amt
+                    }))
+                    .sort((a, b) => {
+                        if (b.amount !== a.amount) return b.amount - a.amount;
+                        return a.product_name.localeCompare(b.product_name);
+                    });
+
+                return {
+                    category_name: name,
+                    total: val,
+                    items
+                };
+            })
             .sort((a, b) => b.total - a.total);
 
         const systemSalesChannels = Object.entries(aggregatedSalesChannelsMap)
@@ -826,6 +903,109 @@ const getGroupFinancialReport = async (req, res, next) => {
     }
 };
 
+const buildGroupExportExpenseBreakdown = (reportData) => {
+    const activeBreakdown = (reportData.expense_breakdown || []).filter(item => item.is_active !== false);
+    const adjustmentsByParent = {};
+    const savingsMetaByParent = {};
+    const subItemsMetaByParent = {};
+
+    if (Array.isArray(reportData.expense_adjustments)) {
+        reportData.expense_adjustments.forEach(adj => {
+            if (!adj) return;
+            if (adj.is_savings_meta || adj.name === '__SAVINGS_META__') {
+                let savingsNote = '';
+                if (typeof adj.savings_note === 'string') {
+                    savingsNote = adj.savings_note.trim();
+                } else if (Number(adj.allocation_amount) > 0 && Number(adj.allocation_days) > 0) {
+                    const formattedAmt = new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0 }).format(Number(adj.allocation_amount));
+                    savingsNote = `${formattedAmt} @ ${Number(adj.allocation_days)} Hari`;
+                }
+                savingsMetaByParent[adj.parent_category] = {
+                    savings_note: savingsNote,
+                    allocation_amount: Number(adj.allocation_amount) || 0,
+                    allocation_days: Number(adj.allocation_days) || 0,
+                    has_savings_meta: true
+                };
+                return;
+            }
+            if (adj.is_sub_items_meta || adj.name === '__SUB_ITEMS_META__') {
+                subItemsMetaByParent[adj.parent_category] = {
+                    show_sub_items: adj.show_sub_items !== false,
+                    disabled_items: Array.isArray(adj.disabled_items) ? adj.disabled_items : []
+                };
+                return;
+            }
+            if (!adjustmentsByParent[adj.parent_category]) {
+                adjustmentsByParent[adj.parent_category] = [];
+            }
+            adjustmentsByParent[adj.parent_category].push(adj);
+        });
+    }
+
+    let sortedCategories = [...activeBreakdown];
+    if (Array.isArray(reportData.expense_order) && reportData.expense_order.length > 0) {
+        const orderMap = {};
+        reportData.expense_order.forEach((name, idx) => { orderMap[name] = idx; });
+        sortedCategories.sort((a, b) => {
+            const orderA = orderMap[a.category_name] !== undefined ? orderMap[a.category_name] : 1000;
+            const orderB = orderMap[b.category_name] !== undefined ? orderMap[b.category_name] : 1000;
+            return orderA - orderB;
+        });
+    }
+
+    const processed = [];
+    sortedCategories.forEach(item => {
+        const adjs = adjustmentsByParent[item.category_name] || [];
+        const adjTotal = adjs.reduce((sum, a) => sum + (parseFloat(a.amount) || 0), 0);
+        const parentTotal = (parseFloat(item.total) || 0) - adjTotal;
+        const sMeta = savingsMetaByParent[item.category_name];
+        const subMeta = subItemsMetaByParent[item.category_name];
+        const showSubItems = subMeta ? subMeta.show_sub_items !== false : true;
+        const disabledSubList = subMeta && Array.isArray(subMeta.disabled_items) ? subMeta.disabled_items : [];
+
+        if (Math.abs(parentTotal) > 0.01) {
+            processed.push({
+                ...item,
+                category_name: item.category_name,
+                total: parentTotal,
+                ...(sMeta ? {
+                    savings_note: sMeta.savings_note,
+                    allocation_amount: sMeta.allocation_amount,
+                    allocation_days: sMeta.allocation_days,
+                    has_savings_meta: true
+                } : {})
+            });
+        }
+
+        if (showSubItems && Array.isArray(item.items) && item.items.length > 0) {
+            item.items.forEach(sub => {
+                const subAmt = parseFloat(sub.amount) || 0;
+                const isSubOff = disabledSubList.includes(sub.product_name);
+                if (!isSubOff && Math.abs(subAmt) > 0.01) {
+                    processed.push({
+                        category_name: sub.product_name,
+                        total: subAmt,
+                        is_sub_item: true,
+                        parent_category: item.category_name
+                    });
+                }
+            });
+        }
+
+        adjs.forEach(adj => {
+            if (Math.abs(parseFloat(adj.amount) || 0) > 0.01) {
+                processed.push({
+                    category_name: adj.name,
+                    total: parseFloat(adj.amount) || 0,
+                    is_adjustment: true
+                });
+            }
+        });
+    });
+
+    return processed;
+};
+
 /**
  * GET /api/branch-reports/consolidated/export?group_name=Bahan%20Baku&month=10&year=2026
  */
@@ -848,7 +1028,7 @@ const exportGroupPdf = async (req, res, next) => {
         const dataForPdf = {
             ...reportData,
             working_days: workingDays,
-            expense_breakdown: (reportData.expense_breakdown || []).filter(item => item.is_active !== false),
+            expense_breakdown: buildGroupExportExpenseBreakdown(reportData),
             income_breakdown: (reportData.income_breakdown || []).filter(item => item.is_active !== false),
             piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.piutang_mitra,
             total_piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.total_piutang_mitra
@@ -910,7 +1090,7 @@ const exportGroupImage = async (req, res, next) => {
         const dataForPdf = {
             ...reportData,
             working_days: workingDays,
-            expense_breakdown: (reportData.expense_breakdown || []).filter(item => item.is_active !== false),
+            expense_breakdown: buildGroupExportExpenseBreakdown(reportData),
             income_breakdown: (reportData.income_breakdown || []).filter(item => item.is_active !== false),
             piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.piutang_mitra,
             total_piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.total_piutang_mitra
@@ -958,7 +1138,6 @@ const exportGroupExcel = async (req, res, next) => {
         const reportData = await getGroupFinancialReport(fakeReq, res, next);
         if (!reportData) return res.status(404).json({ success: false, message: 'Tidak ada data buku kas dalam grup ini' });
 
-        const { exportFinancialReportToExcel, generateFilename, getMimeType } = require('../utils/exportHelper');
         const groupLabel = group_name ? `Grup_${group_name.replace(/\s+/g, '_')}` : 'Grup_Gabungan';
         const filename = generateFilename('XLS', `Laporan_Keuangan_${groupLabel}`);
         const selectedMonthDate = new Date(year, month - 1, 1);
@@ -966,7 +1145,7 @@ const exportGroupExcel = async (req, res, next) => {
         const dataForExcel = {
             ...reportData,
             working_days: workingDays,
-            expense_breakdown: (reportData.expense_breakdown || []).filter(item => item.is_active !== false),
+            expense_breakdown: buildGroupExportExpenseBreakdown(reportData),
             income_breakdown: (reportData.income_breakdown || []).filter(item => item.is_active !== false),
             piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.piutang_mitra,
             total_piutang_mitra: reportData.is_piutang_disabled ? 0 : reportData.total_piutang_mitra

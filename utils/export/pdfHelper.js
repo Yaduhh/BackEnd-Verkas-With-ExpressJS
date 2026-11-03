@@ -1209,7 +1209,9 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     let detectedPiutangFromBreakdown = null;
 
     (data.expense_breakdown || []).forEach(ex => {
-        if (isSimpananItem(ex.category_name)) {
+        if (ex.is_sub_item || ex.is_adjustment) {
+            regularExpenses.push(ex);
+        } else if (isSimpananItem(ex.category_name)) {
             simpananExpenses.push(ex);
         } else if (isPiutangItem(ex.category_name)) {
             detectedPiutangFromBreakdown = ex;
@@ -1228,7 +1230,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
     const totalPengeluaran = (data.pure_pengeluaran !== undefined && data.pure_pengeluaran !== null)
         ? Number(data.pure_pengeluaran)
-        : (regularExpenses.reduce((s, x) => s + (Number(x.total) || 0), 0) + simpananExpenses.reduce((s, x) => s + (Number(x.total) || 0), 0));
+        : (regularExpenses.filter(x => !x.is_sub_item).reduce((s, x) => s + (Number(x.total) || 0), 0) + simpananExpenses.reduce((s, x) => s + (Number(x.total) || 0), 0));
     const totalExpPerc = formatPercent(totalPengeluaran, totalPemasukanFinal);
 
     // Header bar (Red)
@@ -1272,15 +1274,15 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
 
     regularExpenses.forEach(ex => {
         checkNewPage(rowH);
-        const isAdj = ex.is_adjustment;
-        const letter = isAdj ? '' : (letters[expLetterIdx++] || String(expLetterIdx));
+        const isChild = Boolean(ex.is_adjustment || ex.is_sub_item);
+        const letter = isChild ? '' : (letters[expLetterIdx++] || String(expLetterIdx));
         const amt = Number(ex.total) || 0;
         const percStr = formatPercent(amt, totalPemasukanFinal);
 
         drawCell(margin, y, wNo, rowH, { bg: '#ffffff', text: letter, font: fontBold, fontSize: 8.5, align: 'left', paddingLeft: 6 });
-        drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: isAdj ? `  — ${ex.category_name}` : ex.category_name, font: isAdj ? fontRegular : fontBold, fontSize: 8.5, paddingLeft: 8 });
-        drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: amt > 0, rpAmount: amt > 0 ? formatCurrencyForPDF(amt) : '-', font: isAdj ? fontRegular : fontBold, fontSize: 8.5 });
-        drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: isAdj ? fontRegular : fontBold, fontSize: 8.5, align: 'center' });
+        drawCell(margin + wNo, y, wName, rowH, { bg: '#ffffff', text: isChild ? `  — ${ex.category_name}` : ex.category_name, font: isChild ? fontRegular : fontBold, fontSize: 8.5, paddingLeft: 8 });
+        drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffffff', rpPrefix: amt > 0, rpAmount: amt > 0 ? formatCurrencyForPDF(amt) : '-', font: isChild ? fontRegular : fontBold, fontSize: 8.5 });
+        drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffffff', text: percStr, font: isChild ? fontRegular : fontBold, fontSize: 8.5, align: 'center' });
         y += rowH;
     });
 
@@ -1795,7 +1797,7 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
     // Prepare Pengeluaran Items
     const expChartItems = [];
     regularExpenses.forEach(ex => {
-        if (ex.is_adjustment) return;
+        if (ex.is_adjustment || ex.is_sub_item) return;
         const amt = Number(ex.total) || 0;
         if (amt > 0) expChartItems.push({ name: ex.category_name, amount: amt });
     });

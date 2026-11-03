@@ -891,7 +891,7 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
             : Math.round((systemTaxable * 10) / 110);
         const systemOmzet = systemOmzetGross - systemPb1;
 
-        const expenseBreakdown = await query(
+        let expenseBreakdown = await query(
             `SELECT category_name, SUM(total) as total
              FROM (
                 /* 1. Pengeluaran Reguler & Retur dalam periode */
@@ -957,6 +957,62 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
              HAVING SUM(total) != 0`,
             [endDate, branchId, startDate, endDate, branchId, branchId, startDate, endDate, branchId, startDate, endDate, startDate]
         );
+
+        // Fetch product items (Rincian Sub-Kategori) with amount > 0 for export
+        try {
+            const recordedProductItems = await query(
+                `SELECT 
+                    COALESCE(c.name, pc.name, 'Lain-lain') as category_name,
+                    p.id as product_id,
+                    p.name as product_name,
+                    SUM(tpi.amount) as total_amount
+                 FROM transaction_product_items tpi
+                 JOIN products p ON tpi.product_id = p.id
+                 JOIN transactions t ON tpi.transaction_id = t.id
+                 LEFT JOIN categories c ON t.category_id = c.id
+                 LEFT JOIN categories pc ON p.category_id = pc.id
+                 WHERE t.branch_id = ?
+                   AND t.transaction_date BETWEEN ? AND ?
+                   AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
+                   AND t.is_umum = true
+                   AND t.type = 'expense'
+                 GROUP BY category_name, p.id, p.name
+                 HAVING total_amount > 0
+                 ORDER BY total_amount DESC`,
+                [branchId, startDate, endDate]
+            );
+
+            const categoryItemsMap = {};
+            for (const item of recordedProductItems) {
+                const catName = item.category_name;
+                if (!categoryItemsMap[catName]) categoryItemsMap[catName] = {};
+                const pName = item.product_name.trim();
+                categoryItemsMap[catName][pName] = (categoryItemsMap[catName][pName] || 0) + (parseFloat(item.total_amount) || 0);
+            }
+
+            expenseBreakdown = expenseBreakdown.map(item => {
+                const itemsObj = categoryItemsMap[item.category_name] || {};
+                const items = Object.entries(itemsObj)
+                    .map(([pName, amt]) => ({
+                        product_name: pName,
+                        amount: amt
+                    }))
+                    .filter(it => it.amount > 0)
+                    .sort((a, b) => {
+                        if (b.amount !== a.amount) return b.amount - a.amount;
+                        return a.product_name.localeCompare(b.product_name);
+                    });
+
+                return {
+                    ...item,
+                    total: parseFloat(item.total) || 0,
+                    items
+                };
+            });
+        } catch (err) {
+            console.error('Error attaching category rincian items for export:', err);
+        }
+
         const folderPengeluaran = expenseBreakdown.reduce((sum, item) => sum + (parseFloat(item.total) || 0), 0);
 
         const mitraPiutangResult = await query(
@@ -1095,6 +1151,7 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
         // APPLY EXPENSE ADJUSTMENTS AND SORTING FOR PDF
         const adjustmentsByParent = {};
         const savingsMetaByParent = {};
+        const subItemsMetaByParent = {};
         if (report.expense_adjustments && report.expense_adjustments.length > 0) {
             report.expense_adjustments.forEach(adj => {
                 if (adj.is_savings_meta || adj.name === '__SAVINGS_META__') {
@@ -1110,6 +1167,13 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                         allocation_amount: Number(adj.allocation_amount) || 0,
                         allocation_days: Number(adj.allocation_days) || 0,
                         has_savings_meta: true
+                    };
+                    return;
+                }
+                if (adj.is_sub_items_meta || adj.name === '__SUB_ITEMS_META__') {
+                    subItemsMetaByParent[adj.parent_category] = {
+                        show_sub_items: adj.show_sub_items !== false,
+                        disabled_items: Array.isArray(adj.disabled_items) ? adj.disabled_items : []
                     };
                     return;
                 }
@@ -1140,12 +1204,15 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
             });
         }
 
-        // 2. Build the final flat list with adjustments right after their parents
+        // 2. Build the final flat list with sub-items and adjustments right after their parents
         sortedCategories.forEach(item => {
             const adjs = adjustmentsByParent[item.category_name] || [];
             const adjTotal = adjs.reduce((sum, a) => sum + (parseFloat(a.amount) || 0), 0);
             const parentTotal = (parseFloat(item.total) || 0) - adjTotal;
             const sMeta = savingsMetaByParent[item.category_name];
+            const subMeta = subItemsMetaByParent[item.category_name];
+            const showSubItems = subMeta ? subMeta.show_sub_items !== false : true;
+            const disabledSubList = subMeta && Array.isArray(subMeta.disabled_items) ? subMeta.disabled_items : [];
 
             // Only add parent if it has value
             if (Math.abs(parentTotal) > 0.01) {
@@ -1158,6 +1225,22 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                         allocation_days: sMeta.allocation_days,
                         has_savings_meta: true
                     } : {})
+                });
+            }
+
+            // Add product sub-items (amount > 0 and ON) directly under the parent
+            if (showSubItems && Array.isArray(item.items) && item.items.length > 0) {
+                item.items.forEach(sub => {
+                    const subAmt = parseFloat(sub.amount) || 0;
+                    const isSubOff = disabledSubList.includes(sub.product_name);
+                    if (!isSubOff && Math.abs(subAmt) > 0.01) {
+                        processedExpenseBreakdown.push({
+                            category_name: sub.product_name,
+                            total: subAmt,
+                            is_sub_item: true,
+                            parent_category: item.category_name
+                        });
+                    }
                 });
             }
 
