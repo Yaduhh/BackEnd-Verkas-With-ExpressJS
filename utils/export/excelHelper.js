@@ -1082,7 +1082,8 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
             if (bh.subItems && bh.subItems.length > 0) {
                 const activeSubs = bh.subItems.filter(sh => sh.is_active === undefined || sh.is_active === true || sh.is_active === 'true' || sh.is_active === 1);
                 activeSubs.forEach(sh => {
-                    const sAmt = Number(sh.amount) || 0;
+                    const sAmt = Number(sh.amount) || (Number(sh.percentage) > 0 ? Math.round((bhAmt * Number(sh.percentage)) / 100) : 0);
+                    const sSubsidi = Number(sh.subsidi) || 0;
                     const sPerc = sh.percentage !== undefined && sh.percentage !== '' ? (Number(sh.percentage) / 100) : 0;
 
                     worksheet.mergeCells(`A${currentRow}:B${currentRow}`);
@@ -1117,6 +1118,64 @@ async function exportFinancialReportToExcel(data, filename, branchName, selected
                     }
                     applyBorders(currentRow, currentRow);
                     currentRow++;
+
+                    if (sSubsidi > 0) {
+                        // SUB. row
+                        worksheet.mergeCells(`A${currentRow}:B${currentRow}`);
+                        const subCellTitle = worksheet.getCell(`A${currentRow}`);
+                        subCellTitle.value = `        SUB.`;
+                        subCellTitle.font = { name: fontName, size: 8.5, bold: true, color: { argb: 'FF000000' } };
+                        subCellTitle.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+
+                        const subCellAmt = worksheet.getCell(`C${currentRow}`);
+                        subCellAmt.value = sSubsidi;
+                        subCellAmt.numFmt = currencyFmt;
+                        subCellAmt.font = { name: fontName, size: 8.5, bold: true, color: { argb: 'FF000000' } };
+                        subCellAmt.alignment = { horizontal: 'right', vertical: 'middle' };
+
+                        const subCellPerc = worksheet.getCell(`D${currentRow}`);
+                        subCellPerc.value = '';
+                        subCellPerc.font = { name: fontName, size: 8.5, bold: true, color: { argb: 'FF000000' } };
+
+                        worksheet.getRow(currentRow).height = 18;
+                        for (let c = 1; c <= 4; c++) {
+                            worksheet.getCell(currentRow, c).fill = {
+                                type: 'pattern',
+                                pattern: 'solid',
+                                fgColor: { argb: 'FFFAEBE5' }
+                            };
+                        }
+                        applyBorders(currentRow, currentRow);
+                        currentRow++;
+
+                        // TOTAL row (yellow highlight)
+                        worksheet.mergeCells(`A${currentRow}:B${currentRow}`);
+                        const totCellTitle = worksheet.getCell(`A${currentRow}`);
+                        totCellTitle.value = `        TOTAL`;
+                        totCellTitle.font = { name: fontName, size: 8.5, bold: true, color: { argb: 'FF000000' } };
+                        totCellTitle.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+
+                        const totCellAmt = worksheet.getCell(`C${currentRow}`);
+                        totCellAmt.value = sAmt + sSubsidi;
+                        totCellAmt.numFmt = currencyFmt;
+                        totCellAmt.font = { name: fontName, size: 8.5, bold: true, color: { argb: 'FF000000' } };
+                        totCellAmt.alignment = { horizontal: 'right', vertical: 'middle' };
+
+                        const totCellPerc = worksheet.getCell(`D${currentRow}`);
+                        totCellPerc.value = '';
+                        totCellPerc.font = { name: fontName, size: 8.5, bold: true, color: { argb: 'FF000000' } };
+
+                        worksheet.getRow(currentRow).height = 18;
+                        for (let c = 1; c <= 4; c++) {
+                            worksheet.getCell(currentRow, c).fill = {
+                                type: 'pattern',
+                                pattern: 'solid',
+                                fgColor: { argb: 'FFFFFF00' }
+                            };
+                        }
+                        applyBorders(currentRow, currentRow);
+                        currentRow++;
+                    }
                 });
             }
         });

@@ -424,82 +424,10 @@ class Branch {
     return await this.findByPIC(adminId);
   }
 
-  // Count branches for user
+  // Count branches for user (deduplicated across owner & team branches)
   static async countUserBranches(userId, userRole) {
-    if (userRole === 'owner') {
-      // Count individual branches
-      const individual = await query(
-        'SELECT COUNT(*) as count FROM branches WHERE owner_id = ? AND status_deleted = false',
-        [userId]
-      );
-
-      // Count team branches
-      const OwnerTeam = require('./OwnerTeam');
-      const teams = await OwnerTeam.findByUserId(userId);
-      let teamCount = 0;
-
-      for (const team of teams) {
-        const count = await query(
-          'SELECT COUNT(*) as count FROM branches WHERE team_id = ? AND status_deleted = false',
-          [team.id]
-        );
-        teamCount += count[0].count;
-      }
-
-      return individual[0].count + teamCount;
-    } else if (userRole === 'co-owner') {
-      // Co-owner: count branches from owner's team who created them
-      const User = require('./User');
-      const currentUser = await User.findById(userId);
-
-      if (!currentUser || !currentUser.created_by) {
-        // If no created_by, count from teams they're member of
-        const OwnerTeam = require('./OwnerTeam');
-        const teams = await OwnerTeam.findByUserId(userId);
-        let teamCount = 0;
-
-        for (const team of teams) {
-          const count = await query(
-            'SELECT COUNT(*) as count FROM branches WHERE team_id = ? AND status_deleted = false',
-            [team.id]
-          );
-          teamCount += count[0].count;
-        }
-
-        return teamCount;
-      }
-
-      // Get teams from the owner who created this co-owner
-      const OwnerTeam = require('./OwnerTeam');
-      const creatorTeams = await OwnerTeam.findByUserId(currentUser.created_by);
-      let teamCount = 0;
-
-      for (const team of creatorTeams) {
-        const count = await query(
-          'SELECT COUNT(*) as count FROM branches WHERE team_id = ? AND status_deleted = false',
-          [team.id]
-        );
-        teamCount += count[0].count;
-      }
-
-      // Also count from teams co-owner is direct member of
-      const coOwnerTeams = await OwnerTeam.findByUserId(userId);
-      for (const team of coOwnerTeams) {
-        const count = await query(
-          'SELECT COUNT(*) as count FROM branches WHERE team_id = ? AND status_deleted = false',
-          [team.id]
-        );
-        teamCount += count[0].count;
-      }
-
-      return teamCount;
-    } else if (userRole === 'admin') {
-      // Admin: count all branches where they are PIC
-      const branches = await this.findAllByPIC(userId);
-      return branches.length;
-    }
-
-    return 0;
+    const branches = await this.findByUserAccess(userId, userRole);
+    return branches.length;
   }
 
   // Check if user can create more branches

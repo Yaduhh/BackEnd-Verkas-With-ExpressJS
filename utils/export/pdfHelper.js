@@ -1502,13 +1502,27 @@ async function exportFinancialReportToPDF(data, filename, branchName, selectedMo
                 const activeSubs = bh.subItems.filter(sh => sh.is_active === undefined || sh.is_active === true || sh.is_active === 'true' || sh.is_active === 1);
                 activeSubs.forEach(sh => {
                     checkNewPage(rowH);
-                    const sAmt = Number(sh.amount) || 0;
+                    const sAmt = Number(sh.amount) || (Number(sh.percentage) > 0 ? Math.round((bhAmt * Number(sh.percentage)) / 100) : 0);
+                    const sSubsidi = Number(sh.subsidi) || 0;
                     const sPerc = sh.percentage !== undefined && sh.percentage !== '' ? `${sh.percentage}%` : '';
 
                     drawCell(margin, y, wNo + wName, rowH, { bg: '#faebe5', text: `    — ${sh.title}`, font: fontRegular, fontSize: 9, paddingLeft: 8 });
                     drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#faebe5', rpPrefix: true, rpAmount: formatCurrencyForPDF(sAmt), font: fontRegular, fontSize: 9 });
                     drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#faebe5', text: sPerc, font: fontRegular, fontSize: 9, align: 'center' });
                     y += rowH;
+
+                    if (sSubsidi > 0) {
+                        checkNewPage(rowH * 2);
+                        drawCell(margin, y, wNo + wName, rowH, { bg: '#faebe5', text: `        SUB.`, font: fontBold, fontSize: 9, paddingLeft: 8 });
+                        drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#faebe5', rpPrefix: true, rpAmount: formatCurrencyForPDF(sSubsidi), font: fontBold, fontSize: 9 });
+                        drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#faebe5', text: '', font: fontRegular, fontSize: 9, align: 'center' });
+                        y += rowH;
+
+                        drawCell(margin, y, wNo + wName, rowH, { bg: '#ffff00', text: `        TOTAL`, font: fontBold, fontSize: 9, paddingLeft: 8 });
+                        drawCell(margin + wNo + wName, y, wAmount, rowH, { bg: '#ffff00', rpPrefix: true, rpAmount: formatCurrencyForPDF(sAmt + sSubsidi), font: fontBold, fontSize: 9 });
+                        drawCell(margin + wNo + wName + wAmount, y, wPerc, rowH, { bg: '#ffff00', text: '', font: fontBold, fontSize: 9, align: 'center' });
+                        y += rowH;
+                    }
                 });
             }
         });
@@ -2536,10 +2550,17 @@ async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, w
             const activeSubs = Array.isArray(bh.subItems)
                 ? bh.subItems
                       .filter((s) => s && s.is_active !== false && (String(s.title || '').trim() || Number(s.amount) > 0 || Number(s.percentage) > 0))
-                      .map((sub) => ({
-                          pct: sub.percentage !== undefined && sub.percentage !== null ? sub.percentage : 0,
-                          amount: (Number(sub.amount) || 0) + (Number(sub.subsidi) || 0),
-                      }))
+                      .map((sub) => {
+                          const subPct = sub.percentage !== undefined && sub.percentage !== null ? sub.percentage : 0;
+                          const baseAmt = Number(sub.amount) || (Number(subPct) > 0 ? Math.round((bhAmt * Number(subPct)) / 100) : 0);
+                          const subSubsidi = Number(sub.subsidi) || 0;
+                          return {
+                              pct: subPct,
+                              baseAmount: baseAmt,
+                              subsidi: subSubsidi,
+                              totalAmount: baseAmt + subSubsidi,
+                          };
+                      })
                 : [];
 
             if (bhTitle || bhAmt > 0) {
@@ -2563,10 +2584,21 @@ async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, w
     const baseFontSize = 11;
     const titleFontSize = 15.5;
     const rowH = 20;
-    const bagiHasilTotalVisualRows = bagiHasilRows.reduce(
-        (sum, r) => sum + Math.max(1, Array.isArray(r.activeSubs) ? r.activeSubs.length : 1),
-        0
-    );
+    let simLeftRows = 0;
+    let simRightRows = 0;
+    bagiHasilRows.forEach((r) => {
+        const hasSubs = Array.isArray(r.activeSubs) && r.activeSubs.length > 0;
+        const startRow = hasSubs ? Math.max(simLeftRows, simRightRows) : simLeftRows;
+        simLeftRows = startRow + 1;
+        if (hasSubs) {
+            let subRowsCount = startRow;
+            r.activeSubs.forEach((sub) => {
+                subRowsCount += sub.subsidi > 0 ? 3.4 : 1;
+            });
+            simRightRows = Math.max(simRightRows, subRowsCount);
+        }
+    });
+    const bagiHasilTotalVisualRows = Math.ceil(Math.max(simLeftRows, simRightRows, 1));
     const totalEstimatedHeight =
         125 + // Top header + margins
         3 * rowH + // 3 main income rows
@@ -2785,29 +2817,67 @@ async function exportInvestorReportToPDF(data, filename, branchLabel, dateObj, w
     const xSubAmt = margin + 506;
     const wSubAmt = 78;
 
-    bagiHasilRows.forEach((bh) => {
-        doc.font(fontRegular).fontSize(baseFontSize).fillColor('#000000');
-        doc.text(bh.label, xItemName, y, { width: wItemName });
-        doc.text('=', xMidEq, y, { width: 12, align: 'center' });
-        doc.text('Rp', xMidRp, y);
-        doc.text(formatCurrencyForPDF(bh.amount), xMidAmt, y, { width: wMidAmt, align: 'right' });
+    let leftY = y;
+    let rightY = y;
+    const highlightBoxX = xSubRp - 4;
+    const highlightBoxW = (xSubAmt + wSubAmt) - highlightBoxX + 4;
 
-        if (Array.isArray(bh.activeSubs) && bh.activeSubs.length > 0) {
-            bh.activeSubs.forEach((sub, sIdx) => {
-                if (sIdx > 0) {
-                    y += rowH;
-                }
-                drawRightArrow(xSubArrow, y + baseFontSize * 0.48);
+    bagiHasilRows.forEach((bh) => {
+        const hasSubs = Array.isArray(bh.activeSubs) && bh.activeSubs.length > 0;
+        const rowStartY = hasSubs ? Math.max(leftY, rightY) : leftY;
+
+        doc.font(fontRegular).fontSize(baseFontSize).fillColor('#000000');
+        doc.text(bh.label, xItemName, rowStartY, { width: wItemName });
+        doc.text('=', xMidEq, rowStartY, { width: 12, align: 'center' });
+        doc.text('Rp', xMidRp, rowStartY);
+        doc.text(formatCurrencyForPDF(bh.amount), xMidAmt, rowStartY, { width: wMidAmt, align: 'right' });
+        leftY = rowStartY + rowH;
+
+        if (hasSubs) {
+            let subY = rowStartY;
+            bh.activeSubs.forEach((sub) => {
+                const pctDisplay = `${String(sub.pct).replace('.', ',')}%`;
+                drawRightArrow(xSubArrow, subY + baseFontSize * 0.48);
                 doc.font(fontBold).fontSize(baseFontSize).fillColor('#000000');
-                doc.text(`${sub.pct}%`, xSubPct, y, { width: wSubPct, align: 'right' });
-                doc.text('Rp', xSubRp, y);
-                doc.text(formatCurrencyForPDF(sub.amount), xSubAmt, y, { width: wSubAmt, align: 'right' });
+                doc.text(pctDisplay, xSubPct, subY, { width: wSubPct, align: 'right' });
+                doc.text('Rp', xSubRp, subY);
+                doc.text(formatCurrencyForPDF(sub.baseAmount), xSubAmt, subY, { width: wSubAmt, align: 'right' });
+                subY += rowH;
+
+                if (sub.subsidi > 0) {
+                    // SUB. Row
+                    doc.font(fontBold).fontSize(baseFontSize).fillColor('#000000');
+                    doc.text('SUB.', xSubArrow, subY, { width: (xSubPct + wSubPct) - xSubArrow, align: 'left' });
+                    doc.text('Rp', xSubRp, subY);
+                    doc.text(formatCurrencyForPDF(sub.subsidi), xSubAmt, subY, { width: wSubAmt, align: 'right' });
+                    subY += rowH - 2;
+
+                    // Double Horizontal Line (═══)
+                    doc.save();
+                    doc.strokeColor('#000000').lineWidth(0.8);
+                    doc.moveTo(highlightBoxX, subY).lineTo(highlightBoxX + highlightBoxW, subY).stroke();
+                    doc.moveTo(highlightBoxX, subY + 1.8).lineTo(highlightBoxX + highlightBoxW, subY + 1.8).stroke();
+                    doc.restore();
+                    subY += 3;
+
+                    // Yellow Highlight Box for Total (baseAmount + subsidi)
+                    const totalBoxH = rowH + 2;
+                    doc.save();
+                    doc.rect(highlightBoxX, subY, highlightBoxW, totalBoxH).fillColor('#ffff00').fill();
+                    doc.restore();
+
+                    doc.font(fontBold).fontSize(baseFontSize).fillColor('#000000');
+                    doc.text('Rp', xSubRp, subY + 4);
+                    doc.text(formatCurrencyForPDF(sub.totalAmount), xSubAmt, subY + 4, { width: wSubAmt, align: 'right' });
+                    subY += totalBoxH + 4;
+                }
             });
             doc.font(fontRegular).fontSize(baseFontSize);
+            rightY = Math.max(rightY, subY);
         }
-
-        y += rowH;
     });
+
+    y = Math.max(leftY, rightY);
 
     y += 14;
 
