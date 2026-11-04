@@ -1103,6 +1103,88 @@ const externalApiController = {
   },
 
   /**
+   * DELETE /api/external/v1/transactions
+   * Soft-delete an external transaction (e.g. removed category split of a PO)
+   */
+  deleteTransaction: async (req, res, next) => {
+    try {
+      const ownerId = req.userId;
+      const external_reference_id = req.body?.external_reference_id || req.query?.external_reference_id;
+      const transaction_id = req.body?.transaction_id || req.query?.transaction_id;
+      const sync_user = req.body?.sync_user || null;
+      const reason = req.body?.reason || 'Hapus Transaksi Kategori PO (Sync Bosgil)';
+
+      if (!external_reference_id && !transaction_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'external_reference_id atau transaction_id wajib disertakan'
+        });
+      }
+
+      let tx = null;
+      if (transaction_id) {
+        tx = await Transaction.findById(transaction_id);
+      }
+      if (!tx && external_reference_id) {
+        tx = await Transaction.findByExternalReference(external_reference_id);
+      }
+
+      if (!tx) {
+        return res.status(200).json({
+          success: true,
+          already_deleted: true,
+          message: 'Transaksi sudah tidak aktif atau telah dihapus di VerKas'
+        });
+      }
+
+      const txDateObj = new Date(tx.transaction_date);
+      const isLocked = await LockedPeriod.isLocked(tx.branch_id, txDateObj.getMonth() + 1, txDateObj.getFullYear());
+      if (isLocked) {
+        return res.status(403).json({
+          success: false,
+          message: 'Tidak dapat menghapus transaksi: Periode tanggal transaksi sudah ditutup buku (Locked) di VerKas'
+        });
+      }
+
+      const actorResolved = await resolveVerkasUser(sync_user, ownerId, req.user);
+      const actorName = sync_user?.nama || sync_user?.name || actorResolved.name || 'Finance Bosgil';
+
+      await Transaction.softDelete(tx.id);
+
+      await TransactionEdit.create({
+        transactionId: tx.id,
+        requesterId: actorResolved.id,
+        reason,
+        oldData: {
+          type: tx.type,
+          amount: tx.amount,
+          category: tx.category_name,
+          note: tx.note,
+          date: tx.transaction_date
+        },
+        newData: {
+          action: 'soft_delete_external_split',
+          external_reference_id: tx.external_reference_id,
+          external_sync_by: `${actorName} (via Bosgil PO)`
+        },
+        status: 'approved'
+      }).catch(err => console.error('[ExternalAPI] Error logging deleteTransaction history:', err.message));
+
+      return res.status(200).json({
+        success: true,
+        message: 'Transaksi berhasil dihapus di VerKas',
+        data: {
+          deleted_transaction_id: tx.id,
+          external_reference_id: tx.external_reference_id
+        }
+      });
+    } catch (error) {
+      console.error('[ExternalAPI deleteTransaction Error]:', error);
+      next(error);
+    }
+  },
+
+  /**
    * POST /api/external/v1/refunds
    * Record a refund for a transaction linked by external_reference_id or transaction_id
    */
@@ -1126,14 +1208,37 @@ const externalApiController = {
         });
       }
 
-      let tx = null;
-      if (external_reference_id) {
-        tx = await Transaction.findByExternalReference(external_reference_id);
-      } else if (transaction_id) {
-        tx = await Transaction.findById(transaction_id);
+      // Check if external_reference_id is a base PO reference (e.g. "po_105") which may have multiple split transactions
+      const poBaseMatch = external_reference_id ? String(external_reference_id).match(/^(po_\d+)$/i) : null;
+      let candidateTxs = [];
+
+      if (poBaseMatch) {
+        const baseRef = poBaseMatch[1];
+        const rows = await query(
+          `SELECT id FROM transactions 
+           WHERE (external_reference_id = ? OR external_reference_id LIKE ? OR external_reference_id LIKE ?) 
+             AND status_deleted = false 
+           ORDER BY id ASC`,
+          [baseRef, `${baseRef}_cat_%`, `${baseRef}_split_%`]
+        );
+        for (const r of rows) {
+          const found = await Transaction.findById(r.id);
+          if (found) candidateTxs.push(found);
+        }
       }
 
-      if (!tx) {
+      if (candidateTxs.length === 0) {
+        let tx = null;
+        if (external_reference_id) {
+          tx = await Transaction.findByExternalReference(external_reference_id);
+        }
+        if (!tx && transaction_id) {
+          tx = await Transaction.findById(transaction_id);
+        }
+        if (tx) candidateTxs = [tx];
+      }
+
+      if (candidateTxs.length === 0) {
         return res.status(404).json({
           success: false,
           message: 'Transaksi terkait di VerKas tidak ditemukan'
@@ -1148,17 +1253,21 @@ const externalApiController = {
         });
       }
 
-      const currentAmount = Math.abs(parseFloat(tx.amount || 0));
-      if (refundAmount > currentAmount + 0.01) {
+      const totalCurrentAmount = candidateTxs.reduce(
+        (sum, t) => sum + Math.abs(parseFloat(t.amount || 0)),
+        0
+      );
+      if (refundAmount > totalCurrentAmount + 0.01) {
         return res.status(400).json({
           success: false,
-          message: `Nominal refund (Rp ${refundAmount.toLocaleString('id-ID')}) melebihi sisa nominal transaksi (Rp ${currentAmount.toLocaleString('id-ID')})`
+          message: `Nominal refund (Rp ${refundAmount.toLocaleString('id-ID')}) melebihi sisa nominal transaksi (Rp ${totalCurrentAmount.toLocaleString('id-ID')})`
         });
       }
 
+      const primaryTx = candidateTxs[0];
       const finalDate = refund_date || new Date().toISOString().split('T')[0];
       const refDateObj = new Date(finalDate);
-      const isLocked = await LockedPeriod.isLocked(tx.branch_id, refDateObj.getMonth() + 1, refDateObj.getFullYear());
+      const isLocked = await LockedPeriod.isLocked(primaryTx.branch_id, refDateObj.getMonth() + 1, refDateObj.getFullYear());
       if (isLocked) {
         return res.status(403).json({
           success: false,
@@ -1183,7 +1292,7 @@ const externalApiController = {
 
         const items = [];
         for (const item of rawItems) {
-          const persisted = await persistExternalAttachment(item, tx.branch_id);
+          const persisted = await persistExternalAttachment(item, primaryTx.branch_id);
           if (persisted && persisted.url) {
             items.push(persisted);
           }
@@ -1193,56 +1302,88 @@ const externalApiController = {
         }
       }
 
-      const existingRefunds = await TransactionRefund.findByTransactionId(tx.id);
-      const totalExistingRefund = existingRefunds.reduce((sum, r) => sum + parseFloat(r.amount || 0), 0);
-
       // Resolve actor user in VerKas
       const refundActorResolved = await resolveVerkasUser(sync_user, ownerId, req.user);
       const actorName = sync_user?.nama || sync_user?.name || refundActorResolved.name || 'Finance Bosgil';
 
-      // 1. Create refund record
-      const refundId = await TransactionRefund.create({
-        transactionId: tx.id,
-        userId: refundActorResolved.id,
-        amount: refundAmount,
-        refundDate: finalDate,
-        note: note ? note.trim() : null,
-        lampiran: processedLampiran
-      });
+      // Distribute refund across candidateTxs sequentially
+      let remainingToRefund = refundAmount;
+      const splitRefunds = [];
 
-      // 2. Reduce transactions.amount in DB
-      const newAmount = Math.max(0, currentAmount - refundAmount);
-      await query('UPDATE transactions SET amount = ? WHERE id = ?', [newAmount, tx.id]);
+      for (const tx of candidateTxs) {
+        if (remainingToRefund <= 0.001) break;
+        const txCurrentAmount = Math.abs(parseFloat(tx.amount || 0));
+        if (txCurrentAmount <= 0.001) continue;
 
-      // 3. Log to activity history (Audit Trail)
-      await TransactionEdit.create({
-        transactionId: tx.id,
-        requesterId: refundActorResolved.id,
-        reason: 'Refund Baru',
-        oldData: { total_refund: totalExistingRefund, net_amount: currentAmount },
-        newData: {
+        const portion = Math.min(remainingToRefund, txCurrentAmount);
+        remainingToRefund = Math.max(0, remainingToRefund - portion);
+
+        const existingRefunds = await TransactionRefund.findByTransactionId(tx.id);
+        const totalExistingRefund = existingRefunds.reduce((sum, r) => sum + parseFloat(r.amount || 0), 0);
+
+        const refundNote = candidateTxs.length > 1 && tx.category_name
+          ? `${note ? note.trim() : 'Refund PO'} [${tx.category_name}]`
+          : (note ? note.trim() : null);
+
+        // 1. Create refund record
+        const refundId = await TransactionRefund.create({
+          transactionId: tx.id,
+          userId: refundActorResolved.id,
+          amount: portion,
+          refundDate: finalDate,
+          note: refundNote,
+          lampiran: processedLampiran
+        });
+
+        // 2. Reduce transactions.amount in DB
+        const newAmount = Math.max(0, txCurrentAmount - portion);
+        await query('UPDATE transactions SET amount = ? WHERE id = ?', [newAmount, tx.id]);
+
+        // 3. Log to activity history (Audit Trail)
+        await TransactionEdit.create({
+          transactionId: tx.id,
+          requesterId: refundActorResolved.id,
+          reason: 'Refund Baru',
+          oldData: { total_refund: totalExistingRefund, net_amount: txCurrentAmount },
+          newData: {
+            refund_id: refundId,
+            refund_amount: portion,
+            refund_date: finalDate,
+            total_refund: totalExistingRefund + portion,
+            net_amount: newAmount,
+            note: refundNote,
+            lampiran: processedLampiran,
+            external_sync_by: `${actorName} (via Bosgil PO)`
+          },
+          status: 'approved'
+        }).catch(err => console.error('[ExternalAPI] Error logging refund history:', err.message));
+
+        splitRefunds.push({
           refund_id: refundId,
-          refund_amount: refundAmount,
+          transaction_id: tx.id,
+          external_reference_id: tx.external_reference_id,
+          category_name: tx.category_name || null,
+          amount: portion,
+          remaining_transaction_amount: newAmount,
           refund_date: finalDate,
-          total_refund: totalExistingRefund + refundAmount,
-          net_amount: newAmount,
-          note: note ? note.trim() : null,
-          lampiran: processedLampiran,
-          external_sync_by: `${actorName} (via Bosgil PO)`
-        },
-        status: 'approved'
-      }).catch(err => console.error('[ExternalAPI] Error logging refund history:', err.message));
+          note: refundNote
+        });
+      }
+
+      const firstRefund = splitRefunds[0] || {};
+      const newTotalRemaining = Math.max(0, totalCurrentAmount - refundAmount);
 
       return res.status(201).json({
         success: true,
         message: 'Refund transaksi berhasil dicatat ke VerKas',
         data: {
-          refund_id: refundId,
-          transaction_id: tx.id,
+          refund_id: firstRefund.refund_id || null,
+          transaction_id: firstRefund.transaction_id || primaryTx.id,
           amount: refundAmount,
-          remaining_transaction_amount: newAmount,
+          remaining_transaction_amount: newTotalRemaining,
           refund_date: finalDate,
-          external_reference_id: tx.external_reference_id
+          external_reference_id: firstRefund.external_reference_id || primaryTx.external_reference_id,
+          split_refunds: splitRefunds
         }
       });
     } catch (error) {
@@ -1253,7 +1394,7 @@ const externalApiController = {
 
   /**
    * GET /api/external/v1/refunds
-   * Fetch all refunds for a transaction by external_reference_id or transaction_id
+   * Fetch all refunds for a transaction (or all category splits of a PO) by external_reference_id or transaction_id
    */
   getRefunds: async (req, res, next) => {
     try {
@@ -1266,18 +1407,43 @@ const externalApiController = {
         });
       }
 
-      let tx = null;
-      if (external_reference_id) {
-        tx = await Transaction.findByExternalReference(external_reference_id);
-      }
-      if (!tx && transaction_id) {
-        tx = await Transaction.findById(transaction_id);
+      const poBaseMatch = external_reference_id ? String(external_reference_id).match(/^(po_\d+)(?:_(?:cat|split)_\d+)?$/i) : null;
+      const baseRef = poBaseMatch ? poBaseMatch[1] : null;
+
+      let activeTxIds = [];
+      let deletedSplitTxs = [];
+
+      if (baseRef) {
+        const allPoRows = await query(
+          `SELECT id, external_reference_id, status_deleted 
+           FROM transactions 
+           WHERE external_reference_id = ? 
+              OR external_reference_id LIKE ? 
+              OR external_reference_id LIKE ? 
+           ORDER BY id ASC`,
+          [baseRef, `${baseRef}_cat_%`, `${baseRef}_split_%`]
+        );
+        activeTxIds = allPoRows.filter(r => !r.status_deleted).map(r => r.id);
+        deletedSplitTxs = allPoRows.filter(r => Boolean(r.status_deleted));
       }
 
-      if (!tx) {
+      if (activeTxIds.length === 0) {
+        let tx = null;
+        if (external_reference_id && !baseRef) {
+          tx = await Transaction.findByExternalReference(external_reference_id);
+        }
+        if (!tx && transaction_id) {
+          tx = await Transaction.findById(transaction_id);
+        }
+        if (tx) {
+          activeTxIds = [tx.id];
+        }
+      }
+
+      if (activeTxIds.length === 0) {
         // Check if transaction was soft-deleted in VerKas
-        let deletedTx = null;
-        if (transaction_id) {
+        let deletedTx = deletedSplitTxs[deletedSplitTxs.length - 1] || null;
+        if (!deletedTx && transaction_id) {
           const rows = await query(
             'SELECT id, external_reference_id, status_deleted FROM transactions WHERE id = ? LIMIT 1',
             [transaction_id]
@@ -1297,27 +1463,49 @@ const externalApiController = {
           found: false,
           deleted_in_verkas: Boolean(deletedTx?.status_deleted || transaction_id),
           deleted_transaction_id: deletedTx?.id || (transaction_id ? Number(transaction_id) : null),
+          deleted_transactions: deletedSplitTxs,
           data: {
             transaction_id: null,
             external_reference_id: external_reference_id || null,
             current_amount: 0,
-            refunds: []
+            refunds: [],
+            transactions: []
           }
         });
       }
 
-      const fullTx = await Transaction.findById(tx.id, true);
-      const refunds = fullTx?.refunds || (await TransactionRefund.findByTransactionId(tx.id));
+      const fullTransactions = [];
+      const allRefunds = [];
+      let totalCurrentAmount = 0;
+
+      for (const txId of activeTxIds) {
+        const fullTx = await Transaction.findById(txId, true);
+        if (!fullTx) continue;
+        fullTransactions.push(fullTx);
+        totalCurrentAmount += parseFloat(fullTx.amount || 0);
+        const txRefunds = fullTx.refunds || (await TransactionRefund.findByTransactionId(fullTx.id)) || [];
+        for (const r of txRefunds) {
+          allRefunds.push({
+            ...r,
+            external_reference_id: fullTx.external_reference_id,
+            category_name: fullTx.category_name || null
+          });
+        }
+      }
+
+      const primaryTx = fullTransactions[0];
 
       return res.status(200).json({
         success: true,
         found: true,
+        deleted_transactions: deletedSplitTxs,
         data: {
-          transaction_id: tx.id,
-          external_reference_id: tx.external_reference_id,
-          current_amount: parseFloat(tx.amount || 0),
-          refunds: refunds || [],
-          transaction: fullTx || tx
+          transaction_id: primaryTx.id,
+          external_reference_id: primaryTx.external_reference_id,
+          current_amount: totalCurrentAmount,
+          refunds: allRefunds,
+          transaction: primaryTx,
+          transactions: fullTransactions
         }
       });
     } catch (error) {

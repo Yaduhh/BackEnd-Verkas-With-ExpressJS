@@ -390,64 +390,93 @@ const bulkRepayment = async (req, res, next) => {
     await dbTransaction(async (conn) => {
       let remainingToAllocate = repaymentAmount;
 
-      // 1. Initial balance repayment (if exists and remaining > 0)
+      // Ambil daftar piutang transaksi (FIFO: tanggal paling lama -> ID paling lama)
+      const [debtRows] = await conn.execute(
+        `SELECT t.id as transaction_id, t.branch_id, DATE_FORMAT(t.transaction_date, '%Y-%m-%d') as tx_date_str, t.transaction_date, t.note as transaction_note,
+                t.remaining_debt as trans_remaining, t.paid_amount as trans_paid,
+                tmd.id as tmd_id, tmd.remaining_debt as tmd_remaining, tmd.paid_amount as tmd_paid
+         FROM transactions t
+         LEFT JOIN transaction_mitra_details tmd ON tmd.transaction_id = t.id AND tmd.mitra_piutang_id = ?
+         WHERE (t.mitra_piutang_id = ? OR tmd.mitra_piutang_id = ?)
+           AND t.branch_id = ?
+           AND t.status_deleted = false
+           AND (t.is_draft = false OR t.is_draft IS NULL)
+           AND (
+             (tmd.id IS NOT NULL AND tmd.remaining_debt > 0)
+             OR (tmd.id IS NULL AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id) AND t.remaining_debt > 0)
+           )
+         ORDER BY DATE(t.transaction_date) ASC, t.created_at ASC, t.id ASC
+         FOR UPDATE`,
+        [mitraId, mitraId, mitraId, parseInt(branchId)]
+      );
+
+      // Gabungkan Saldo Awal (jika ada) & Transaksi Piutang berdasarkan urutan tanggal terlama (FIFO murni)
       const initialBalance = parseFloat(existingMitra.initial_balance || 0);
       const initialBalancePaid = parseFloat(existingMitra.initial_balance_paid || 0);
       const remainingInitial = Math.max(0, initialBalance - initialBalancePaid);
+      const initDateStr = existingMitra.initial_balance_date
+        ? (typeof existingMitra.initial_balance_date === 'string'
+            ? existingMitra.initial_balance_date.split('T')[0]
+            : new Date(existingMitra.initial_balance_date).toISOString().split('T')[0])
+        : '0000-01-01';
 
-      if (remainingInitial > 0 && remainingToAllocate > 0) {
-        const allocInit = Math.min(remainingToAllocate, remainingInitial);
-        await conn.execute(
-          `UPDATE mitra_piutang 
-           SET initial_balance_paid = initial_balance_paid + ?, updated_at = CURRENT_TIMESTAMP
-           WHERE id = ? AND branch_id = ?`,
-          [allocInit, mitraId, parseInt(branchId)]
-        );
-
-        await conn.execute(
-          `INSERT INTO transaction_repayments (transaction_id, mitra_piutang_id, user_id, amount, payment_date, note, lampiran, bulk_repayment_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [null, mitraId, req.userId, allocInit, paymentDate, note || `Pelunasan Saldo Awal: ${existingMitra.nama}`, lampiranValue, bulkRepaymentId]
-        );
-
-        remainingToAllocate -= allocInit;
-        allocations.push({
-          type: 'initial_balance',
-          allocated_amount: allocInit
+      const fifoQueue = [];
+      if (remainingInitial > 0) {
+        fifoQueue.push({
+          itemType: 'initial_balance',
+          sortDate: initDateStr,
+          sortId: 0,
+          remaining: remainingInitial
         });
       }
 
-      // 2. Transaksi Piutang (FIFO)
-      if (remainingToAllocate > 0) {
-        const [debtRows] = await conn.execute(
-          `SELECT t.id as transaction_id, t.branch_id, t.transaction_date, t.note as transaction_note,
-                  t.remaining_debt as trans_remaining, t.paid_amount as trans_paid,
-                  tmd.id as tmd_id, tmd.remaining_debt as tmd_remaining, tmd.paid_amount as tmd_paid
-           FROM transactions t
-           LEFT JOIN transaction_mitra_details tmd ON tmd.transaction_id = t.id AND tmd.mitra_piutang_id = ?
-           WHERE (t.mitra_piutang_id = ? OR tmd.mitra_piutang_id = ?)
-             AND t.branch_id = ?
-             AND t.status_deleted = false
-             AND (
-               (tmd.id IS NOT NULL AND tmd.remaining_debt > 0)
-               OR (tmd.id IS NULL AND t.remaining_debt > 0)
-             )
-           ORDER BY t.transaction_date ASC, t.id ASC
-           FOR UPDATE`,
-          [mitraId, mitraId, mitraId, parseInt(branchId)]
-        );
+      for (const row of debtRows) {
+        const isMultiMitra = !!row.tmd_id;
+        const currentDebt = isMultiMitra ? parseFloat(row.tmd_remaining) : parseFloat(row.trans_remaining);
+        if (currentDebt > 0) {
+          fifoQueue.push({
+            itemType: 'transaction',
+            sortDate: row.tx_date_str || '9999-12-31',
+            sortId: row.transaction_id,
+            remaining: currentDebt,
+            row
+          });
+        }
+      }
 
-        for (const row of debtRows) {
-          if (remainingToAllocate <= 0) break;
+      fifoQueue.sort((a, b) => {
+        if (a.sortDate !== b.sortDate) return a.sortDate.localeCompare(b.sortDate);
+        return a.sortId - b.sortId;
+      });
 
+      for (const item of fifoQueue) {
+        if (remainingToAllocate <= 0) break;
+
+        if (item.itemType === 'initial_balance') {
+          const allocInit = Math.min(remainingToAllocate, item.remaining);
+          await conn.execute(
+            `UPDATE mitra_piutang 
+             SET initial_balance_paid = initial_balance_paid + ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND branch_id = ?`,
+            [allocInit, mitraId, parseInt(branchId)]
+          );
+
+          await conn.execute(
+            `INSERT INTO transaction_repayments (transaction_id, mitra_piutang_id, user_id, amount, payment_date, note, lampiran, bulk_repayment_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [null, mitraId, req.userId, allocInit, paymentDate, note || `Pelunasan Saldo Awal: ${existingMitra.nama}`, lampiranValue, bulkRepaymentId]
+          );
+
+          remainingToAllocate -= allocInit;
+          allocations.push({
+            type: 'initial_balance',
+            allocated_amount: allocInit
+          });
+        } else {
+          const row = item.row;
           const isMultiMitra = !!row.tmd_id;
-          const currentDebt = isMultiMitra ? parseFloat(row.tmd_remaining) : parseFloat(row.trans_remaining);
+          const alloc = Math.min(remainingToAllocate, item.remaining);
 
-          if (currentDebt <= 0) continue;
-
-          const alloc = Math.min(remainingToAllocate, currentDebt);
-
-          // Update multi-mitra details if applicable
           if (isMultiMitra) {
             await conn.execute(
               `UPDATE transaction_mitra_details 
@@ -457,7 +486,6 @@ const bulkRepayment = async (req, res, next) => {
             );
           }
 
-          // Always update main transaction
           await conn.execute(
             `UPDATE transactions 
              SET paid_amount = paid_amount + ?, remaining_debt = remaining_debt - ? 
@@ -465,7 +493,6 @@ const bulkRepayment = async (req, res, next) => {
             [alloc, alloc, row.transaction_id]
           );
 
-          // Insert repayment record
           await conn.execute(
             `INSERT INTO transaction_repayments (transaction_id, mitra_piutang_id, transaction_mitra_detail_id, user_id, amount, payment_date, note, lampiran, bulk_repayment_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
