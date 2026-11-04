@@ -2,9 +2,11 @@ const express = require('express');
 const router = express.Router();
 const {
     getReport,
+    getReportLogs,
     getConsolidatedReport,
     getGroupFinancialReport,
     saveGroupReport,
+    getGroupReportLogs,
     exportGroupPdf,
     exportGroupImage,
     exportGroupInvestorPdf,
@@ -55,14 +57,19 @@ router.get('/consolidated/export-investor-pdf', exportGroupInvestorPdf);
 router.get('/consolidated/export-investor-image', exportGroupInvestorImage);
 router.get('/consolidated/export-excel', exportGroupExcel);
 router.get('/consolidated/export-bagi-hasil-pdf', exportGroupBagiHasilPdf);
+router.get('/consolidated/logs', getGroupReportLogs);
 router.get('/group/report', getGroupFinancialReport);
 router.put('/group/report', saveGroupReport);
+router.get('/group/logs', getGroupReportLogs);
 router.get('/group/export', exportGroupPdf);
 router.get('/group/export-image', exportGroupImage);
 router.get('/group/export-investor-pdf', exportGroupInvestorPdf);
 router.get('/group/export-investor-image', exportGroupInvestorImage);
 router.get('/group/export-excel', exportGroupExcel);
 router.get('/group/export-bagi-hasil-pdf', exportGroupBagiHasilPdf);
+
+// GET /api/branch-reports/:branchId/logs?month=2&year=2026
+router.get('/:branchId/logs', getReportLogs);
 
 // GET /api/branch-reports/:branchId?month=2&year=2026
 router.get('/:branchId', getReport);

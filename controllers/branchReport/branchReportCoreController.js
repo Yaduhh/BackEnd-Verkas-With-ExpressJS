@@ -1,5 +1,6 @@
 const Branch = require('../../models/Branch');
 const BranchReport = require('../../models/BranchReport');
+const BranchReportLog = require('../../models/BranchReportLog');
 const Category = require('../../models/Category');
 const Transaction = require('../../models/Transaction');
 const { query } = require('../../config/database');
@@ -420,6 +421,31 @@ const getReport = async (req, res, next) => {
         // Total Income = Folders (NET) + Previous Month Repayments
         const finalOmzetTotal = incomeBreakdown.reduce((sum, item) => sum + item.total_net, 0) + pelunasanPiutangBulanLalu;
 
+        const existingInDb = await BranchReport.findByBranchAndPeriod(branchId, month, year);
+        if (existingInDb && !req._returnReportOnly) {
+            try {
+                const sysChanges = BranchReportLog.computeSystemSyncChanges(existingInDb, {
+                    omzetTotal: finalOmzetTotal,
+                    pengeluaranTotal: systemPengeluaran,
+                });
+                if (sysChanges.length > 0) {
+                    await BranchReportLog.create({
+                        branchId,
+                        month,
+                        year,
+                        userId: req.userId || null,
+                        userName: req.user?.name || req.user?.email || 'Sistem',
+                        userRole: req.user?.role || 'system',
+                        actionType: 'system_sync',
+                        summary: 'Pembaruan otomatis angka kas dari transaksi periode ini',
+                        changes: sysChanges,
+                    });
+                }
+            } catch (logErr) {
+                console.error('Error logging system sync changes:', logErr.message);
+            }
+        }
+
         const report = await BranchReport.upsert(branchId, month, year, {
             omzetTotal: finalOmzetTotal,
             pengeluaranTotal: systemPengeluaran,
@@ -588,6 +614,9 @@ const updateReport = async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'bagi_hasil harus berupa array' });
         }
 
+        const oldReport = await BranchReport.findByBranchAndPeriod(branchId, month, year);
+        const manualChanges = BranchReportLog.computeManualChanges(oldReport, req.body);
+
         const updated = await BranchReport.updateManual(branchId, month, year, {
             salesChannels: sales_channels,
             bagiHasil: bagi_hasil,
@@ -600,6 +629,28 @@ const updateReport = async (req, res, next) => {
 
         if (!updated) {
             return res.status(404).json({ success: false, message: 'Laporan tidak ditemukan, fetch dulu' });
+        }
+
+        if (manualChanges.length > 0) {
+            try {
+                const summary =
+                    manualChanges.length === 1
+                        ? manualChanges[0].description
+                        : `Memperbarui ${manualChanges.length} bagian pada laporan keuangan`;
+                await BranchReportLog.create({
+                    branchId,
+                    month,
+                    year,
+                    userId: req.userId,
+                    userName: req.user?.name || req.user?.email || 'User',
+                    userRole: req.user?.role || '',
+                    actionType: 'update_report',
+                    summary,
+                    changes: manualChanges,
+                });
+            } catch (logErr) {
+                console.error('Error logging branch report changes:', logErr.message);
+            }
         }
 
         // Recalculate and return full report consistently with getReport
@@ -1219,8 +1270,30 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
         };
 };
 
+const getReportLogs = async (req, res, next) => {
+    try {
+        const { branchId } = req.params;
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+
+        const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
+        if (!hasAccess) {
+            return res.status(403).json({ success: false, message: 'Akses ditolak' });
+        }
+
+        const logs = await BranchReportLog.findByBranchPeriod(branchId, month, year, 100);
+        return res.json({
+            success: true,
+            data: { logs },
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
 module.exports = {
     getReport,
     updateReport,
+    getReportLogs,
     getSingleBranchReportExportData
 };

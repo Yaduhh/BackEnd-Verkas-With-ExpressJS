@@ -1,6 +1,7 @@
 const fs = require('fs');
 const Branch = require('../../models/Branch');
 const BranchReport = require('../../models/BranchReport');
+const BranchReportLog = require('../../models/BranchReportLog');
 const GroupReport = require('../../models/GroupReport');
 const { query } = require('../../config/database');
 const { computeBranchSystemSalesChannels } = require('../../utils/salesChannelHelper');
@@ -1245,6 +1246,9 @@ const saveGroupReport = async (req, res, next) => {
         const targetOwnerId = targetBranches[0]?.owner_id || req.userId;
         const targetGroupName = (group_name && group_name !== 'Semua') ? group_name : (targetBranches[0]?.group_name || 'Gabungan');
 
+        const oldGroupReport = await GroupReport.findByGroupAndPeriod(targetOwnerId, targetGroupName, month, year);
+        const manualChanges = BranchReportLog.computeManualChanges(oldGroupReport, req.body);
+
         await GroupReport.upsert(targetOwnerId, targetGroupName, month, year, {
             stokAwal: stok_awal !== undefined ? parseFloat(stok_awal) : undefined,
             stokAkhir: stok_akhir !== undefined ? parseFloat(stok_akhir) : undefined,
@@ -1255,6 +1259,29 @@ const saveGroupReport = async (req, res, next) => {
             expenseOrder: expense_order,
             disabledCategories: disabled_categories
         });
+
+        if (manualChanges.length > 0) {
+            try {
+                const summary =
+                    manualChanges.length === 1
+                        ? manualChanges[0].description
+                        : `Memperbarui ${manualChanges.length} bagian pada laporan keuangan grup`;
+                await BranchReportLog.create({
+                    ownerId: targetOwnerId,
+                    groupName: targetGroupName,
+                    month,
+                    year,
+                    userId: req.userId,
+                    userName: req.user?.name || req.user?.email || 'User',
+                    userRole: req.user?.role || '',
+                    actionType: 'update_report',
+                    summary,
+                    changes: manualChanges,
+                });
+            } catch (logErr) {
+                console.error('Error logging group report changes:', logErr.message);
+            }
+        }
 
         // Return updated full report
         const fakeReq = { ...req, query: { group_name, month, year }, _returnReportOnly: true };
@@ -1426,10 +1453,38 @@ const exportGroupInvestorImage = async (req, res, next) => {
     }
 };
 
+const getGroupReportLogs = async (req, res, next) => {
+    try {
+        const { group_name } = req.query;
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+
+        const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user?.role || 'owner');
+        let targetBranches = [];
+        if (group_name && group_name !== 'Semua' && group_name !== 'ALL') {
+            targetBranches = accessibleBranches.filter(b => b.group_name && b.group_name.toLowerCase() === group_name.toLowerCase());
+        } else {
+            targetBranches = accessibleBranches;
+        }
+
+        const targetOwnerId = targetBranches[0]?.owner_id || req.userId;
+        const targetGroupName = (group_name && group_name !== 'Semua') ? group_name : (targetBranches[0]?.group_name || 'Gabungan');
+
+        const logs = await BranchReportLog.findByGroupPeriod(targetOwnerId, targetGroupName, month, year, 100);
+        return res.json({
+            success: true,
+            data: { logs },
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
 module.exports = {
     getConsolidatedReport,
     getGroupFinancialReport,
     saveGroupReport,
+    getGroupReportLogs,
     exportGroupPdf,
     exportGroupImage,
     exportGroupInvestorPdf,
