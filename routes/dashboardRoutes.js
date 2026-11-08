@@ -6,7 +6,8 @@ const {
   getBulanan,
   getBulananAll,
   getTahunan,
-  getGroupDashboard
+  getGroupDashboard,
+  getGlobalBalanceSummary
 } = require('../controllers/dashboardController');
 const { authenticate } = require('../middleware/auth');
 const { getCurrentBranch } = require('../middleware/branchContext');
@@ -20,8 +21,9 @@ const {
 // All routes require authentication
 router.use(authenticate);
 
-// Group Dashboard endpoint (Multi-branch group - bypasses single branch requirement)
+// Global & Group Dashboard endpoints (Multi-branch - bypasses single branch requirement)
 router.get('/group', getGroupDashboard);
+router.get('/global-summary', getGlobalBalanceSummary);
 
 // Add branch context - REQUIRED for standard single-branch dashboard (admin auto-assign, owner from header)
 router.use(getCurrentBranch);

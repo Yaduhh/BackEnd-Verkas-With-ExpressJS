@@ -52,15 +52,29 @@ class Transaction {
     transaction.income_details = incomeDetails;
 
     if (transaction.type === 'income') {
-      const taxableBase = incomeDetails.reduce((sum, item) => {
-        if (item.is_taxable === 1 || item.is_taxable === true) {
-          const rowBase = parseFloat(item.amount_app) > 0 ? parseFloat(item.amount_app) : parseFloat(item.amount_cashier || 0);
-          return sum + rowBase;
+      const hasExactPb1 = incomeDetails.some(item => item.pb1_amount !== null && item.pb1_amount !== undefined);
+      if (hasExactPb1) {
+        transaction.pb1 = Math.round(incomeDetails.reduce((sum, item) => {
+          if (item.pb1_amount !== null && item.pb1_amount !== undefined) {
+            return sum + (parseFloat(item.pb1_amount) || 0);
+          }
+          if (item.is_taxable === 1 || item.is_taxable === true) {
+            const rowBase = parseFloat(item.amount_app) > 0 ? parseFloat(item.amount_app) : parseFloat(item.amount_cashier || 0);
+            return sum + Math.round((rowBase * 10) / 110);
+          }
+          return sum;
+        }, 0));
+      } else {
+        const taxableBase = incomeDetails.reduce((sum, item) => {
+          if (item.is_taxable === 1 || item.is_taxable === true) {
+            const rowBase = parseFloat(item.amount_app) > 0 ? parseFloat(item.amount_app) : parseFloat(item.amount_cashier || 0);
+            return sum + rowBase;
+          }
+          return sum;
+        }, 0);
+        if (taxableBase > 0) {
+          transaction.pb1 = Math.round((taxableBase * 10) / 110);
         }
-        return sum;
-      }, 0);
-      if (taxableBase > 0) {
-        transaction.pb1 = Math.round((taxableBase * 10) / 110);
       }
       if (transaction.total_customer && Number(transaction.total_customer) > 0) {
         const effPb1 = parseFloat(transaction.pb1 || 0);
@@ -73,7 +87,7 @@ class Transaction {
     const salesChannelDetails = await query(
       `SELECT tsc.id, tsc.transaction_id, tsc.sales_channel_id,
               COALESCE(tid_direct.payment_method_id, tsc.payment_method_id) as payment_method_id,
-              tsc.transaction_income_detail_id, tsc.amount, tsc.created_at, tsc.updated_at,
+              tsc.transaction_income_detail_id, tsc.amount, tsc.pb1_amount, tsc.created_at, tsc.updated_at,
               sc.name as sales_channel_name, pm.name as payment_method_name, pm.is_taxable as payment_method_is_taxable
        FROM transaction_sales_channels tsc
        JOIN sales_channels sc ON tsc.sales_channel_id = sc.id
@@ -189,19 +203,8 @@ class Transaction {
       SELECT t.*, b.name as branch_name, b.code as branch_code,
              c.name as category_name, c.min_attachment as category_min_attachment, COALESCE(u.name, u.email) as user_name,
              mp.nama as mitra_piutang_nama,
-             COALESCE(ba.name, (
-               SELECT GROUP_CONCAT(DISTINCT ba_sub.name SEPARATOR ', ')
-               FROM transaction_income_details tid
-               JOIN bank_accounts ba_sub ON tid.bank_account_id = ba_sub.id
-               WHERE tid.transaction_id = t.id
-             )) as bank_account_name,
-             COALESCE(ba.type, (
-               SELECT ba_sub.type
-               FROM transaction_income_details tid
-               JOIN bank_accounts ba_sub ON tid.bank_account_id = ba_sub.id
-               WHERE tid.transaction_id = t.id
-               LIMIT 1
-             )) as bank_account_type,
+             COALESCE(ba.name, tid_agg.bank_account_names) as bank_account_name,
+             COALESCE(ba.type, tid_agg.bank_account_type) as bank_account_type,
              tr_notif.transaction_id as parent_transaction_id,
              t_parent.transaction_date as parent_transaction_date,
              COALESCE(tr_sum.total_repayment, 0) as total_repayment,
@@ -209,17 +212,10 @@ class Transaction {
              COALESCE(t_future_ref.total_future_refund, 0) as future_refund,
              (ABS(t.amount) + COALESCE(t_ref.total_refund, 0)) as original_amount,
              (ABS(t.amount) + COALESCE(t_future_ref.total_future_refund, 0)) as net_amount,
-             /* Standardized dynamic PB1 calculation (10/110) - Using ROUND to match Report logic */
+             /* Standardized dynamic PB1 calculation (exact pb1_amount if recorded, else 10/110) */
              CASE 
                WHEN t.type = 'income' THEN 
-                 COALESCE(
-                   (SELECT ROUND(SUM(CASE WHEN tid.amount_app > 0 THEN tid.amount_app ELSE tid.amount_cashier END) * 10 / 110)
-                    FROM transaction_income_details tid
-                    JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                    WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
-                   t.pb1,
-                   0
-                 )
+                 COALESCE(tid_agg.calculated_pb1, t.pb1, 0)
                ELSE 0 
              END as pb1
     `;
@@ -289,6 +285,22 @@ class Transaction {
       LEFT JOIN users u ON t.user_id = u.id
       LEFT JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
       LEFT JOIN bank_accounts ba ON t.bank_account_id = ba.id
+      LEFT JOIN (
+        SELECT tid.transaction_id,
+               GROUP_CONCAT(DISTINCT ba_sub.name SEPARATOR ', ') as bank_account_names,
+               MAX(ba_sub.type) as bank_account_type,
+               CASE
+                 WHEN COUNT(CASE WHEN pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL THEN 1 END) = 0 THEN NULL
+                 WHEN COUNT(tid.pb1_amount) > 0 THEN
+                   ROUND(SUM(CASE WHEN pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL THEN COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND((CASE WHEN tid.amount_app > 0 THEN tid.amount_app ELSE tid.amount_cashier END) * 10 / 110) ELSE 0 END) ELSE 0 END))
+                 ELSE
+                   ROUND(SUM(CASE WHEN pm.is_taxable = 1 THEN (CASE WHEN tid.amount_app > 0 THEN tid.amount_app ELSE tid.amount_cashier END) ELSE 0 END) * 10 / 110)
+               END as calculated_pb1
+        FROM transaction_income_details tid
+        LEFT JOIN bank_accounts ba_sub ON tid.bank_account_id = ba_sub.id
+        LEFT JOIN payment_methods pm ON tid.payment_method_id = pm.id
+        GROUP BY tid.transaction_id
+      ) tid_agg ON t.id = tid_agg.transaction_id
       LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id
       LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
       LEFT JOIN (
@@ -682,10 +694,13 @@ class Transaction {
         for (let i = 0; i < incomeDetails.length; i++) {
           const detail = incomeDetails[i];
           const rowLampiran = detail.lampiran ? (Array.isArray(detail.lampiran) ? JSON.stringify(detail.lampiran) : detail.lampiran) : null;
+          const rowPb1 = detail.pb1_amount !== undefined && detail.pb1_amount !== null && detail.pb1_amount !== ''
+            ? parseFloat(detail.pb1_amount)
+            : null;
           const [res] = await conn.execute(
-            `INSERT INTO transaction_income_details (transaction_id, payment_method_id, bank_account_id, amount_app, amount_cashier, lampiran)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [newId, detail.payment_method_id, detail.bank_account_id || null, detail.amount_app || 0, detail.amount_cashier || 0, rowLampiran]
+            `INSERT INTO transaction_income_details (transaction_id, payment_method_id, bank_account_id, amount_app, amount_cashier, pb1_amount, lampiran)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [newId, detail.payment_method_id, detail.bank_account_id || null, detail.amount_app || 0, detail.amount_cashier || 0, !isNaN(rowPb1) ? rowPb1 : null, rowLampiran]
           );
           createdIncomeDetails.push({
             id: res.insertId,
@@ -715,10 +730,14 @@ class Transaction {
               matchedPaymentMethodId = createdIncomeDetails[0].payment_method_id;
             }
 
+            const scPb1 = detail.pb1_amount !== undefined && detail.pb1_amount !== null && detail.pb1_amount !== ''
+              ? parseFloat(detail.pb1_amount)
+              : null;
+
             await conn.execute(
-              `INSERT INTO transaction_sales_channels (transaction_id, sales_channel_id, payment_method_id, transaction_income_detail_id, amount)
-               VALUES (?, ?, ?, ?, ?)`,
-              [newId, parseInt(detail.sales_channel_id), matchedPaymentMethodId, matchedIncomeDetailId, parseFloat(detail.amount || 0)]
+              `INSERT INTO transaction_sales_channels (transaction_id, sales_channel_id, payment_method_id, transaction_income_detail_id, amount, pb1_amount)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+              [newId, parseInt(detail.sales_channel_id), matchedPaymentMethodId, matchedIncomeDetailId, parseFloat(detail.amount || 0), !isNaN(scPb1) ? scPb1 : null]
             );
           }
         }
@@ -963,10 +982,13 @@ class Transaction {
           for (let i = 0; i < incomeDetails.length; i++) {
             const detail = incomeDetails[i];
             const rowLampiran = detail.lampiran ? (Array.isArray(detail.lampiran) ? JSON.stringify(detail.lampiran) : detail.lampiran) : null;
+            const rowPb1 = detail.pb1_amount !== undefined && detail.pb1_amount !== null && detail.pb1_amount !== ''
+              ? parseFloat(detail.pb1_amount)
+              : null;
             const [res] = await conn.execute(
-              `INSERT INTO transaction_income_details (transaction_id, payment_method_id, bank_account_id, amount_app, amount_cashier, lampiran)
-               VALUES (?, ?, ?, ?, ?, ?)`,
-              [id, detail.payment_method_id, detail.bank_account_id || null, detail.amount_app || 0, detail.amount_cashier || 0, rowLampiran]
+              `INSERT INTO transaction_income_details (transaction_id, payment_method_id, bank_account_id, amount_app, amount_cashier, pb1_amount, lampiran)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              [id, detail.payment_method_id, detail.bank_account_id || null, detail.amount_app || 0, detail.amount_cashier || 0, !isNaN(rowPb1) ? rowPb1 : null, rowLampiran]
             );
             createdIncomeDetails.push({
               id: res.insertId,
@@ -1021,10 +1043,14 @@ class Transaction {
                 matchedPaymentMethodId = effectiveIncomeDetails[0].payment_method_id;
               }
 
+              const scPb1 = detail.pb1_amount !== undefined && detail.pb1_amount !== null && detail.pb1_amount !== ''
+                ? parseFloat(detail.pb1_amount)
+                : null;
+
               await conn.execute(
-                `INSERT INTO transaction_sales_channels (transaction_id, sales_channel_id, payment_method_id, transaction_income_detail_id, amount)
-                 VALUES (?, ?, ?, ?, ?)`,
-                [id, parseInt(detail.sales_channel_id), matchedPaymentMethodId, matchedIncomeDetailId, parseFloat(detail.amount || 0)]
+                `INSERT INTO transaction_sales_channels (transaction_id, sales_channel_id, payment_method_id, transaction_income_detail_id, amount, pb1_amount)
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+                [id, parseInt(detail.sales_channel_id), matchedPaymentMethodId, matchedIncomeDetailId, parseFloat(detail.amount || 0), !isNaN(scPb1) ? scPb1 : null]
               );
             }
           }
@@ -1391,10 +1417,15 @@ class Transaction {
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
             COALESCE(
-              (SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+              (SELECT CASE
+                 WHEN COUNT(tid.pb1_amount) > 0 THEN
+                   ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
+                 ELSE
+                   ROUND(SUM(tid.amount_app) * 10 / 110)
+               END
                FROM transaction_income_details tid
                JOIN payment_methods pm ON tid.payment_method_id = pm.id
-               WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
+               WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)),
               t.pb1,
               0
             )
@@ -1422,10 +1453,15 @@ class Transaction {
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
             COALESCE(
-              (SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+              (SELECT CASE
+                 WHEN COUNT(tid.pb1_amount) > 0 THEN
+                   ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
+                 ELSE
+                   ROUND(SUM(tid.amount_app) * 10 / 110)
+               END
                FROM transaction_income_details tid
                JOIN payment_methods pm ON tid.payment_method_id = pm.id
-               WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
+               WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)),
               t.pb1,
               0
             )
@@ -1595,10 +1631,15 @@ class Transaction {
                 ) as taxable_amount,
                 SUM(
                     COALESCE((
-                        SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                        SELECT CASE
+                            WHEN COUNT(tid.pb1_amount) > 0 THEN
+                                ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
+                            ELSE
+                                ROUND(SUM(tid.amount_app) * 10 / 110)
+                        END
                         FROM transaction_income_details tid
                         JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                        WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
                     ), t.pb1, 0)
                 ) as total_pb1,
                 (SELECT COUNT(*) FROM transactions t2 WHERE t2.category_id = t.category_id AND t2.type = 'expense' AND t2.status_deleted = false AND (t2.is_draft = false OR t2.is_draft IS NULL) AND t2.branch_id = t.branch_id) as has_expense

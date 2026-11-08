@@ -159,11 +159,14 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
                 END
             ) AS payment_method_id,
             tsc.amount AS gross_amount,
+            tsc.pb1_amount AS exact_pb1_amount,
             CASE 
+                WHEN tsc.pb1_amount IS NOT NULL THEN tsc.amount - ROUND(tsc.pb1_amount)
                 WHEN pm.is_taxable = 1 THEN tsc.amount - ROUND((tsc.amount * 10) / 110)
                 ELSE tsc.amount
             END AS net_amount,
             CASE 
+                WHEN tsc.pb1_amount IS NOT NULL THEN ROUND(tsc.pb1_amount)
                 WHEN pm.is_taxable = 1 THEN ROUND((tsc.amount * 10) / 110)
                 ELSE 0
             END AS pb1_amount,
@@ -252,6 +255,8 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
           const chId = scd.sales_channel_id;
           const gross = parseFloat(scd.gross_amount || 0);
           const isTax = scd.is_taxable == 1 || scd.is_taxable === true;
+          const hasExactPb1 = scd.exact_pb1_amount !== null && scd.exact_pb1_amount !== undefined;
+          const exactPb1 = hasExactPb1 ? (parseFloat(scd.exact_pb1_amount) || 0) : 0;
 
           if (!groupedMap.has(chId)) {
             groupedMap.set(chId, {
@@ -262,31 +267,49 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
               sales_channel_category_id: scd.sales_channel_category_id,
               gross_amount: 0,
               taxable_gross: 0,
+              has_exact_pb1: false,
+              exact_pb1_sum: 0,
               pb1_amount: 0,
               net_amount: 0,
-              is_taxable: isTax ? 1 : 0,
+              is_taxable: (isTax || exactPb1 > 0) ? 1 : 0,
               sources: []
             });
           }
 
           const group = groupedMap.get(chId);
           group.gross_amount += gross;
-          if (isTax) {
+          if (hasExactPb1) {
+            group.has_exact_pb1 = true;
+            group.exact_pb1_sum += exactPb1;
+            if (exactPb1 > 0 || isTax) {
+              group.taxable_gross += gross;
+              group.is_taxable = 1;
+            }
+          } else if (isTax) {
             group.taxable_gross += gross;
+            group.exact_pb1_sum += Math.round((gross * 10) / 110);
             group.is_taxable = 1;
           }
           group.sources.push(scd);
         });
 
         const groupedChannels = Array.from(groupedMap.values());
+        const txHasAnyExactPb1 = groupedChannels.some(g => g.has_exact_pb1);
 
-        // Calculate channel-level PB1 (10/110 of taxable_gross)
+        // Calculate channel-level PB1 (exact if recorded, else 10/110 of taxable_gross)
         groupedChannels.forEach(g => {
-          g.pb1_amount = g.taxable_gross > 0 ? Math.round((g.taxable_gross * 10) / 110) : 0;
+          if (txHasAnyExactPb1) {
+            g.pb1_amount = Math.round(g.exact_pb1_sum);
+          } else {
+            g.pb1_amount = g.taxable_gross > 0 ? Math.round((g.taxable_gross * 10) / 110) : 0;
+          }
           g.net_amount = g.gross_amount - g.pb1_amount;
         });
 
         // 2. Reconcile PB1 differences between channel groups and authoritative transaction PB1 (Single Source of Truth)
+        const hasExactIncomePb1 = (t.income_details || []).some(
+          (idRow) => idRow.pb1_amount !== null && idRow.pb1_amount !== undefined
+        );
         const taxableIncomeRows = (t.income_details || []).filter(
           (idRow) => idRow.is_taxable == 1 || idRow.is_taxable === true
         );
@@ -294,15 +317,17 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
           (s, idRow) => s + (parseFloat(idRow.amount_app) || 0),
           0
         );
-        const effectiveTrxPb1 =
-          taxableIncomeRows.length > 0
-            ? Math.round((taxableIncomeSum * 10) / 110)
-            : parseFloat(t.pb1 || 0);
+        const effectiveTrxPb1 = hasExactIncomePb1
+          ? Math.round((t.income_details || []).reduce((s, idRow) => s + (parseFloat(idRow.pb1_amount) || 0), 0))
+          : (taxableIncomeRows.length > 0
+              ? Math.round((taxableIncomeSum * 10) / 110)
+              : parseFloat(t.pb1 || 0));
 
         const scPb1Sum = groupedChannels.reduce((sum, g) => sum + g.pb1_amount, 0);
         const taxableGroups = groupedChannels.filter(g => g.taxable_gross > 0);
 
         if (
+          !txHasAnyExactPb1 &&
           effectiveTrxPb1 > 0 &&
           Math.abs(effectiveTrxPb1 - scPb1Sum) > 0 &&
           Math.abs(effectiveTrxPb1 - scPb1Sum) <= 5 &&

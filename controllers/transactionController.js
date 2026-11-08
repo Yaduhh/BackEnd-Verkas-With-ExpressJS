@@ -335,6 +335,13 @@ const getById = async (req, res, next) => {
 
 const create = async (req, res, next) => {
   try {
+    if (req.user && req.user.role !== 'master' && req.user.can_create === false) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses Ditolak: Akun Anda tidak memiliki izin untuk membuat data baru (Create).'
+      });
+    }
+
     const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_savings, mitra_details, savings_details, income_details, sales_channel_details, product_items, is_pb1_payment, is_draft, total_customer, tc, apc } = req.body;
 
     const isDraft = is_draft === true || is_draft === 'true' || is_draft === 1;
@@ -582,6 +589,13 @@ const create = async (req, res, next) => {
 // Update transaction
 const update = async (req, res, next) => {
   try {
+    if (req.user && req.user.role !== 'master' && req.user.can_edit === false) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses Ditolak: Akun Anda tidak memiliki izin untuk mengedit data (Edit).'
+      });
+    }
+
     const { id } = req.params;
     const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, mitra_details, savings_details, income_details, sales_channel_details, product_items, is_pb1_payment, is_draft, total_customer, tc, apc } = req.body;
 
@@ -954,6 +968,13 @@ const update = async (req, res, next) => {
 // Soft delete transaction
 const softDelete = async (req, res, next) => {
   try {
+    if (req.user && req.user.role !== 'master' && req.user.can_delete === false) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses Ditolak: Akun Anda tidak memiliki izin untuk menghapus data (Delete).'
+      });
+    }
+
     const { id } = req.params;
 
     const existing = await Transaction.findById(id);
@@ -1122,6 +1143,13 @@ const restore = async (req, res, next) => {
 // Hard delete (permanent, admin only)
 const hardDelete = async (req, res, next) => {
   try {
+    if (req.user && req.user.role !== 'master' && req.user.can_delete === false) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses Ditolak: Akun Anda tidak memiliki izin untuk menghapus data (Delete).'
+      });
+    }
+
     const { id } = req.params;
 
     const existing = await Transaction.findById(id);
@@ -1160,6 +1188,13 @@ const hardDelete = async (req, res, next) => {
 // Request edit (admin only)
 const requestEdit = async (req, res, next) => {
   try {
+    if (req.user && req.user.role !== 'master' && req.user.can_edit === false) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses Ditolak: Akun Anda tidak memiliki izin untuk mengedit data (Edit).'
+      });
+    }
+
     const { id } = req.params;
     const { reason } = req.body;
 
@@ -2000,6 +2035,13 @@ const deleteRepayment = async (req, res, next) => {
 // Request delete (admin only)
 const requestDelete = async (req, res, next) => {
   try {
+    if (req.user && req.user.role !== 'owner' && req.user.role !== 'master' && req.user.can_delete === false) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses Ditolak: Akun Anda tidak memiliki izin untuk menghapus data (Delete).'
+      });
+    }
+
     const { id } = req.params;
     const { reason } = req.body;
 
@@ -2703,6 +2745,397 @@ const deleteRefund = async (req, res, next) => {
   }
 };
 
+// Parse POS Excel / CSV file for Omzet Penjualan import
+const parsePosFile = async (req, res, next) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({
+        success: false,
+        message: 'File Excel/CSV wajib diunggah'
+      });
+    }
+
+    const branchId = parseInt(req.branchId || req.headers['x-branch-id'] || req.body.branch_id);
+    const xlsx = require('xlsx');
+    const workbook = xlsx.read(req.file.buffer, { type: 'buffer', raw: true });
+    const firstSheetName = workbook.SheetNames[0];
+    if (!firstSheetName) {
+      return res.status(400).json({
+        success: false,
+        message: 'File Excel/CSV kosong atau tidak memiliki sheet'
+      });
+    }
+
+    const sheet = workbook.Sheets[firstSheetName];
+    const rows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+
+    if (!rows || rows.length < 2) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data transaksi tidak ditemukan di dalam file'
+      });
+    }
+
+    const parsePosNumber = (val) => {
+      if (typeof val === 'number') return isNaN(val) ? 0 : val;
+      if (val === null || val === undefined) return 0;
+      const str = String(val).trim().replace(/^Rp\.?\s*/i, '').trim();
+      if (!str) return 0;
+      // Indonesian thousands format e.g. 1.234.567 or 1.234.567,89
+      if (/^-?\d{1,3}(\.\d{3})+(\,\d+)?$/.test(str)) {
+        return parseFloat(str.replace(/\./g, '').replace(',', '.')) || 0;
+      }
+      // US thousands format e.g. 1,234,567 or 1,234,567.89
+      if (/^-?\d{1,3}(\,\d{3})+(\.\d+)?$/.test(str)) {
+        return parseFloat(str.replace(/,/g, '')) || 0;
+      }
+      const cleaned = str.replace(/[^0-9.-]/g, '');
+      return parseFloat(cleaned) || 0;
+    };
+
+    const normalizePosDate = (val) => {
+      if (!val && val !== 0) return null;
+      if (typeof val === 'number' && val > 20000 && val < 80000) {
+        // Excel serial date
+        const utcDays = Math.floor(val - 25569);
+        const d = new Date(utcDays * 86400 * 1000);
+        if (!isNaN(d.getTime())) {
+          return d.toISOString().split('T')[0];
+        }
+      }
+      const str = String(val).trim();
+      if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
+        return str.slice(0, 10);
+      }
+      const dmyMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+      if (dmyMatch) {
+        const [, d, m, y] = dmyMatch;
+        return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      }
+      return null;
+    };
+
+    // Find header row index
+    let headerRowIdx = -1;
+    let colMap = {};
+
+    for (let i = 0; i < Math.min(rows.length, 20); i++) {
+      const r = rows[i].map(c => String(c || '').trim().toLowerCase());
+      const hasTotal = r.some(c => c === 'total' || c === 'bayar' || c === 'subtotal');
+      const hasChannelOrNo = r.some(c => c.includes('penjualan') || c.includes('channel') || c.includes('customer') || c === 'pajak');
+      if (hasTotal && hasChannelOrNo) {
+        headerRowIdx = i;
+        r.forEach((colName, idx) => {
+          if (colName === 'tanggal' || colName === 'tgl' || colName === 'date') colMap.tanggal = idx;
+          else if (colName.includes('no penjualan') || colName.includes('no. penjualan') || colName.includes('no transaksi') || colName.includes('no nota') || colName === 'faktur') colMap.noPenjualan = idx;
+          else if (colName === 'kode' || colName === 'code') colMap.kode = idx;
+          else if (colName.includes('customer') || colName.includes('pelanggan') || colName === 'sumber') colMap.customer = idx;
+          else if (colName.includes('channel') || colName === 'saluran') colMap.channel = idx;
+          else if (colName === 'qty' || colName === 'jumlah' || colName === 'kuantitas') colMap.qty = idx;
+          else if (colName === 'subtotal' || colName === 'sub total') colMap.subtotal = idx;
+          else if (colName === 'dpp') colMap.dpp = idx;
+          else if (colName === 'pajak' || colName === 'pb1' || colName === 'tax' || colName === 'ppn') colMap.pajak = idx;
+          else if (colName === 'total') colMap.total = idx;
+          else if (colName === 'bayar') colMap.bayar = idx;
+          else if (colName.includes('sisa')) colMap.sisaBayar = idx;
+        });
+        break;
+      }
+    }
+
+    if (headerRowIdx === -1) {
+      return res.status(400).json({
+        success: false,
+        message: 'Format kolom header Excel/CSV tidak dikenali. Pastikan terdapat kolom Tanggal, No Penjualan, Nama Customer, Channel, Pajak, dan Total.'
+      });
+    }
+
+    // Load active payment methods & sales channels for this branch to help auto-matching
+    let branchPaymentMethods = [];
+    let branchSalesChannels = [];
+    if (!isNaN(branchId) && branchId > 0) {
+      branchPaymentMethods = await query(
+        `SELECT id, name, category_id, parent_id, is_taxable
+         FROM payment_methods
+         WHERE (branch_id = ? OR branch_id IS NULL) AND is_active = 1`,
+        [branchId]
+      );
+      branchSalesChannels = await query(
+        `SELECT id, name, category_id, is_active
+         FROM sales_channels
+         WHERE branch_id = ? AND status_deleted = 0 AND is_active = 1`,
+        [branchId]
+      );
+    }
+
+    const leafPaymentMethods = branchPaymentMethods.filter(
+      pm => !branchPaymentMethods.some(child => child.parent_id === pm.id)
+    );
+
+    const normalizeKey = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+    const usedPmIds = new Set();
+
+    const matchPaymentMethod = (kode, customerName) => {
+      const kNorm = normalizeKey(kode);
+      const cNorm = normalizeKey(customerName);
+      const availablePms = leafPaymentMethods.filter(pm => !usedPmIds.has(pm.id));
+
+      // 1. Exact or code match on leaf payment methods
+      for (const pm of availablePms) {
+        const pmNorm = normalizeKey(pm.name);
+        if (pmNorm === cNorm || (kNorm && pmNorm === kNorm)) {
+          usedPmIds.add(pm.id);
+          return pm;
+        }
+        if (kNorm && kNorm.length >= 4 && pmNorm.includes(kNorm)) {
+          usedPmIds.add(pm.id);
+          return pm;
+        }
+      }
+
+      // 2. Alias / substring match
+      const aliases = [];
+      if (cNorm.includes('GOJEK') || cNorm.includes('GOFOOD')) aliases.push('GOFOOD', 'GOJEK');
+      if (cNorm.includes('GRAB') || cNorm.includes('GRABFOOD')) aliases.push('GRABFOOD', 'GRAB');
+      if (cNorm.includes('SHOPEE')) aliases.push('SHOPEEFOOD', 'SHOPEE');
+      if (cNorm.includes('ADMINPESANAN') || cNorm.includes('PESANAN')) aliases.push('ADMINPESANAN', 'PESANAN');
+      if (cNorm === 'CASH') aliases.push('CASH', 'TUNAI');
+      if (cNorm === 'TUNAI') aliases.push('TUNAI', 'QRIS', 'EDC', 'BCA', 'CASH');
+
+      for (const alias of aliases) {
+        const found = availablePms.find(pm => normalizeKey(pm.name) === alias) ||
+                      availablePms.find(pm => normalizeKey(pm.name).includes(alias));
+        if (found) {
+          usedPmIds.add(found.id);
+          return found;
+        }
+      }
+
+      // 3. Fallback substring match
+      if (cNorm) {
+        const subMatch = availablePms.find(pm => {
+          const pmNorm = normalizeKey(pm.name);
+          return pmNorm.includes(cNorm) || cNorm.includes(pmNorm);
+        });
+        if (subMatch) {
+          usedPmIds.add(subMatch.id);
+          return subMatch;
+        }
+      }
+      return null;
+    };
+
+    const matchSalesChannel = (channelName) => {
+      const chNorm = normalizeKey(channelName);
+      if (!chNorm) return null;
+      return (
+        branchSalesChannels.find(sc => normalizeKey(sc.name) === chNorm) ||
+        branchSalesChannels.find(sc => {
+          const scNorm = normalizeKey(sc.name);
+          return scNorm.includes(chNorm) || chNorm.includes(scNorm);
+        }) ||
+        null
+      );
+    };
+
+    let detectedDate = null;
+    let totalTransactions = 0;
+    let totalQty = 0;
+    let totalSubtotal = 0;
+    let totalDpp = 0;
+    let totalPb1 = 0;
+    let totalGross = 0;
+
+    // Group by source (Kode + Nama Customer)
+    const sourceGroupsMap = new Map();
+    // Group by (sourceKey + Channel)
+    const channelGroupsMap = new Map();
+
+    for (let i = headerRowIdx + 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r || r.length === 0) continue;
+
+      const rawTanggal = colMap.tanggal !== undefined ? r[colMap.tanggal] : '';
+      const rawNoPenjualan = colMap.noPenjualan !== undefined ? String(r[colMap.noPenjualan] || '').trim() : '';
+      const rawKode = colMap.kode !== undefined ? String(r[colMap.kode] || '').trim() : '';
+      const rawCustomer = colMap.customer !== undefined ? String(r[colMap.customer] || '').trim() : '';
+      const rawChannel = colMap.channel !== undefined ? String(r[colMap.channel] || '').trim() : '';
+
+      // Skip Grand Total or summary rows
+      const joinedLabels = `${rawTanggal} ${rawNoPenjualan} ${rawKode} ${rawCustomer} ${rawChannel}`.toLowerCase();
+      if (joinedLabels.includes('grand total') || joinedLabels.includes('sub total') || joinedLabels.includes('total keseluruhan')) {
+        continue;
+      }
+
+      const rowTotal = colMap.total !== undefined ? parsePosNumber(r[colMap.total]) : (colMap.bayar !== undefined ? parsePosNumber(r[colMap.bayar]) : 0);
+      const rowSubtotal = colMap.subtotal !== undefined ? parsePosNumber(r[colMap.subtotal]) : 0;
+      const rowDpp = colMap.dpp !== undefined ? parsePosNumber(r[colMap.dpp]) : 0;
+      const rowQty = colMap.qty !== undefined ? parsePosNumber(r[colMap.qty]) : 0;
+
+      let rowPajak = 0;
+      if (colMap.pajak !== undefined && String(r[colMap.pajak] ?? '').trim() !== '') {
+        rowPajak = parsePosNumber(r[colMap.pajak]);
+      } else if (rowTotal > 0 && rowSubtotal > 0 && rowTotal >= rowSubtotal) {
+        rowPajak = rowTotal - rowSubtotal;
+      }
+
+      // Skip empty non-transaction rows
+      if (!rawNoPenjualan && !rawCustomer && !rawChannel && rowTotal === 0) {
+        continue;
+      }
+      if (!rawNoPenjualan && (rawChannel.toLowerCase() === 'total' || rawCustomer.toLowerCase() === 'total')) {
+        continue;
+      }
+
+      if (!detectedDate && rawTanggal) {
+        detectedDate = normalizePosDate(rawTanggal);
+      }
+
+      totalTransactions += 1;
+      totalQty += rowQty;
+      totalSubtotal += rowSubtotal;
+      totalDpp += rowDpp;
+      totalPb1 += rowPajak;
+      totalGross += rowTotal;
+
+      const sourceName = rawCustomer || rawKode || 'UMUM';
+      const sourceCode = rawKode || '';
+      const sourceKey = `${sourceCode.toUpperCase()}__${sourceName.toUpperCase()}`;
+      const sourceLabel = sourceCode && sourceCode.toUpperCase() !== sourceName.toUpperCase()
+        ? `${sourceCode} - ${sourceName}`
+        : sourceName;
+
+      if (!sourceGroupsMap.has(sourceKey)) {
+        const matchedPm = matchPaymentMethod(sourceCode, sourceName);
+        sourceGroupsMap.set(sourceKey, {
+          source_key: sourceKey,
+          pos_source_code: sourceCode,
+          pos_source_name: sourceName,
+          pos_source_label: sourceLabel,
+          payment_method_id: matchedPm ? matchedPm.id : 0,
+          payment_method_name: matchedPm ? matchedPm.name : '',
+          is_taxable: matchedPm ? Boolean(matchedPm.is_taxable) : rowPajak > 0,
+          tx_count: 0,
+          qty: 0,
+          amount_gross: 0,
+          amount_subtotal: 0,
+          amount_dpp: 0,
+          pb1_amount: 0
+        });
+      }
+
+      const srcGroup = sourceGroupsMap.get(sourceKey);
+      srcGroup.tx_count += 1;
+      srcGroup.qty += rowQty;
+      srcGroup.amount_gross += rowTotal;
+      srcGroup.amount_subtotal += rowSubtotal;
+      srcGroup.amount_dpp += rowDpp;
+      srcGroup.pb1_amount += rowPajak;
+      if (rowPajak > 0) {
+        srcGroup.is_taxable = true;
+      }
+
+      const channelName = rawChannel || sourceName || 'LAINNYA';
+      const channelKey = `${sourceKey}:::${channelName.toUpperCase()}`;
+
+      if (!channelGroupsMap.has(channelKey)) {
+        const matchedSc = matchSalesChannel(channelName);
+        channelGroupsMap.set(channelKey, {
+          source_key: sourceKey,
+          pos_source_label: sourceLabel,
+          pos_channel_name: channelName,
+          sales_channel_id: matchedSc ? matchedSc.id : 0,
+          sales_channel_name: matchedSc ? matchedSc.name : '',
+          tx_count: 0,
+          qty: 0,
+          amount_gross: 0,
+          amount_subtotal: 0,
+          pb1_amount: 0
+        });
+      }
+
+      const chGroup = channelGroupsMap.get(channelKey);
+      chGroup.tx_count += 1;
+      chGroup.qty += rowQty;
+      chGroup.amount_gross += rowTotal;
+      chGroup.amount_subtotal += rowSubtotal;
+      chGroup.pb1_amount += rowPajak;
+    }
+
+    if (totalTransactions === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Tidak ada baris transaksi valid yang ditemukan dalam file'
+      });
+    }
+
+    const incomeDetails = Array.from(sourceGroupsMap.values()).map((src, idx) => ({
+      income_detail_index: idx,
+      source_key: src.source_key,
+      pos_source_code: src.pos_source_code,
+      pos_source_name: src.pos_source_name,
+      pos_source_label: src.pos_source_label,
+      payment_method_id: src.payment_method_id,
+      payment_method_name: src.payment_method_name,
+      is_taxable: src.is_taxable,
+      tx_count: src.tx_count,
+      qty: src.qty,
+      amount_app: Math.round(src.amount_gross),
+      amount_cashier: Math.round(src.amount_gross),
+      pb1_amount: Math.round(src.pb1_amount),
+      amount_net: Math.round(src.amount_gross - src.pb1_amount)
+    }));
+
+    const sourceIndexByKey = new Map(incomeDetails.map(d => [d.source_key, d.income_detail_index]));
+
+    const salesChannelDetails = Array.from(channelGroupsMap.values()).map(ch => {
+      const srcIdx = sourceIndexByKey.get(ch.source_key) ?? 0;
+      const parentSrc = incomeDetails[srcIdx];
+      return {
+        income_detail_index: srcIdx,
+        payment_method_id: parentSrc ? parentSrc.payment_method_id : 0,
+        payment_method_name: parentSrc ? (parentSrc.payment_method_name || parentSrc.pos_source_label) : ch.pos_source_label,
+        payment_method_is_taxable: parentSrc ? parentSrc.is_taxable : ch.pb1_amount > 0,
+        pos_source_label: ch.pos_source_label,
+        pos_channel_name: ch.pos_channel_name,
+        sales_channel_id: ch.sales_channel_id,
+        sales_channel_name: ch.sales_channel_name,
+        tx_count: ch.tx_count,
+        qty: ch.qty,
+        amount: Math.round(ch.amount_gross),
+        pb1_amount: Math.round(ch.pb1_amount),
+        net_amount: Math.round(ch.amount_gross - ch.pb1_amount)
+      };
+    });
+
+    const finalGross = Math.round(totalGross);
+    const finalPb1 = Math.round(totalPb1);
+    const finalNet = Math.round(finalGross - finalPb1);
+    const finalApc = totalTransactions > 0 ? Math.round(finalNet / totalTransactions) : 0;
+
+    return res.json({
+      success: true,
+      message: `Berhasil membaca ${totalTransactions} transaksi dari file POS`,
+      data: {
+        transaction_date: detectedDate,
+        total_customer: totalTransactions,
+        total_qty: Math.round(totalQty),
+        amount_gross: finalGross,
+        amount_subtotal: Math.round(totalSubtotal),
+        amount_dpp: Math.round(totalDpp),
+        pb1_amount: finalPb1,
+        amount_net: finalNet,
+        apc: finalApc,
+        income_details: incomeDetails,
+        sales_channel_details: salesChannelDetails
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAll,
   getSummary,
@@ -2725,7 +3158,8 @@ module.exports = {
   deleteRepayment,
   createRefund,
   updateRefund,
-  deleteRefund
+  deleteRefund,
+  parsePosFile
 };
 
 

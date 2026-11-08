@@ -282,13 +282,18 @@ const addMember = async (req, res, next) => {
         }
       }
       
-      // Create user (admin or owner) - track who created it
+      // Create user (admin or co-owner) - track root owner who owns the team ecosystem
+      const rootOwnerId = await User.resolveEcosystemOwnerId(req.userId);
+      const { can_create = true, can_edit = true, can_delete = true } = req.body;
       const newUser = await User.create({
         email,
         password,
         name: name || null,
         role: userRole,
-        createdBy: req.userId // Track which owner created this user
+        createdBy: rootOwnerId,
+        canCreate: can_create,
+        canEdit: can_edit,
+        canDelete: can_delete
       });
       
       targetUserId = newUser.id;

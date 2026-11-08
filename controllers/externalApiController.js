@@ -591,6 +591,7 @@ const externalApiController = {
         savings_details,
         product_items,
         is_umum = true,
+        is_pb1_payment,
         is_draft,
         sync_user,
         sync_reason,
@@ -599,6 +600,12 @@ const externalApiController = {
         po_creator_name,
         po_approver_name
       } = req.body;
+
+      const isPb1PaymentVal =
+        is_pb1_payment === true ||
+        is_pb1_payment === 1 ||
+        is_pb1_payment === '1' ||
+        is_pb1_payment === 'true';
 
       // Determine Branch ID
       const finalBranchId = branch_id || req.branchId || (req.headers['x-branch-id'] ? parseInt(req.headers['x-branch-id']) : null);
@@ -652,7 +659,39 @@ const externalApiController = {
       let finalCategoryId = category_id ? parseInt(category_id) : null;
       let finalCategoryName = category || '';
 
-      if (finalCategoryId) {
+      // If PB1 payment, auto-resolve or create 'Pajak PB1' / 'Pajak' category in target branch
+      if (isPb1PaymentVal) {
+        const pb1CatRows = await query(
+          `SELECT id, name, type FROM categories
+           WHERE (branch_id = ? OR branch_id IS NULL)
+             AND LOWER(TRIM(name)) IN ('pajak pb1', 'pajak')
+             AND status_deleted = 0
+           ORDER BY CASE WHEN branch_id = ? THEN 0 ELSE 1 END,
+                    CASE WHEN LOWER(TRIM(name)) = 'pajak pb1' THEN 0 ELSE 1 END,
+                    id ASC
+           LIMIT 1`,
+          [finalBranchId, finalBranchId]
+        );
+        if (pb1CatRows.length > 0) {
+          finalCategoryId = pb1CatRows[0].id;
+          finalCategoryName = pb1CatRows[0].name;
+          if (pb1CatRows[0].type === 'income') {
+            await query(`UPDATE categories SET type = 'both' WHERE id = ?`, [finalCategoryId]);
+          }
+        } else {
+          const createdPb1Cat = await Category.create({
+            name: 'Pajak PB1',
+            type: 'both',
+            userId: ownerId,
+            branchId: parseInt(finalBranchId),
+            isDefault: false
+          });
+          finalCategoryId = createdPb1Cat.id;
+          finalCategoryName = createdPb1Cat.name || 'Pajak PB1';
+        }
+      }
+
+      if (finalCategoryId && !isPb1PaymentVal) {
         const catRecord = await Category.findById(finalCategoryId);
         if (
           !catRecord ||
@@ -935,7 +974,9 @@ const externalApiController = {
             }
           }
 
-          const isUmumVal = is_umum !== undefined
+          const isUmumVal = isPb1PaymentVal
+            ? false
+            : is_umum !== undefined
             ? (is_umum === true || is_umum === 1 || is_umum === '1' || is_umum === 'true')
             : (existingTx.is_umum !== 0 && existingTx.is_umum !== false);
 
@@ -958,7 +999,8 @@ const externalApiController = {
             note: existingTx.note,
             date: existingTx.transaction_date,
             lampiran: existingTx.lampiran,
-            is_umum: existingTx.is_umum
+            is_umum: existingTx.is_umum,
+            is_pb1_payment: existingTx.is_pb1_payment
           };
 
           const newDataObj = {
@@ -969,22 +1011,35 @@ const externalApiController = {
             note: note ? note.trim() : existingTx.note,
             date: txDate,
             lampiran: formattedLampiran !== null ? formattedLampiran : existingTx.lampiran,
-            is_umum: isUmumVal
+            is_umum: isUmumVal,
+            is_pb1_payment: is_pb1_payment !== undefined ? isPb1PaymentVal : existingTx.is_pb1_payment
           };
+
+          const effectiveUpdateBankAccountId =
+            bank_account_id
+              ? finalBankAccountId
+              : !isBranchMoved && existingTx.bank_account_id
+              ? existingTx.bank_account_id
+              : finalBankAccountId;
 
           await Transaction.update(existingTx.id, {
             branchId: parseInt(finalBranchId),
             amount: finalTxAmount,
             transactionDate: txDate,
             categoryId: finalCategoryId,
-            bankAccountId: finalBankAccountId,
+            bankAccountId: effectiveUpdateBankAccountId,
             isUmum: isUmumVal,
-            isSavings: is_savings !== undefined
+            isPb1Payment: is_pb1_payment !== undefined ? isPb1PaymentVal : undefined,
+            isSavings: isPb1PaymentVal
+              ? false
+              : is_savings !== undefined
               ? (Boolean(is_savings) || (Array.isArray(normalizedSavingsDetails) && normalizedSavingsDetails.length > 0))
               : undefined,
             note: note ? note.trim() : existingTx.note,
             lampiran: formattedLampiran !== null ? formattedLampiran : existingTx.lampiran,
-            savingsDetails: Array.isArray(normalizedSavingsDetails)
+            savingsDetails: isPb1PaymentVal
+              ? []
+              : Array.isArray(normalizedSavingsDetails)
               ? normalizedSavingsDetails
               : (is_savings === false ? [] : undefined),
             productItems: Array.isArray(normalizedProductItems) ? normalizedProductItems : undefined
@@ -1023,6 +1078,7 @@ const externalApiController = {
               category: finalCategoryName,
               bank_account_id: finalBankAccountId,
               bank_account_name: resolvedBankAccount ? resolvedBankAccount.name : null,
+              is_pb1_payment: is_pb1_payment !== undefined ? isPb1PaymentVal : Boolean(existingTx.is_pb1_payment),
               external_reference_id: existingTx.external_reference_id,
               creator_verkas_user: creatorResolved,
               actor_verkas_user: actorResolved
@@ -1030,6 +1086,12 @@ const externalApiController = {
           });
         }
       }
+
+      const finalCreateIsUmum = isPb1PaymentVal
+        ? false
+        : is_umum !== undefined
+        ? (is_umum === true || is_umum === 1 || is_umum === '1' || is_umum === 'true')
+        : true;
 
       // Create Transaction (userId = creatorResolved.id so "Dibuat Oleh" shows Pembuat PO)
       const createdTx = await Transaction.create({
@@ -1042,17 +1104,18 @@ const externalApiController = {
         apc: apc ? parseFloat(apc) : null,
         pb1: pb1 ? parseFloat(pb1) : null,
         isDebtPayment: Boolean(is_debt_payment),
+        isPb1Payment: isPb1PaymentVal,
         paidAmount: paid_amount ? parseFloat(paid_amount) : null,
         remainingDebt: remaining_debt ? parseFloat(remaining_debt) : null,
         mitraPiutangId: mitra_piutang_id ? parseInt(mitra_piutang_id) : null,
-        isSavings: Boolean(is_savings) || (Array.isArray(normalizedSavingsDetails) && normalizedSavingsDetails.length > 0),
-        savingsDetails: Array.isArray(normalizedSavingsDetails) ? normalizedSavingsDetails : [],
+        isSavings: isPb1PaymentVal ? false : (Boolean(is_savings) || (Array.isArray(normalizedSavingsDetails) && normalizedSavingsDetails.length > 0)),
+        savingsDetails: isPb1PaymentVal ? [] : (Array.isArray(normalizedSavingsDetails) ? normalizedSavingsDetails : []),
         productItems: Array.isArray(normalizedProductItems) ? normalizedProductItems : [],
         note: note ? note.trim() : `[External Sync] ${type === 'income' ? 'Pemasukan' : 'Pengeluaran'} ${finalCategoryName}`,
         transactionDate: txDate,
         lampiran: formattedLampiran,
         bankAccountId: finalBankAccountId,
-        isUmum: is_umum !== undefined ? (is_umum === true || is_umum === 1 || is_umum === '1' || is_umum === 'true') : true,
+        isUmum: finalCreateIsUmum,
         isDraft: Boolean(is_draft),
         externalReferenceId: external_reference_id || null
       });
@@ -1073,7 +1136,8 @@ const externalApiController = {
           note: note ? note.trim() : `[External Sync] ${type === 'income' ? 'Pemasukan' : 'Pengeluaran'} ${finalCategoryName}`,
           date: txDate,
           lampiran: formattedLampiran,
-          is_umum: is_umum !== undefined ? Boolean(is_umum) : true,
+          is_umum: finalCreateIsUmum,
+          is_pb1_payment: isPb1PaymentVal,
           external_sync_by: actorName
         },
         status: 'approved'
@@ -1093,6 +1157,7 @@ const externalApiController = {
           bank_account_id: finalBankAccountId,
           bank_account_name: updatedAccount ? updatedAccount.name : null,
           remaining_bank_balance: updatedAccount ? updatedAccount.balance : null,
+          is_pb1_payment: isPb1PaymentVal,
           external_reference_id: external_reference_id || null
         }
       });
@@ -1208,18 +1273,18 @@ const externalApiController = {
         });
       }
 
-      // Check if external_reference_id is a base PO reference (e.g. "po_105") which may have multiple split transactions
-      const poBaseMatch = external_reference_id ? String(external_reference_id).match(/^(po_\d+)$/i) : null;
+      // Check if external_reference_id is a base PO reference (e.g. "po_105") which may have multiple split or installment transactions
+      const poBaseMatch = external_reference_id ? String(external_reference_id).match(/^(po_\d+)(?:_termin_\d+)?$/i) : null;
       let candidateTxs = [];
 
       if (poBaseMatch) {
         const baseRef = poBaseMatch[1];
         const rows = await query(
           `SELECT id FROM transactions 
-           WHERE (external_reference_id = ? OR external_reference_id LIKE ? OR external_reference_id LIKE ?) 
+           WHERE (external_reference_id = ? OR external_reference_id LIKE ? OR external_reference_id LIKE ? OR external_reference_id LIKE ?) 
              AND status_deleted = false 
            ORDER BY id ASC`,
-          [baseRef, `${baseRef}_cat_%`, `${baseRef}_split_%`]
+          [baseRef, `${baseRef}_cat_%`, `${baseRef}_split_%`, `${baseRef}_termin_%`]
         );
         for (const r of rows) {
           const found = await Transaction.findById(r.id);
@@ -1407,7 +1472,9 @@ const externalApiController = {
         });
       }
 
-      const poBaseMatch = external_reference_id ? String(external_reference_id).match(/^(po_\d+)(?:_(?:cat|split)_\d+)?$/i) : null;
+      const poBaseMatch = external_reference_id
+        ? String(external_reference_id).match(/^(po_\d+)(?:_termin_\d+)?(?:_(?:cat|split)_\d+)?$/i)
+        : null;
       const baseRef = poBaseMatch ? poBaseMatch[1] : null;
 
       let activeTxIds = [];
@@ -1420,8 +1487,9 @@ const externalApiController = {
            WHERE external_reference_id = ? 
               OR external_reference_id LIKE ? 
               OR external_reference_id LIKE ? 
+              OR external_reference_id LIKE ? 
            ORDER BY id ASC`,
-          [baseRef, `${baseRef}_cat_%`, `${baseRef}_split_%`]
+          [baseRef, `${baseRef}_cat_%`, `${baseRef}_split_%`, `${baseRef}_termin_%`]
         );
         activeTxIds = allPoRows.filter(r => !r.status_deleted).map(r => r.id);
         deletedSplitTxs = allPoRows.filter(r => Boolean(r.status_deleted));

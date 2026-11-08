@@ -3,8 +3,116 @@ const BranchReport = require('../../models/BranchReport');
 const BranchReportLog = require('../../models/BranchReportLog');
 const Category = require('../../models/Category');
 const Transaction = require('../../models/Transaction');
+const User = require('../../models/User');
 const { query } = require('../../config/database');
 const { computeBranchSystemSalesChannels } = require('../../utils/salesChannelHelper');
+
+const normalizeBagiHasilArray = (arr) =>
+    JSON.stringify(
+        (Array.isArray(arr) ? arr : []).map(item => ({
+            title: String(item?.title || item?.name || '').trim(),
+            percentage: Number(item?.percentage) || 0,
+            amount: Number(item?.amount) || 0,
+            subItems: (Array.isArray(item?.subItems) ? item.subItems : []).map(sub => ({
+                title: String(sub?.title || sub?.name || '').trim(),
+                percentage: Number(sub?.percentage) || 0,
+                amount: Number(sub?.amount) || 0,
+                subsidi: Number(sub?.subsidi) || 0,
+                is_active: sub?.is_active !== false,
+            })),
+        }))
+    );
+
+const fetchBagiHasilApprovalContext = async (branchId, month, year, fallbackUserId) => {
+    await User.ensurePermissionColumns();
+    const branchObj = await Branch.findById(branchId);
+    const rootOwnerId = branchObj
+        ? await User.resolveEcosystemOwnerId(branchObj.owner_id)
+        : await User.resolveEcosystemOwnerId(fallbackUserId);
+
+    let bagiHasilApprovers = {
+        approver_1_user_id: null,
+        approver_1_name: null,
+        approver_2_user_id: null,
+        approver_2_name: null,
+    };
+
+    try {
+        const approverRows = await query(
+            `SELECT s.approver_1_user_id, u1.name as approver_1_name, u1.email as approver_1_email,
+                    s.approver_2_user_id, u2.name as approver_2_name, u2.email as approver_2_email
+             FROM bagi_hasil_approval_settings s
+             LEFT JOIN users u1 ON s.approver_1_user_id = u1.id
+             LEFT JOIN users u2 ON s.approver_2_user_id = u2.id
+             WHERE s.owner_id = ?`,
+            [rootOwnerId]
+        );
+        if (approverRows.length > 0) {
+            const row = approverRows[0];
+            bagiHasilApprovers = {
+                approver_1_user_id: row.approver_1_user_id || null,
+                approver_1_name: row.approver_1_name || row.approver_1_email || null,
+                approver_2_user_id: row.approver_2_user_id || null,
+                approver_2_name: row.approver_2_name || row.approver_2_email || null,
+            };
+        }
+    } catch (e) {
+        console.warn('Error fetching bagi_hasil_approval_settings:', e.message);
+    }
+
+    let pendingRequest = null;
+    try {
+        const reqRows = await query(
+            `SELECT r.*,
+                    req_u.name as requested_by_name, req_u.email as requested_by_email,
+                    app1_u.name as approved_1_by_name, app1_u.email as approved_1_by_email,
+                    app2_u.name as approved_2_by_name, app2_u.email as approved_2_by_email,
+                    rej_u.name as rejected_by_name, rej_u.email as rejected_by_email
+             FROM bagi_hasil_requests r
+             LEFT JOIN users req_u ON r.requested_by = req_u.id
+             LEFT JOIN users app1_u ON r.approved_1_by = app1_u.id
+             LEFT JOIN users app2_u ON r.approved_2_by = app2_u.id
+             LEFT JOIN users rej_u ON r.rejected_by = rej_u.id
+             WHERE r.branch_id = ? AND r.month = ? AND r.year = ?
+               AND r.status IN ('pending_level_1', 'pending_level_2')
+             ORDER BY r.id DESC
+             LIMIT 1`,
+            [branchId, month, year]
+        );
+        if (reqRows.length > 0) {
+            const r = reqRows[0];
+            let oldBh = [];
+            let newBh = [];
+            try { oldBh = r.old_bagi_hasil ? JSON.parse(r.old_bagi_hasil) : []; } catch {}
+            try { newBh = r.new_bagi_hasil ? JSON.parse(r.new_bagi_hasil) : []; } catch {}
+            pendingRequest = {
+                id: r.id,
+                branch_id: r.branch_id,
+                month: r.month,
+                year: r.year,
+                requested_by: r.requested_by,
+                requested_by_name: r.requested_by_name || r.requested_by_email || 'Co-Owner',
+                old_bagi_hasil: oldBh,
+                new_bagi_hasil: newBh,
+                status: r.status,
+                approver_1_id: r.approver_1_id || bagiHasilApprovers.approver_1_user_id,
+                approved_1_by: r.approved_1_by,
+                approved_1_by_name: r.approved_1_by_name || r.approved_1_by_email || null,
+                approved_1_at: r.approved_1_at,
+                approver_2_id: r.approver_2_id || bagiHasilApprovers.approver_2_user_id,
+                approved_2_by: r.approved_2_by,
+                approved_2_by_name: r.approved_2_by_name || r.approved_2_by_email || null,
+                approved_2_at: r.approved_2_at,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            };
+        }
+    } catch (e) {
+        console.warn('Error fetching bagi_hasil_requests:', e.message);
+    }
+
+    return { rootOwnerId, bagiHasilApprovers, pendingRequest };
+};
 
 /**
  * GET /api/branch-reports/:branchId?month=2&year=2026
@@ -70,10 +178,15 @@ const getReport = async (req, res, next) => {
                 ) as taxable_amount,
                 SUM(
                     COALESCE((
-                        SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                        SELECT CASE
+                            WHEN COUNT(tid.pb1_amount) > 0 THEN
+                                ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
+                            ELSE
+                                ROUND(SUM(tid.amount_app) * 10 / 110)
+                        END
                         FROM transaction_income_details tid
                         JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                        WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
                     ), t.pb1, 0)
                 ) as total_pb1
              FROM transactions t
@@ -348,10 +461,15 @@ const getReport = async (req, res, next) => {
                 ) as taxable_amount,
                 SUM(
                     COALESCE((
-                        SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                        SELECT CASE
+                            WHEN COUNT(tid.pb1_amount) > 0 THEN
+                                ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
+                            ELSE
+                                ROUND(SUM(tid.amount_app) * 10 / 110)
+                        END
                         FROM transaction_income_details tid
                         JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                        WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
                     ), t.pb1, 0)
                 ) as total_pb1,
                 (SELECT COUNT(*) FROM transactions t2 WHERE t2.category_id = t.category_id AND t2.type = 'expense' AND t2.status_deleted = false AND t2.branch_id = t.branch_id) as has_expense
@@ -557,6 +675,13 @@ const getReport = async (req, res, next) => {
             });
         }
 
+        const { bagiHasilApprovers, pendingRequest } = await fetchBagiHasilApprovalContext(
+            parseInt(branchId),
+            month,
+            year,
+            req.userId
+        );
+
         const fullReport = {
             ...report,
             omzet_total: finalOmzetTotal,
@@ -568,7 +693,9 @@ const getReport = async (req, res, next) => {
             expense_breakdown: expenseBreakdown,
             system_sales_channels: systemSalesChannels,
             master_sales_channels: masterSalesChannelsResult,
-            unallocated_omzet: omzetWithoutChannels
+            unallocated_omzet: omzetWithoutChannels,
+            bagi_hasil_approvers: bagiHasilApprovers,
+            pending_bagi_hasil_request: pendingRequest
         };
 
         if (req._returnReportOnly) {
@@ -594,6 +721,13 @@ const getReport = async (req, res, next) => {
  */
 const updateReport = async (req, res, next) => {
     try {
+        if (req.user && req.user.role !== 'owner' && req.user.role !== 'master' && req.user.can_edit === false) {
+            return res.status(403).json({
+                success: false,
+                message: 'Akses Ditolak: Akun Anda tidak memiliki izin untuk mengedit laporan keuangan (Edit).'
+            });
+        }
+
         const { branchId } = req.params;
         const month = parseInt(req.query.month) || new Date().getMonth() + 1;
         const year = parseInt(req.query.year) || new Date().getFullYear();
@@ -615,11 +749,21 @@ const updateReport = async (req, res, next) => {
         }
 
         const oldReport = await BranchReport.findByBranchAndPeriod(branchId, month, year);
-        const manualChanges = BranchReportLog.computeManualChanges(oldReport, req.body);
+        const isBagiHasilChanged =
+            bagi_hasil !== undefined &&
+            normalizeBagiHasilArray(bagi_hasil) !== normalizeBagiHasilArray(oldReport?.bagi_hasil || []);
+
+        const requiresTwoTierBagiHasilApproval =
+            req.user?.role === 'co-owner' && isBagiHasilChanged;
+
+        const bodyForLog = requiresTwoTierBagiHasilApproval
+            ? { ...req.body, bagi_hasil: oldReport?.bagi_hasil || [] }
+            : req.body;
+        const manualChanges = BranchReportLog.computeManualChanges(oldReport, bodyForLog);
 
         const updated = await BranchReport.updateManual(branchId, month, year, {
             salesChannels: sales_channels,
-            bagiHasil: bagi_hasil,
+            bagiHasil: requiresTwoTierBagiHasilApproval ? undefined : bagi_hasil,
             expenseAdjustments: expense_adjustments,
             expenseOrder: expense_order,
             stokAwal: stok_awal !== undefined ? parseFloat(stok_awal) : undefined,
@@ -629,6 +773,61 @@ const updateReport = async (req, res, next) => {
 
         if (!updated) {
             return res.status(404).json({ success: false, message: 'Laporan tidak ditemukan, fetch dulu' });
+        }
+
+        if (requiresTwoTierBagiHasilApproval) {
+            const { bagiHasilApprovers } = await fetchBagiHasilApprovalContext(
+                parseInt(branchId),
+                month,
+                year,
+                req.userId
+            );
+
+            // Supersede any existing pending request for this branch/period
+            await query(
+                `UPDATE bagi_hasil_requests
+                 SET status = 'superseded'
+                 WHERE branch_id = ? AND month = ? AND year = ?
+                   AND status IN ('pending_level_1', 'pending_level_2')`,
+                [branchId, month, year]
+            );
+
+            await query(
+                `INSERT INTO bagi_hasil_requests
+                 (branch_id, month, year, requested_by, old_bagi_hasil, new_bagi_hasil, status, approver_1_id, approver_2_id)
+                 VALUES (?, ?, ?, ?, ?, ?, 'pending_level_1', ?, ?)`,
+                [
+                    branchId,
+                    month,
+                    year,
+                    req.userId,
+                    JSON.stringify(oldReport?.bagi_hasil || []),
+                    JSON.stringify(bagi_hasil),
+                    bagiHasilApprovers.approver_1_user_id || null,
+                    bagiHasilApprovers.approver_2_user_id || null,
+                ]
+            );
+
+            try {
+                await BranchReportLog.create({
+                    branchId,
+                    month,
+                    year,
+                    userId: req.userId,
+                    userName: req.user?.name || req.user?.email || 'Co-Owner',
+                    userRole: req.user?.role || 'co-owner',
+                    actionType: 'request_bagi_hasil',
+                    summary: 'Mengajukan perubahan Bagi Hasil (Menunggu Approval 2 Tingkat)',
+                    changes: [{
+                        section: 'bagi_hasil',
+                        description: 'Pengajuan perubahan Bagi Hasil (Menunggu Approval Tingkat 1 & 2)',
+                        old: oldReport?.bagi_hasil || [],
+                        new: bagi_hasil,
+                    }],
+                });
+            } catch (logErr) {
+                console.error('Error logging bagi_hasil request:', logErr.message);
+            }
         }
 
         if (manualChanges.length > 0) {
@@ -664,9 +863,12 @@ const updateReport = async (req, res, next) => {
 
         return res.json({
             success: true,
-            message: 'Laporan berhasil disimpan',
+            message: requiresTwoTierBagiHasilApproval
+                ? 'Perubahan Bagi Hasil berhasil diajukan dan menunggu Approval 2 Tingkat.'
+                : 'Laporan berhasil disimpan',
             data: {
                 report: fullUpdatedReport,
+                bagi_hasil_pending_approval: requiresTwoTierBagiHasilApproval,
             },
         });
     } catch (error) {
@@ -718,10 +920,15 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                 ) as taxable_amount,
                 SUM(
                     COALESCE((
-                        SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                        SELECT CASE
+                            WHEN COUNT(tid.pb1_amount) > 0 THEN
+                                ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
+                            ELSE
+                                ROUND(SUM(tid.amount_app) * 10 / 110)
+                        END
                         FROM transaction_income_details tid
                         JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                        WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
                     ), t.pb1, 0)
                 ) as total_pb1
              FROM transactions t
@@ -947,10 +1154,15 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                 ) as taxable_amount,
                 SUM(
                     COALESCE((
-                        SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                        SELECT CASE
+                            WHEN COUNT(tid.pb1_amount) > 0 THEN
+                                ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
+                            ELSE
+                                ROUND(SUM(tid.amount_app) * 10 / 110)
+                        END
                         FROM transaction_income_details tid
                         JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                        WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
                     ), t.pb1, 0)
                 ) as total_pb1,
                 t.is_debt_payment,
@@ -1291,9 +1503,261 @@ const getReportLogs = async (req, res, next) => {
     }
 };
 
+/**
+ * POST /api/branch-reports/:branchId/bagi-hasil-requests/:requestId/approve
+ */
+const approveBagiHasilRequest = async (req, res, next) => {
+    try {
+        const { branchId, requestId } = req.params;
+        const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
+        if (!hasAccess) {
+            return res.status(403).json({ success: false, message: 'Akses ditolak' });
+        }
+
+        await User.ensurePermissionColumns();
+        const rows = await query(
+            'SELECT * FROM bagi_hasil_requests WHERE id = ? AND branch_id = ?',
+            [requestId, branchId]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'Pengajuan perubahan Bagi Hasil tidak ditemukan' });
+        }
+
+        const reqData = rows[0];
+        const { bagiHasilApprovers } = await fetchBagiHasilApprovalContext(
+            parseInt(branchId),
+            reqData.month,
+            reqData.year,
+            req.userId
+        );
+
+        const approver1Id = bagiHasilApprovers.approver_1_user_id || reqData.approver_1_id;
+        const approver2Id = bagiHasilApprovers.approver_2_user_id || reqData.approver_2_id;
+        const isPrimaryOwner = req.user.role === 'owner';
+
+        const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+        if (reqData.status === 'pending_level_1') {
+            const canApproveLevel1 =
+                isPrimaryOwner ||
+                (approver1Id && req.userId === parseInt(approver1Id)) ||
+                (!approver1Id && req.user.role === 'co-owner' && req.userId !== reqData.requested_by);
+
+            if (!canApproveLevel1) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Hanya Approver Tingkat 1 yang ditunjuk atau Owner utama yang dapat menyetujui tahap ini.'
+                });
+            }
+
+            await query(
+                `UPDATE bagi_hasil_requests
+                 SET status = 'pending_level_2', approved_1_by = ?, approved_1_at = ?
+                 WHERE id = ?`,
+                [req.userId, now, reqData.id]
+            );
+
+            try {
+                await BranchReportLog.create({
+                    branchId: reqData.branch_id,
+                    month: reqData.month,
+                    year: reqData.year,
+                    userId: req.userId,
+                    userName: req.user?.name || req.user?.email || 'Approver 1',
+                    userRole: req.user?.role || '',
+                    actionType: 'approve_bagi_hasil_1',
+                    summary: 'Menyetujui perubahan Bagi Hasil (Tingkat 1)',
+                    changes: [],
+                });
+            } catch (e) {}
+
+            const fakeReq = {
+                ...req,
+                params: { branchId },
+                query: { ...req.query, month: reqData.month, year: reqData.year },
+                _returnReportOnly: true
+            };
+            const fullUpdatedReport = await getReport(fakeReq, res, next);
+
+            return res.json({
+                success: true,
+                message: 'Approval Tingkat 1 berhasil disetujui. Menunggu Approval Tingkat 2.',
+                data: { report: fullUpdatedReport }
+            });
+        } else if (reqData.status === 'pending_level_2') {
+            const canApproveLevel2 =
+                isPrimaryOwner ||
+                (approver2Id && req.userId === parseInt(approver2Id));
+
+            if (!canApproveLevel2) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Hanya Approver Tingkat 2 yang ditunjuk atau Owner utama yang dapat menyetujui tahap akhir ini.'
+                });
+            }
+
+            let newBagiHasil = [];
+            try {
+                newBagiHasil = JSON.parse(reqData.new_bagi_hasil || '[]');
+            } catch {}
+
+            let oldBagiHasil = [];
+            try {
+                oldBagiHasil = JSON.parse(reqData.old_bagi_hasil || '[]');
+            } catch {}
+
+            await BranchReport.updateManual(reqData.branch_id, reqData.month, reqData.year, {
+                bagiHasil: newBagiHasil
+            });
+
+            await query(
+                `UPDATE bagi_hasil_requests
+                 SET status = 'approved', approved_2_by = ?, approved_2_at = ?
+                 WHERE id = ?`,
+                [req.userId, now, reqData.id]
+            );
+
+            try {
+                await BranchReportLog.create({
+                    branchId: reqData.branch_id,
+                    month: reqData.month,
+                    year: reqData.year,
+                    userId: req.userId,
+                    userName: req.user?.name || req.user?.email || 'Approver 2',
+                    userRole: req.user?.role || '',
+                    actionType: 'approve_bagi_hasil_2',
+                    summary: 'Menyetujui perubahan Bagi Hasil (Tingkat 2 - Diterapkan)',
+                    changes: [{
+                        section: 'bagi_hasil',
+                        description: 'Perubahan Bagi Hasil telah disetujui 2 Tingkat dan diterapkan',
+                        old: oldBagiHasil,
+                        new: newBagiHasil,
+                    }],
+                });
+            } catch (e) {}
+
+            const fakeReq = {
+                ...req,
+                params: { branchId },
+                query: { ...req.query, month: reqData.month, year: reqData.year },
+                _returnReportOnly: true
+            };
+            const fullUpdatedReport = await getReport(fakeReq, res, next);
+
+            return res.json({
+                success: true,
+                message: 'Approval Tingkat 2 disetujui! Perubahan Bagi Hasil kini telah diterapkan.',
+                data: { report: fullUpdatedReport }
+            });
+        } else {
+            return res.status(400).json({
+                success: false,
+                message: `Pengajuan ini sudah berstatus "${reqData.status}".`
+            });
+        }
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * POST /api/branch-reports/:branchId/bagi-hasil-requests/:requestId/reject
+ */
+const rejectBagiHasilRequest = async (req, res, next) => {
+    try {
+        const { branchId, requestId } = req.params;
+        const { note } = req.body || {};
+
+        const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
+        if (!hasAccess) {
+            return res.status(403).json({ success: false, message: 'Akses ditolak' });
+        }
+
+        await User.ensurePermissionColumns();
+        const rows = await query(
+            'SELECT * FROM bagi_hasil_requests WHERE id = ? AND branch_id = ?',
+            [requestId, branchId]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'Pengajuan perubahan Bagi Hasil tidak ditemukan' });
+        }
+
+        const reqData = rows[0];
+        if (!['pending_level_1', 'pending_level_2'].includes(reqData.status)) {
+            return res.status(400).json({
+                success: false,
+                message: `Pengajuan ini sudah berstatus "${reqData.status}".`
+            });
+        }
+
+        const { bagiHasilApprovers } = await fetchBagiHasilApprovalContext(
+            parseInt(branchId),
+            reqData.month,
+            reqData.year,
+            req.userId
+        );
+
+        const approver1Id = bagiHasilApprovers.approver_1_user_id || reqData.approver_1_id;
+        const approver2Id = bagiHasilApprovers.approver_2_user_id || reqData.approver_2_id;
+        const isPrimaryOwner = req.user.role === 'owner';
+        const isApprover =
+            isPrimaryOwner ||
+            (approver1Id && req.userId === parseInt(approver1Id)) ||
+            (approver2Id && req.userId === parseInt(approver2Id)) ||
+            req.userId === reqData.requested_by;
+
+        if (!isApprover) {
+            return res.status(403).json({
+                success: false,
+                message: 'Hanya Approver Tingkat 1/2, Owner, atau pengaju yang dapat menolak/membatalkan pengajuan ini.'
+            });
+        }
+
+        const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        await query(
+            `UPDATE bagi_hasil_requests
+             SET status = 'rejected', rejected_by = ?, rejected_at = ?, rejection_note = ?
+             WHERE id = ?`,
+            [req.userId, now, note || null, reqData.id]
+        );
+
+        try {
+            await BranchReportLog.create({
+                branchId: reqData.branch_id,
+                month: reqData.month,
+                year: reqData.year,
+                userId: req.userId,
+                userName: req.user?.name || req.user?.email || 'User',
+                userRole: req.user?.role || '',
+                actionType: 'reject_bagi_hasil',
+                summary: note ? `Menolak pengajuan Bagi Hasil: ${note}` : 'Menolak/membatalkan pengajuan perubahan Bagi Hasil',
+                changes: [],
+            });
+        } catch (e) {}
+
+        const fakeReq = {
+            ...req,
+            params: { branchId },
+            query: { ...req.query, month: reqData.month, year: reqData.year },
+            _returnReportOnly: true
+        };
+        const fullUpdatedReport = await getReport(fakeReq, res, next);
+
+        return res.json({
+            success: true,
+            message: 'Pengajuan perubahan Bagi Hasil telah ditolak/dibatalkan.',
+            data: { report: fullUpdatedReport }
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
 module.exports = {
     getReport,
     updateReport,
     getReportLogs,
+    approveBagiHasilRequest,
+    rejectBagiHasilRequest,
     getSingleBranchReportExportData
 };

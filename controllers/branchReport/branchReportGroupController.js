@@ -78,7 +78,20 @@ const getConsolidatedReport = async (req, res, next) => {
                             JOIN payment_methods pm ON tid.payment_method_id = pm.id
                             WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
                         ), 0)
-                    ) as taxable_amount
+                    ) as taxable_amount,
+                    SUM(
+                        COALESCE((
+                            SELECT CASE
+                                WHEN COUNT(tid.pb1_amount) > 0 THEN
+                                    ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
+                                ELSE
+                                    ROUND(SUM(tid.amount_app) * 10 / 110)
+                            END
+                            FROM transaction_income_details tid
+                            JOIN payment_methods pm ON tid.payment_method_id = pm.id
+                            WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
+                        ), t.pb1, 0)
+                    ) as total_pb1
                  FROM transactions t
                  LEFT JOIN categories c ON t.category_id = c.id
                  LEFT JOIN (
@@ -111,7 +124,10 @@ const getConsolidatedReport = async (req, res, next) => {
             const pastIncomeRefunds = parseFloat(pastIncomeRefundsResult[0]?.total_past_refunds || 0);
             const systemOmzetGross = (parseFloat(incomeResult[0]?.total_gross) || 0) - pastIncomeRefunds;
             const systemTaxable = parseFloat(incomeResult[0]?.taxable_amount) || 0;
-            const branchOmzet = systemOmzetGross - Math.round((systemTaxable * 10) / 110);
+            const systemPb1 = incomeResult[0]?.total_pb1 !== undefined && incomeResult[0]?.total_pb1 !== null
+                ? parseFloat(incomeResult[0].total_pb1) || 0
+                : Math.round((systemTaxable * 10) / 110);
+            const branchOmzet = systemOmzetGross - systemPb1;
 
             // 2. Pengeluaran
             const expenseBreakdown = await query(
@@ -370,10 +386,15 @@ const getGroupFinancialReport = async (req, res, next) => {
                     ) as taxable_amount,
                     SUM(
                         COALESCE((
-                            SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                            SELECT CASE
+                                WHEN COUNT(tid.pb1_amount) > 0 THEN
+                                    ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
+                                ELSE
+                                    ROUND(SUM(tid.amount_app) * 10 / 110)
+                            END
                             FROM transaction_income_details tid
                             JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                            WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                            WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
                         ), t.pb1, 0)
                     ) as total_pb1
                  FROM transactions t
@@ -545,10 +566,15 @@ const getGroupFinancialReport = async (req, res, next) => {
                     ) as taxable_amount,
                     SUM(
                         COALESCE((
-                            SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+                            SELECT CASE
+                                WHEN COUNT(tid.pb1_amount) > 0 THEN
+                                    ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
+                                ELSE
+                                    ROUND(SUM(tid.amount_app) * 10 / 110)
+                            END
                             FROM transaction_income_details tid
                             JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                            WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
+                            WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
                         ), t.pb1, 0)
                     ) as total_pb1
                  FROM transactions t

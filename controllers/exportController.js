@@ -58,12 +58,16 @@ const exportReport = async (req, res, next) => {
 
     if (category && category !== 'Semua Kategori') {
       queryParams.category = category;
+    } else if (source.is_umum !== undefined) {
+      queryParams.isUmum = source.is_umum === 'all' ? undefined : (source.is_umum === 'false' || source.is_umum === false ? false : true);
+    } else {
+      queryParams.isUmum = true;
     }
 
     // Get transactions - semua transaksi di branch, bukan hanya yang dibuat oleh user tertentu
     const transactions = await Transaction.findAll({
       ...queryParams,
-      sort: 'terbaru',
+      sort: 'terlama',
       page: 1,
       limit: 10000 // Large limit for export
     });
@@ -75,6 +79,10 @@ const exportReport = async (req, res, next) => {
       });
     }
 
+    // Get branch info
+    const branch = await Branch.findById(parseInt(branchId));
+    const branchName = branch ? branch.name : 'Branch';
+
     // Generate filename
     const filename = generateFilename(format, title);
 
@@ -82,31 +90,22 @@ const exportReport = async (req, res, next) => {
     let filepath;
     switch (format.toUpperCase()) {
       case 'XLS':
-        filepath = await exportToExcel(transactions, filename, title);
+        filepath = await exportToExcel(transactions, filename, title, branchName, {
+          fromDate: from_date,
+          toDate: to_date,
+          category,
+          title
+        });
         break;
       case 'CSV':
         filepath = await exportToCSV(transactions, filename);
         break;
       case 'PDF':
-        // For PDF, use BukuKas format (calculate report first)
-        const allCategories = await Category.findAll({ branchId: parseInt(branchId) });
-        const daysInMonth = from_date && to_date
-          ? Math.ceil((new Date(to_date) - new Date(from_date)) / (1000 * 60 * 60 * 24)) + 1
-          : 30;
-        const reportData = calculateReport(transactions, allCategories, daysInMonth);
-
-        // Get branch info
-        const Branch = require('../models/Branch');
-        const branch = await Branch.findById(parseInt(branchId));
-        const branchName = branch ? branch.name : 'Branch';
-
-        // Create date object for selected period
-        const selectedDate = from_date ? new Date(from_date) : new Date();
-
-        filepath = await exportBukuKasToPDF(reportData, filename, branchName, selectedDate, {
+        filepath = await exportToPDF(transactions, filename, title, branchName, {
           fromDate: from_date,
           toDate: to_date,
-          title: title,
+          category,
+          title
         });
         break;
       default:

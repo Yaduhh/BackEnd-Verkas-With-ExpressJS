@@ -5,166 +5,383 @@ const { EXPORTS_DIR, formatCurrency, getMonthName } = require('./commonHelper');
 const sharp = require('sharp');
 
 
-// Export to PDF (Professional Format)
-async function exportToPDF(data, filename, title) {
+const PDF_INDONESIAN_MONTHS = [
+    'JANUARI', 'FEBRUARI', 'MARET', 'APRIL', 'MEI', 'JUNI',
+    'JULI', 'AGUSTUS', 'SEPTEMBER', 'OKTOBER', 'NOVEMBER', 'DESEMBER'
+];
+
+function formatKasPeriodText(fromDate, toDate, items) {
+    if (fromDate && toDate) {
+        const d1 = new Date(fromDate);
+        const d2 = new Date(toDate);
+        if (!isNaN(d1.getTime()) && !isNaN(d2.getTime())) {
+            const day1 = String(d1.getDate()).padStart(2, '0');
+            const day2 = String(d2.getDate()).padStart(2, '0');
+            const m1 = PDF_INDONESIAN_MONTHS[d1.getMonth()];
+            const m2 = PDF_INDONESIAN_MONTHS[d2.getMonth()];
+            const y1 = d1.getFullYear();
+            const y2 = d2.getFullYear();
+
+            if (y1 === y2 && m1 === m2) {
+                if (day1 === day2) return `${day1} ${m1} ${y1}`;
+                return `${day1} - ${day2} ${m1} ${y1}`;
+            } else if (y1 === y2) {
+                return `${day1} ${m1} - ${day2} ${m2} ${y1}`;
+            } else {
+                return `${day1} ${m1} ${y1} - ${day2} ${m2} ${y2}`;
+            }
+        }
+    }
+    if (items && items.length > 0) {
+        const dates = items.map(d => new Date(d.transaction_date)).filter(d => !isNaN(d.getTime())).sort((a, b) => a - b);
+        if (dates.length > 0) {
+            const first = dates[0];
+            const last = dates[dates.length - 1];
+            const day1 = String(first.getDate()).padStart(2, '0');
+            const day2 = String(last.getDate()).padStart(2, '0');
+            const m1 = PDF_INDONESIAN_MONTHS[first.getMonth()];
+            const m2 = PDF_INDONESIAN_MONTHS[last.getMonth()];
+            const y1 = first.getFullYear();
+            const y2 = last.getFullYear();
+            if (y1 === y2 && m1 === m2) {
+                if (day1 === day2) return `${day1} ${m1} ${y1}`;
+                return `${day1} - ${day2} ${m1} ${y1}`;
+            }
+            return `${day1} ${m1} ${y1} - ${day2} ${m2} ${y2}`;
+        }
+    }
+    const now = new Date();
+    const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    return `01 - ${String(lastDay).padStart(2, '0')} ${PDF_INDONESIAN_MONTHS[now.getMonth()]} ${now.getFullYear()}`;
+}
+
+function resolvePdfCategoryKode(categoryName, categoryCode, note = '', type = '') {
+    const name = String(categoryName || '').toLowerCase().trim();
+    const noteLower = String(note || '').toLowerCase().trim();
+
+    if (name.includes('omzet') || name.includes('omset')) return 'OZ';
+    if (name.includes('operasional') || name === 'ops') return 'OPS';
+    if (name.includes('simpanan')) return 'SP';
+    if (name.includes('komisi') || noteLower.startsWith('komisi ')) return 'KMS';
+    if (name.includes('biaya lain') || (type === 'expense' && name.includes('lain'))) return 'BL';
+    if (name.includes('pendapatan lain') || name.includes('pemasukan lain') || (type === 'income' && name.includes('lain'))) return 'PL';
+    if (name.includes('bahan baku') || name === 'bb') return 'BB';
+    if (name.includes('packaging') || name.includes('kemasan') || name === 'pkg') return 'PKG';
+    if (name.includes('gaji') || name.includes('upah')) return 'GJ';
+    if (name.includes('sewa')) return 'SW';
+    if (name.includes('pajak') || name.includes('pb1')) return 'PJ';
+    if (name.includes('piutang')) return 'PTG';
+    if (name.includes('listrik') || name.includes('air') || name.includes('internet') || name.includes('utilitas') || name.includes('wifi') || name.includes('pln') || name.includes('pdam')) return 'UTL';
+    if (name.includes('maintenance') || name.includes('perbaikan') || name.includes('service')) return 'MTC';
+    if (name.includes('marketing') || name.includes('promosi') || name.includes('iklan')) return 'MKT';
+    if (name.includes('atk') || name.includes('alat tulis')) return 'ATK';
+    if (name.includes('refund')) return 'RFD';
+
+    if (categoryCode && /[A-Za-z]/.test(String(categoryCode))) {
+        return String(categoryCode).trim().toUpperCase();
+    }
+
+    const cleanWords = String(categoryName || '')
+        .replace(/\(.*?\)/g, '')
+        .replace(/[^A-Za-z0-9\s]/g, ' ')
+        .trim()
+        .split(/\s+/)
+        .filter(w => w && !['DAN', 'ATAU', 'DI', 'KE', 'DARI', 'UNTUK', 'YANG', 'DLL'].includes(w.toUpperCase()));
+
+    if (cleanWords.length === 1) {
+        return cleanWords[0].substring(0, 3).toUpperCase();
+    }
+    if (cleanWords.length > 1) {
+        return cleanWords.slice(0, 3).map(w => w[0].toUpperCase()).join('');
+    }
+    return type === 'income' ? 'IN' : 'OUT';
+}
+
+function sanitizeKasText(text) {
+    if (!text) return '-';
+    return String(text)
+        .replace(/\r\n/g, ' ')
+        .replace(/\r/g, ' ')
+        .replace(/\n/g, ' ')
+        .replace(/\t/g, ' ')
+        .replace(/[\u2018\u2019]/g, "'")
+        .replace(/[\u201C\u201D]/g, '"')
+        .replace(/\u00A0/g, ' ')
+        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+// Export Kas Berjalan / Kertas Kerja to PDF (Matching Excel Kertas Kerja Format)
+async function exportToPDF(data, filename, title = 'KERTAS KERJA', branchName = 'OUTLET', options = {}) {
     const filepath = path.join(EXPORTS_DIR, filename);
     const doc = new PDFDocument({
-        margin: 50,
+        margin: 24,
         size: 'A4',
         info: {
-            Title: title || 'Laporan Keuangan',
+            Title: title || 'Kertas Kerja Kas Berjalan',
             Author: 'VERKAS',
-            Subject: 'Laporan Keuangan',
+            Subject: 'Kertas Kerja Kas Berjalan',
             Creator: 'VERKAS Financial App'
         }
     });
 
     doc.pipe(fs.createWriteStream(filepath));
 
-    const pageWidth = doc.page.width;
-    const margin = 50;
-    const contentWidth = pageWidth - 2 * margin;
+    const pageWidth = doc.page.width; // 595.28
+    const pageHeight = doc.page.height; // 841.89
+    const margin = 24;
+    const contentWidth = pageWidth - 2 * margin; // 547.28
     let y = margin;
 
-    // Helper to check if new page needed
-    const checkNewPage = (requiredHeight) => {
-        if (y + requiredHeight > doc.page.height - 50) {
-            doc.addPage();
-            y = margin;
-            return true;
-        }
-        return false;
-    };
+    const fontRegular = 'Times-Roman';
+    const fontBold = 'Times-Bold';
+    const roseColor = '#DFA7A6';
 
-    // Header Section - Professional Design
-    doc.fillColor('#1e3a8a').fontSize(24).font('Helvetica-Bold');
-    doc.text(title || 'Laporan Keuangan', margin, y, { align: 'left', width: contentWidth });
-    y += 35;
-
-    // Date range info (if available from data)
-    const firstDate = data.length > 0 ? data[data.length - 1].transaction_date : '';
-    const lastDate = data.length > 0 ? data[0].transaction_date : '';
-    if (firstDate && lastDate) {
-        doc.fillColor('#666666').fontSize(10).font('Helvetica');
-        doc.text(`Periode: ${firstDate} - ${lastDate}`, margin, y, { align: 'left', width: contentWidth });
-        y += 20;
-    }
-
-    // Summary Section
-    const totalIncome = data.filter(t => t.type === 'income').reduce((sum, t) => sum + parseFloat(t.amount || 0), 0);
-    const totalExpense = data.filter(t => t.type === 'expense').reduce((sum, t) => sum + parseFloat(t.amount || 0), 0);
-    const netAmount = totalIncome - totalExpense;
-
-    checkNewPage(60);
-
-    // Summary Box
-    doc.roundedRect(margin, y, contentWidth, 50, 5)
-        .fillColor('#f8f9fa')
-        .fill()
-        .fillColor('#000000');
-
-    y += 10;
-    doc.fontSize(9).font('Helvetica-Bold').fillColor('#666666');
-    doc.text('RINGKASAN', margin + 10, y);
-    y += 15;
-
-    doc.fontSize(10).font('Helvetica');
-    doc.fillColor('#10b981');
-    doc.text(`Total Pemasukan: ${formatCurrency(totalIncome)}`, margin + 10, y, { width: contentWidth / 2 - 10 });
-    doc.fillColor('#ef4444');
-    doc.text(`Total Pengeluaran: ${formatCurrency(totalExpense)}`, margin + contentWidth / 2, y, { width: contentWidth / 2 - 10 });
-    y += 15;
-
-    doc.fillColor(netAmount >= 0 ? '#10b981' : '#ef4444').font('Helvetica-Bold');
-    doc.text(`Saldo Bersih: ${formatCurrency(netAmount)}`, margin + 10, y);
-    y += 30;
-
-    // Table Header - Professional Styling
-    checkNewPage(30);
-
-    const tableTop = y;
-    const itemHeight = 25;
-    const headerHeight = 30;
-
+    // Column widths (total = 547.28, tgl + kode = 96pt so metadata labels fit cleanly before xKet)
     const colWidths = {
-        date: contentWidth * 0.15,
-        category: contentWidth * 0.25,
-        type: contentWidth * 0.12,
-        amount: contentWidth * 0.23,
-        note: contentWidth * 0.25
+        tgl: 38,
+        kode: 58,
+        ket: 143.28,
+        dr: 80,
+        cr: 80,
+        refund: 66,
+        saldo: 82
     };
 
-    // Header Background
-    doc.roundedRect(margin, tableTop, contentWidth, headerHeight, 3)
-        .fillColor('#1e3a8a')
-        .fill();
+    const xTgl = margin;
+    const xKode = xTgl + colWidths.tgl;
+    const xKet = xKode + colWidths.kode;
+    const xDr = xKet + colWidths.ket;
+    const xCr = xDr + colWidths.dr;
+    const xRef = xCr + colWidths.cr;
+    const xSaldo = xRef + colWidths.refund;
 
-    // Header Text
-    doc.fillColor('#ffffff').fontSize(10).font('Helvetica-Bold');
-    doc.text('Tanggal', margin + 5, tableTop + 8, { width: colWidths.date - 10 });
-    doc.text('Kategori', margin + colWidths.date + 5, tableTop + 8, { width: colWidths.category - 10 });
-    doc.text('Tipe', margin + colWidths.date + colWidths.category + 5, tableTop + 8, { width: colWidths.type - 10 });
-    doc.text('Jumlah', margin + colWidths.date + colWidths.category + colWidths.type + 5, tableTop + 8, { width: colWidths.amount - 10 });
-    doc.text('Keterangan', margin + colWidths.date + colWidths.category + colWidths.type + colWidths.amount + 5, tableTop + 8, { width: colWidths.note - 10 });
+    // Filter & sort transactions chronologically (01 -> 31, income/Omzet first on each day)
+    const rawItems = Array.isArray(data) ? [...data] : [];
+    const sortedItems = rawItems
+        .filter(item => {
+            if (item.parent_transaction_id && options.fromDate && item.parent_transaction_date) {
+                const parentDateStr = String(item.parent_transaction_date).split('T')[0];
+                const fromDateStr = String(options.fromDate).split('T')[0];
+                if (parentDateStr >= fromDateStr) return false;
+            }
+            return true;
+        })
+        .sort((a, b) => {
+            const dateStrA = String(a.transaction_date || '').split('T')[0];
+            const dateStrB = String(b.transaction_date || '').split('T')[0];
+            if (dateStrA !== dateStrB) {
+                return dateStrA.localeCompare(dateStrB);
+            }
+            const isIncA = a.type === 'income' ? 0 : 1;
+            const isIncB = b.type === 'income' ? 0 : 1;
+            if (isIncA !== isIncB) return isIncA - isIncB;
 
-    y = tableTop + headerHeight;
+            const isOzA = /omzet|omset/i.test(a.category_name || '') ? 0 : 1;
+            const isOzB = /omzet|omset/i.test(b.category_name || '') ? 0 : 1;
+            if (isOzA !== isOzB) return isOzA - isOzB;
 
-    // Data Rows - Alternating Colors
-    doc.font('Helvetica').fontSize(9).fillColor('#000000');
+            return (a.id || 0) - (b.id || 0);
+        });
 
-    data.forEach((item, index) => {
-        checkNewPage(itemHeight + 5);
+    const periodText = formatKasPeriodText(options.fromDate, options.toDate, sortedItems);
+    const outletLabel = String(branchName || options.branchName || 'OUTLET').toUpperCase();
+    const kasLabel = (options.category && options.category !== 'Semua Kategori')
+        ? String(options.category).toUpperCase()
+        : 'KAS BERJALAN';
 
-        // Alternating row background
-        if (index % 2 === 0) {
-            doc.rect(margin, y, contentWidth, itemHeight)
-                .fillColor('#f8f9fa')
-                .fill();
+    const formatAccountingNum = (num) => {
+        const val = Number(num) || 0;
+        if (Math.abs(val) < 0.005) return '-';
+        const formatted = new Intl.NumberFormat('id-ID', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        }).format(Math.abs(val));
+        return val < 0 ? `(${formatted})` : formatted;
+    };
+
+    const drawAccountingCell = (val, cellX, cellY, cellW, isBold = false) => {
+        if (val === null || val === undefined) return;
+        const fontToUse = isBold ? fontBold : fontRegular;
+        const numStr = formatAccountingNum(val);
+        doc.font(fontToUse).fontSize(8.5).fillColor('#000000');
+        doc.text('Rp', cellX + 4, cellY, { lineBreak: false });
+        doc.text(numStr, cellX + 16, cellY, { width: cellW - 20, align: 'right', lineBreak: false });
+    };
+
+    // Top Metadata Block (Rows 1 - 4)
+    const metaRows = [
+        { label: 'NAMA OUTLET', value: `: ${outletLabel}`, boldVal: false, highlight: false },
+        { label: 'NAMA LAMPIRAN', value: ': KERTAS KERJA', boldVal: false, highlight: false },
+        { label: 'TANGGAL', value: `: ${periodText}`, boldVal: false, highlight: false },
+        { label: 'NAMA KAS', value: `: ${kasLabel}`, boldVal: true, highlight: true }
+    ];
+
+    const metaRowHeight = 16;
+    const highlightWidth = colWidths.tgl + colWidths.kode + colWidths.ket;
+
+    metaRows.forEach(meta => {
+        if (meta.highlight) {
+            doc.rect(margin, y, highlightWidth, metaRowHeight + 2).fillColor(roseColor).fill();
         }
+        const textY = y + (meta.highlight ? 4 : 3);
+        doc.font(fontBold).fontSize(9).fillColor('#000000');
+        doc.text(meta.label, xTgl + 2, textY, { width: colWidths.tgl + colWidths.kode - 4, lineBreak: false });
 
-        // Row border
-        doc.strokeColor('#e5e7eb')
-            .lineWidth(0.5)
-            .moveTo(margin, y)
-            .lineTo(margin + contentWidth, y)
-            .stroke();
+        doc.font(meta.boldVal ? fontBold : fontRegular).fontSize(9).fillColor('#000000');
+        doc.text(meta.value, xKet + 2, textY, { width: contentWidth - (xKet - margin) - 2, lineBreak: false });
 
-        // Data cells
-        const rowY = y + 7;
-        doc.fillColor('#000000');
-        doc.text(item.transaction_date || '', margin + 5, rowY, { width: colWidths.date - 10 });
-        doc.text(item.category_name || '', margin + colWidths.date + 5, rowY, { width: colWidths.category - 10 });
-
-        // Type with color
-        const typeText = item.type === 'income' ? 'Pemasukan' : 'Pengeluaran';
-        doc.fillColor(item.type === 'income' ? '#10b981' : '#ef4444');
-        doc.text(typeText, margin + colWidths.date + colWidths.category + 5, rowY, { width: colWidths.type - 10 });
-
-        // Amount with color and formatting
-        doc.fillColor(item.type === 'income' ? '#10b981' : '#ef4444');
-        doc.text(formatCurrency(parseFloat(item.amount || 0)), margin + colWidths.date + colWidths.category + colWidths.type + 5, rowY, { width: colWidths.amount - 10 });
-
-        doc.fillColor('#000000');
-        doc.text(item.note || '-', margin + colWidths.date + colWidths.category + colWidths.type + colWidths.amount + 5, rowY, { width: colWidths.note - 10 });
-
-        y += itemHeight;
+        y += meta.highlight ? (metaRowHeight + 2) : metaRowHeight;
     });
 
-    // Footer
-    const footerY = doc.page.height - 40;
-    doc.fillColor('#999999').fontSize(8).font('Helvetica');
-    doc.text(
-        `Dibuat pada: ${new Date().toLocaleString('id-ID', {
-            day: '2-digit',
-            month: 'long',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit'
-        })} | Total Transaksi: ${data.length}`,
-        margin,
-        footerY,
-        { align: 'center', width: contentWidth }
-    );
+    const tableHeaderHeight = 22;
+
+    const drawTableHeader = (curY) => {
+        // White background for header row
+        doc.rect(margin, curY, contentWidth, tableHeaderHeight).fillColor('#FFFFFF').fill();
+        // Dusty rose background for REFUND column header
+        doc.rect(xRef, curY, colWidths.refund, tableHeaderHeight).fillColor(roseColor).fill();
+
+        // Outer border & column dividers
+        doc.strokeColor('#000000').lineWidth(0.6).rect(margin, curY, contentWidth, tableHeaderHeight).stroke();
+        [xKode, xKet, xDr, xCr, xRef, xSaldo].forEach(xPos => {
+            doc.moveTo(xPos, curY).lineTo(xPos, curY + tableHeaderHeight).stroke();
+        });
+
+        const textY = curY + 6.5;
+        doc.font(fontBold).fontSize(9).fillColor('#000000');
+        doc.text('TGL', xTgl, textY, { width: colWidths.tgl, align: 'center', lineBreak: false });
+        doc.text('Kode', xKode, textY, { width: colWidths.kode, align: 'center', lineBreak: false });
+        doc.text('Keterangan', xKet, textY, { width: colWidths.ket, align: 'center', lineBreak: false });
+        doc.text('Dr', xDr, textY, { width: colWidths.dr, align: 'center', lineBreak: false });
+        doc.text('Cr', xCr, textY, { width: colWidths.cr, align: 'center', lineBreak: false });
+
+        doc.font(fontBold).fontSize(9).fillColor('#FF0000');
+        doc.text('REFUND', xRef, textY, { width: colWidths.refund, align: 'center', lineBreak: false });
+
+        doc.font(fontBold).fontSize(9).fillColor('#000000');
+        doc.text('Saldo', xSaldo, textY, { width: colWidths.saldo, align: 'center', lineBreak: false });
+
+        return curY + tableHeaderHeight;
+    };
+
+    y = drawTableHeader(y);
+
+    let runningSaldo = 0;
+    let totalDr = 0;
+    let totalCr = 0;
+    let totalRef = 0;
+
+    sortedItems.forEach((item) => {
+        let dayStr = '01';
+        if (item.transaction_date) {
+            const s = String(item.transaction_date).split('T')[0];
+            const parts = s.split('-');
+            if (parts.length === 3) {
+                dayStr = String(parseInt(parts[2], 10)).padStart(2, '0');
+            } else {
+                const d = new Date(item.transaction_date);
+                if (!isNaN(d.getTime())) {
+                    dayStr = String(d.getDate()).padStart(2, '0');
+                }
+            }
+        }
+
+        const kode = resolvePdfCategoryKode(item.category_name, item.category_code, item.note, item.type);
+        let keterangan = sanitizeKasText(item.note || '');
+        if (!keterangan || keterangan === '-') {
+            if (kode === 'OZ') keterangan = 'Omzet';
+            else if (kode === 'SP') keterangan = 'Simpanan Wajib';
+            else keterangan = sanitizeKasText(item.category_name || '-');
+        }
+
+        const isIncome = item.type === 'income';
+        const refundAmt = Math.abs(parseFloat(item.total_refund || 0));
+        const futureRef = Math.abs(parseFloat(item.future_refund || 0));
+
+        let drVal = null;
+        let crVal = null;
+        let refVal = refundAmt > 0 ? refundAmt : null;
+
+        if (isIncome) {
+            const isMainDebt = (item.is_debt_payment === true || item.is_debt_payment === 1 || item.is_debt_payment === '1') && !item.parent_transaction_id;
+            const rawIncome = isMainDebt && item.paid_amount !== undefined && item.paid_amount !== null
+                ? parseFloat(item.paid_amount || 0)
+                : (Math.abs(parseFloat(item.amount || 0)) + futureRef);
+            const pb1Val = parseFloat(item.pb1 || 0);
+            drVal = Math.max(0, rawIncome - pb1Val);
+        } else {
+            const netExpense = Math.abs(parseFloat(item.amount || 0)) + futureRef;
+            crVal = refundAmt > 0 ? (netExpense + refundAmt) : netExpense;
+        }
+
+        const drNum = drVal !== null ? drVal : 0;
+        const crNum = crVal !== null ? crVal : 0;
+        const refNum = refVal !== null ? refVal : 0;
+
+        totalDr += drNum;
+        totalCr += crNum;
+        totalRef += refNum;
+        runningSaldo += (drNum - crNum + refNum);
+
+        doc.font(fontRegular).fontSize(8.5);
+        const ketHeight = doc.heightOfString(keterangan, { width: colWidths.ket - 8 });
+        const rowHeight = Math.max(17, ketHeight + 6);
+
+        if (y + rowHeight > pageHeight - margin - 20) {
+            doc.addPage();
+            y = margin;
+            y = drawTableHeader(y);
+        }
+
+        // Draw row borders and vertical column lines
+        doc.strokeColor('#000000').lineWidth(0.5).rect(margin, y, contentWidth, rowHeight).stroke();
+        [xKode, xKet, xDr, xCr, xRef, xSaldo].forEach(xPos => {
+            doc.moveTo(xPos, y).lineTo(xPos, y + rowHeight).stroke();
+        });
+
+        const textY = y + (rowHeight - 8.5) / 2;
+        const ketTextY = y + Math.max(3.5, (rowHeight - ketHeight) / 2);
+
+        doc.font(fontRegular).fontSize(8.5).fillColor('#000000');
+        doc.text(dayStr, xTgl, textY, { width: colWidths.tgl, align: 'center', lineBreak: false });
+        doc.text(kode, xKode, textY, { width: colWidths.kode, align: 'center', lineBreak: false });
+        doc.text(keterangan, xKet + 4, ketTextY, { width: colWidths.ket - 8, align: 'left' });
+
+        drawAccountingCell(drVal, xDr, textY, colWidths.dr, false);
+        drawAccountingCell(crVal, xCr, textY, colWidths.cr, false);
+        drawAccountingCell(refVal, xRef, textY, colWidths.refund, false);
+        drawAccountingCell(runningSaldo, xSaldo, textY, colWidths.saldo, false);
+
+        y += rowHeight;
+    });
+
+    // Total Summary Row
+    if (sortedItems.length > 0) {
+        const totalRowHeight = 20;
+        if (y + totalRowHeight > pageHeight - margin - 10) {
+            doc.addPage();
+            y = margin;
+            y = drawTableHeader(y);
+        }
+
+        doc.strokeColor('#000000').lineWidth(0.6).rect(margin, y, contentWidth, totalRowHeight).stroke();
+        [xDr, xCr, xRef, xSaldo].forEach(xPos => {
+            doc.moveTo(xPos, y).lineTo(xPos, y + totalRowHeight).stroke();
+        });
+
+        const textY = y + 5.5;
+        doc.font(fontBold).fontSize(9).fillColor('#000000');
+        doc.text('TOTAL', xTgl, textY, { width: colWidths.tgl + colWidths.kode + colWidths.ket, align: 'center', lineBreak: false });
+
+        drawAccountingCell(totalDr, xDr, textY, colWidths.dr, true);
+        drawAccountingCell(totalCr, xCr, textY, colWidths.cr, true);
+        drawAccountingCell(totalRef > 0 ? totalRef : null, xRef, textY, colWidths.refund, true);
+        drawAccountingCell(runningSaldo, xSaldo, textY, colWidths.saldo, true);
+
+        y += totalRowHeight;
+    }
 
     doc.end();
 

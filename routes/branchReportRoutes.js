@@ -14,6 +14,8 @@ const {
     exportGroupExcel,
     exportGroupBagiHasilPdf,
     updateReport,
+    approveBagiHasilRequest,
+    rejectBagiHasilRequest,
     exportPdf,
     exportExcel,
     exportBagiHasilPdf,
@@ -98,5 +100,9 @@ router.get('/:branchId/export-savings-pdf', exportSavingsPdf);
 
 // PUT /api/branch-reports/:branchId?month=2&year=2026
 router.put('/:branchId', updateReport);
+
+// 2-Tier Approval for Bagi Hasil section edits
+router.post('/:branchId/bagi-hasil-requests/:requestId/approve', approveBagiHasilRequest);
+router.post('/:branchId/bagi-hasil-requests/:requestId/reject', rejectBagiHasilRequest);
 
 module.exports = router;

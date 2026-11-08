@@ -66,26 +66,367 @@ function sanitizeText(text) {
         .trim();
 }
 
-// Export generic transactions to Excel
-async function exportToExcel(data, filename, title) {
-    const workbook = XLSX.utils.book_new();
+// Resolve short category code (Kode) for Kertas Kerja Kas Berjalan
+function resolveCategoryKode(categoryName, categoryCode, note = '', type = '') {
+    const name = String(categoryName || '').toLowerCase().trim();
+    const noteLower = String(note || '').toLowerCase().trim();
 
-    const worksheetData = [
-        ['Tanggal', 'Kategori', 'Tipe', 'Jumlah', 'Keterangan'],
-        ...data.map(item => [
-            item.transaction_date,
-            item.category_name,
-            item.type === 'income' ? 'Pemasukan' : 'Pengeluaran',
-            item.amount,
-            item.note || ''
-        ])
+    if (name.includes('omzet') || name.includes('omset')) return 'OZ';
+    if (name.includes('operasional') || name === 'ops') return 'OPS';
+    if (name.includes('simpanan')) return 'SP';
+    if (name.includes('komisi') || noteLower.startsWith('komisi ')) return 'KMS';
+    if (name.includes('biaya lain') || (type === 'expense' && name.includes('lain'))) return 'BL';
+    if (name.includes('pendapatan lain') || name.includes('pemasukan lain') || (type === 'income' && name.includes('lain'))) return 'PL';
+    if (name.includes('bahan baku') || name === 'bb') return 'BB';
+    if (name.includes('packaging') || name.includes('kemasan') || name === 'pkg') return 'PKG';
+    if (name.includes('gaji') || name.includes('upah')) return 'GJ';
+    if (name.includes('sewa')) return 'SW';
+    if (name.includes('pajak') || name.includes('pb1')) return 'PJ';
+    if (name.includes('piutang')) return 'PTG';
+    if (name.includes('listrik') || name.includes('air') || name.includes('internet') || name.includes('utilitas') || name.includes('wifi') || name.includes('pln') || name.includes('pdam')) return 'UTL';
+    if (name.includes('maintenance') || name.includes('perbaikan') || name.includes('service')) return 'MTC';
+    if (name.includes('marketing') || name.includes('promosi') || name.includes('iklan')) return 'MKT';
+    if (name.includes('atk') || name.includes('alat tulis')) return 'ATK';
+    if (name.includes('refund')) return 'RFD';
+
+    if (categoryCode && /[A-Za-z]/.test(String(categoryCode))) {
+        return String(categoryCode).trim().toUpperCase();
+    }
+
+    const cleanWords = String(categoryName || '')
+        .replace(/\(.*?\)/g, '')
+        .replace(/[^A-Za-z0-9\s]/g, ' ')
+        .trim()
+        .split(/\s+/)
+        .filter(w => w && !['DAN', 'ATAU', 'DI', 'KE', 'DARI', 'UNTUK', 'YANG', 'DLL'].includes(w.toUpperCase()));
+
+    if (cleanWords.length === 1) {
+        return cleanWords[0].substring(0, 3).toUpperCase();
+    }
+    if (cleanWords.length > 1) {
+        return cleanWords.slice(0, 3).map(w => w[0].toUpperCase()).join('');
+    }
+    return type === 'income' ? 'IN' : 'OUT';
+}
+
+// Export Kas Berjalan / Kertas Kerja transactions to Excel
+async function exportToExcel(data, filename, title = 'KERTAS KERJA', branchName = 'OUTLET', options = {}) {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'VERKAS';
+    workbook.created = new Date();
+
+    const worksheet = workbook.addWorksheet('KAS BERJALAN', {
+        views: [{ showGridLines: true }]
+    });
+
+    // Setup Columns (Col A is left margin, B..H are the 7 table columns)
+    worksheet.columns = [
+        { key: 'margin', width: 3 },
+        { key: 'tgl', width: 8 },
+        { key: 'kode', width: 12 },
+        { key: 'keterangan', width: 44 },
+        { key: 'dr', width: 22 },
+        { key: 'cr', width: 22 },
+        { key: 'refund', width: 18 },
+        { key: 'saldo', width: 24 }
     ];
 
-    const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Transaksi');
+    const fontName = 'Times New Roman';
+    const thinBorder = {
+        top: { style: 'thin', color: { argb: 'FF000000' } },
+        left: { style: 'thin', color: { argb: 'FF000000' } },
+        bottom: { style: 'thin', color: { argb: 'FF000000' } },
+        right: { style: 'thin', color: { argb: 'FF000000' } }
+    };
+    const roseFill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFDFA7A6' }
+    };
+    const accountingFmt = '_("Rp"* #,##0.00_);_("Rp"* (#,##0.00);_("Rp"* "-"??_);_(@_)';
+
+    // Filter & sort transactions chronologically (oldest date first: 01 -> 31)
+    const rawItems = Array.isArray(data) ? [...data] : [];
+    const sortedItems = rawItems
+        .filter(item => {
+            // Skip duplicate repayment notification rows from the same period if parent exists
+            if (item.parent_transaction_id && options.fromDate && item.parent_transaction_date) {
+                const parentDateStr = String(item.parent_transaction_date).split('T')[0];
+                const fromDateStr = String(options.fromDate).split('T')[0];
+                if (parentDateStr >= fromDateStr) return false;
+            }
+            return true;
+        })
+        .sort((a, b) => {
+            const dateStrA = String(a.transaction_date || '').split('T')[0];
+            const dateStrB = String(b.transaction_date || '').split('T')[0];
+            if (dateStrA !== dateStrB) {
+                return dateStrA.localeCompare(dateStrB);
+            }
+            // Within the same day: put Income (especially OZ / Omzet) first so daily running balance starts from income
+            const isIncA = a.type === 'income' ? 0 : 1;
+            const isIncB = b.type === 'income' ? 0 : 1;
+            if (isIncA !== isIncB) return isIncA - isIncB;
+
+            const isOzA = /omzet|omset/i.test(a.category_name || '') ? 0 : 1;
+            const isOzB = /omzet|omset/i.test(b.category_name || '') ? 0 : 1;
+            if (isOzA !== isOzB) return isOzA - isOzB;
+
+            return (a.id || 0) - (b.id || 0);
+        });
+
+    const periodText = formatPeriodText(options.fromDate, options.toDate, sortedItems);
+    const outletLabel = String(branchName || options.branchName || 'OUTLET').toUpperCase();
+    const kasLabel = (options.category && options.category !== 'Semua Kategori')
+        ? String(options.category).toUpperCase()
+        : 'KAS BERJALAN';
+
+    // Top Metadata Block (Rows 1 - 4)
+    const metaRows = [
+        { label: 'NAMA OUTLET', value: `: ${outletLabel}`, boldValue: false, highlight: false },
+        { label: 'NAMA LAMPIRAN', value: ': KERTAS KERJA', boldValue: false, highlight: false },
+        { label: 'TANGGAL', value: `: ${periodText}`, boldValue: false, highlight: false },
+        { label: 'NAMA KAS', value: `: ${kasLabel}`, boldValue: true, highlight: true }
+    ];
+
+    metaRows.forEach((meta, idx) => {
+        const r = idx + 1;
+        const row = worksheet.getRow(r);
+        row.height = meta.highlight ? 20 : 18;
+
+        const labelCell = worksheet.getCell(`B${r}`);
+        labelCell.value = meta.label;
+        labelCell.font = { name: fontName, size: 10, bold: true, color: { argb: 'FF000000' } };
+        labelCell.alignment = { horizontal: 'left', vertical: 'middle' };
+
+        const valCell = worksheet.getCell(`D${r}`);
+        valCell.value = meta.value;
+        valCell.font = { name: fontName, size: 10, bold: meta.boldValue, color: { argb: 'FF000000' } };
+        valCell.alignment = { horizontal: 'left', vertical: 'middle' };
+
+        if (meta.highlight) {
+            worksheet.getCell(`B${r}`).fill = roseFill;
+            worksheet.getCell(`C${r}`).fill = roseFill;
+            worksheet.getCell(`D${r}`).fill = roseFill;
+        }
+    });
+
+    // Table Header Row (Row 5)
+    const headerRowIndex = 5;
+    const headerRow = worksheet.getRow(headerRowIndex);
+    headerRow.height = 24;
+
+    const headers = [
+        { col: 2, text: 'TGL', isRefund: false },
+        { col: 3, text: 'Kode', isRefund: false },
+        { col: 4, text: 'Keterangan', isRefund: false },
+        { col: 5, text: 'Dr', isRefund: false },
+        { col: 6, text: 'Cr', isRefund: false },
+        { col: 7, text: 'REFUND', isRefund: true },
+        { col: 8, text: 'Saldo', isRefund: false }
+    ];
+
+    headers.forEach(h => {
+        const cell = headerRow.getCell(h.col);
+        cell.value = h.text;
+        cell.font = {
+            name: fontName,
+            size: 10,
+            bold: true,
+            color: { argb: h.isRefund ? 'FFFF0000' : 'FF000000' }
+        };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.border = thinBorder;
+        if (h.isRefund) {
+            cell.fill = roseFill;
+        }
+    });
+
+    // Data Rows (Row 6+)
+    let currentRow = 6;
+    let runningSaldo = 0;
+    const firstDataRow = currentRow;
+
+    sortedItems.forEach((item, index) => {
+        const row = worksheet.getRow(currentRow);
+        row.height = 19;
+
+        // Parse 2-digit day (TGL)
+        let dayStr = '01';
+        if (item.transaction_date) {
+            const s = String(item.transaction_date).split('T')[0];
+            const parts = s.split('-');
+            if (parts.length === 3) {
+                dayStr = String(parseInt(parts[2], 10)).padStart(2, '0');
+            } else {
+                const d = new Date(item.transaction_date);
+                if (!isNaN(d.getTime())) {
+                    dayStr = String(d.getDate()).padStart(2, '0');
+                }
+            }
+        }
+
+        const kode = resolveCategoryKode(item.category_name, item.category_code, item.note, item.type);
+        let keterangan = sanitizeText(item.note || '');
+        if (!keterangan || keterangan === '-') {
+            if (kode === 'OZ') keterangan = 'Omzet';
+            else if (kode === 'SP') keterangan = 'Simpanan Wajib';
+            else keterangan = sanitizeText(item.category_name || '-');
+        }
+
+        const isIncome = item.type === 'income';
+        const refundAmt = Math.abs(parseFloat(item.total_refund || 0));
+        const futureRef = Math.abs(parseFloat(item.future_refund || 0));
+
+        let drVal = null;
+        let crVal = null;
+        let refVal = refundAmt > 0 ? refundAmt : null;
+
+        if (isIncome) {
+            const isMainDebt = (item.is_debt_payment === true || item.is_debt_payment === 1 || item.is_debt_payment === '1') && !item.parent_transaction_id;
+            const rawIncome = isMainDebt && item.paid_amount !== undefined && item.paid_amount !== null
+                ? parseFloat(item.paid_amount || 0)
+                : (Math.abs(parseFloat(item.amount || 0)) + futureRef);
+            const pb1Val = parseFloat(item.pb1 || 0);
+            drVal = Math.max(0, rawIncome - pb1Val);
+        } else {
+            const netExpense = Math.abs(parseFloat(item.amount || 0)) + futureRef;
+            // If there is a refund on this expense, Cr shows original gross expense and REFUND column shows the refund amount
+            crVal = refundAmt > 0 ? (netExpense + refundAmt) : netExpense;
+        }
+
+        const drNum = drVal !== null ? drVal : 0;
+        const crNum = crVal !== null ? crVal : 0;
+        const refNum = refVal !== null ? refVal : 0;
+        runningSaldo += (drNum - crNum + refNum);
+
+        // Col B: TGL
+        const cTgl = row.getCell(2);
+        cTgl.value = dayStr;
+        cTgl.numFmt = '@';
+        cTgl.font = { name: fontName, size: 10, color: { argb: 'FF000000' } };
+        cTgl.alignment = { horizontal: 'center', vertical: 'middle' };
+        cTgl.border = thinBorder;
+
+        // Col C: Kode
+        const cKode = row.getCell(3);
+        cKode.value = kode;
+        cKode.font = { name: fontName, size: 10, color: { argb: 'FF000000' } };
+        cKode.alignment = { horizontal: 'center', vertical: 'middle' };
+        cKode.border = thinBorder;
+
+        // Col D: Keterangan
+        const cKet = row.getCell(4);
+        cKet.value = keterangan;
+        cKet.font = { name: fontName, size: 10, color: { argb: 'FF000000' } };
+        cKet.alignment = { horizontal: 'left', vertical: 'middle' };
+        cKet.border = thinBorder;
+
+        // Col E: Dr
+        const cDr = row.getCell(5);
+        if (drVal !== null) {
+            cDr.value = drVal;
+            cDr.numFmt = accountingFmt;
+        }
+        cDr.font = { name: fontName, size: 10, color: { argb: 'FF000000' } };
+        cDr.alignment = { horizontal: 'right', vertical: 'middle' };
+        cDr.border = thinBorder;
+
+        // Col F: Cr
+        const cCr = row.getCell(6);
+        if (crVal !== null) {
+            cCr.value = crVal;
+            cCr.numFmt = accountingFmt;
+        }
+        cCr.font = { name: fontName, size: 10, color: { argb: 'FF000000' } };
+        cCr.alignment = { horizontal: 'right', vertical: 'middle' };
+        cCr.border = thinBorder;
+
+        // Col G: REFUND
+        const cRef = row.getCell(7);
+        if (refVal !== null) {
+            cRef.value = refVal;
+            cRef.numFmt = accountingFmt;
+        }
+        cRef.font = { name: fontName, size: 10, color: { argb: 'FF000000' } };
+        cRef.alignment = { horizontal: 'right', vertical: 'middle' };
+        cRef.border = thinBorder;
+
+        // Col H: Saldo (Running Balance with live Excel formula)
+        const cSaldo = row.getCell(8);
+        const formulaStr = index === 0
+            ? `E${currentRow}-F${currentRow}+G${currentRow}`
+            : `H${currentRow - 1}+E${currentRow}-F${currentRow}+G${currentRow}`;
+        cSaldo.value = { formula: formulaStr, result: runningSaldo };
+        cSaldo.numFmt = accountingFmt;
+        cSaldo.font = { name: fontName, size: 10, color: { argb: 'FF000000' } };
+        cSaldo.alignment = { horizontal: 'right', vertical: 'middle' };
+        cSaldo.border = thinBorder;
+
+        currentRow++;
+    });
+
+    // Total Summary Row at the bottom
+    if (sortedItems.length > 0) {
+        const lastDataRow = currentRow - 1;
+        const totalRow = worksheet.getRow(currentRow);
+        totalRow.height = 21;
+
+        worksheet.mergeCells(`B${currentRow}:D${currentRow}`);
+        const cTotalLabel = totalRow.getCell(2);
+        cTotalLabel.value = 'TOTAL';
+        cTotalLabel.font = { name: fontName, size: 10, bold: true, color: { argb: 'FF000000' } };
+        cTotalLabel.alignment = { horizontal: 'center', vertical: 'middle' };
+
+        const totalDr = sortedItems.reduce((s, it) => {
+            if (it.type !== 'income') return s;
+            const isMainDebt = (it.is_debt_payment === true || it.is_debt_payment === 1 || it.is_debt_payment === '1') && !it.parent_transaction_id;
+            const rawInc = isMainDebt && it.paid_amount !== undefined && it.paid_amount !== null
+                ? parseFloat(it.paid_amount || 0)
+                : (Math.abs(parseFloat(it.amount || 0)) + Math.abs(parseFloat(it.future_refund || 0)));
+            return s + Math.max(0, rawInc - parseFloat(it.pb1 || 0));
+        }, 0);
+
+        const totalCr = sortedItems.reduce((s, it) => {
+            if (it.type === 'income') return s;
+            const netExp = Math.abs(parseFloat(it.amount || 0)) + Math.abs(parseFloat(it.future_refund || 0));
+            const ref = Math.abs(parseFloat(it.total_refund || 0));
+            return s + (ref > 0 ? netExp + ref : netExp);
+        }, 0);
+
+        const totalRef = sortedItems.reduce((s, it) => s + Math.abs(parseFloat(it.total_refund || 0)), 0);
+
+        const cTotDr = totalRow.getCell(5);
+        cTotDr.value = { formula: `SUM(E${firstDataRow}:E${lastDataRow})`, result: totalDr };
+        cTotDr.numFmt = accountingFmt;
+        cTotDr.font = { name: fontName, size: 10, bold: true, color: { argb: 'FF000000' } };
+        cTotDr.alignment = { horizontal: 'right', vertical: 'middle' };
+
+        const cTotCr = totalRow.getCell(6);
+        cTotCr.value = { formula: `SUM(F${firstDataRow}:F${lastDataRow})`, result: totalCr };
+        cTotCr.numFmt = accountingFmt;
+        cTotCr.font = { name: fontName, size: 10, bold: true, color: { argb: 'FF000000' } };
+        cTotCr.alignment = { horizontal: 'right', vertical: 'middle' };
+
+        const cTotRef = totalRow.getCell(7);
+        cTotRef.value = { formula: `SUM(G${firstDataRow}:G${lastDataRow})`, result: totalRef };
+        cTotRef.numFmt = accountingFmt;
+        cTotRef.font = { name: fontName, size: 10, bold: true, color: { argb: 'FF000000' } };
+        cTotRef.alignment = { horizontal: 'right', vertical: 'middle' };
+
+        const cTotSaldo = totalRow.getCell(8);
+        cTotSaldo.value = { formula: `E${currentRow}-F${currentRow}+G${currentRow}`, result: runningSaldo };
+        cTotSaldo.numFmt = accountingFmt;
+        cTotSaldo.font = { name: fontName, size: 10, bold: true, color: { argb: 'FF000000' } };
+        cTotSaldo.alignment = { horizontal: 'right', vertical: 'middle' };
+
+        for (let col = 2; col <= 8; col++) {
+            totalRow.getCell(col).border = thinBorder;
+        }
+    }
 
     const filepath = path.join(EXPORTS_DIR, filename);
-    XLSX.writeFile(workbook, filepath);
+    await workbook.xlsx.writeFile(filepath);
 
     return filepath;
 }

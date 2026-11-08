@@ -261,8 +261,7 @@ const logout = async (req, res, next) => {
   }
 };
 
-// Get all admin users (for PIC selection) - owner and co-owner
-// Get all admin users for owner's team ecosystem
+// Get all admin users (for PIC selection) & full team ecosystem users - owner and co-owner
 const getAdmins = async (req, res, next) => {
   try {
     // Only owner and co-owner can get admin users list
@@ -273,22 +272,36 @@ const getAdmins = async (req, res, next) => {
       });
     }
 
-    // For co-owner, get admin users from the owner who created them
-    let targetUserId = req.userId;
-    if (req.user.role === 'co-owner') {
-      const currentUser = await User.findById(req.userId);
-      if (currentUser && currentUser.created_by) {
-        targetUserId = currentUser.created_by;
-      }
-    }
+    const targetOwnerId = await User.resolveEcosystemOwnerId(req.userId);
 
-    // Get admin users that belong to this owner's team ecosystem
-    const admins = await User.findAdminsByOwnerTeam(targetUserId);
+    // Get admin users (for PIC dropdowns) and full ecosystem users (owner, co-owner, admin)
+    const [admins, teamUsers] = await Promise.all([
+      User.findAdminsByOwnerTeam(targetOwnerId),
+      User.findTeamEcosystemUsers(targetOwnerId)
+    ]);
+
+    let bagiHasilApprovers = { approver_1_user_id: null, approver_2_user_id: null };
+    try {
+      const approverRows = await query(
+        'SELECT approver_1_user_id, approver_2_user_id FROM bagi_hasil_approval_settings WHERE owner_id = ?',
+        [targetOwnerId]
+      );
+      if (approverRows.length > 0) {
+        bagiHasilApprovers = {
+          approver_1_user_id: approverRows[0].approver_1_user_id || null,
+          approver_2_user_id: approverRows[0].approver_2_user_id || null,
+        };
+      }
+    } catch (e) {
+      console.warn('Failed to fetch bagi_hasil_approval_settings:', e.message);
+    }
 
     res.json({
       success: true,
       data: {
-        users: admins
+        users: req.query.include_all === 'true' ? teamUsers : admins,
+        team_users: teamUsers,
+        bagi_hasil_approvers: bagiHasilApprovers
       }
     });
   } catch (error) {
@@ -296,58 +309,304 @@ const getAdmins = async (req, res, next) => {
   }
 };
 
-// Delete admin user (soft delete) - owner and co-owner (only within own team)
+// Update user role, permissions (can_create, can_edit, can_delete), or transfer ownership
+const updateUserAccess = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses ditolak. Hanya Owner dan Co-Owner yang dapat mengatur hak akses pengguna.'
+      });
+    }
+
+    const targetId = parseInt(req.params.id);
+    if (isNaN(targetId)) {
+      return res.status(400).json({ success: false, message: 'ID user tidak valid' });
+    }
+
+    const rootOwnerId = await User.resolveEcosystemOwnerId(req.userId);
+    const ecosystemUsers = await User.findTeamEcosystemUsers(rootOwnerId);
+    const targetUser = ecosystemUsers.find(u => u.id === targetId);
+
+    if (!targetUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pengguna tidak ditemukan di dalam ekosistem tim Anda'
+      });
+    }
+
+    const { role, can_create, can_edit, can_delete, name } = req.body;
+    const OwnerTeam = require('../models/OwnerTeam');
+
+    // CASE 1: Transfer Ownership (promoting a user to 'owner')
+    if (role === 'owner' && targetUser.role !== 'owner') {
+      const currentOwnerUser = ecosystemUsers.find(u => u.role === 'owner');
+      const oldOwnerId = currentOwnerUser ? currentOwnerUser.id : rootOwnerId;
+      const newOwnerId = targetUser.id;
+
+      // 1. Update roles on users table
+      await User.update(newOwnerId, {
+        role: 'owner',
+        createdBy: null,
+        ...(name !== undefined ? { name } : {})
+      });
+      if (oldOwnerId && oldOwnerId !== newOwnerId) {
+        await User.update(oldOwnerId, {
+          role: 'co-owner',
+          createdBy: newOwnerId
+        });
+      }
+
+      // 2. Ensure a team exists and transfer primary_owner_id
+      let teams = await OwnerTeam.findByUserId(oldOwnerId);
+      if (teams.length === 0) {
+        const createdTeam = await OwnerTeam.create({
+          name: 'Default Team',
+          primaryOwnerId: newOwnerId
+        });
+        teams = [createdTeam];
+      } else {
+        await query(
+          'UPDATE owner_teams SET primary_owner_id = ? WHERE primary_owner_id = ?',
+          [newOwnerId, oldOwnerId]
+        );
+      }
+
+      for (const t of teams) {
+        await OwnerTeam.addMember(t.id, newOwnerId, req.userId, 'owner');
+        if (oldOwnerId && oldOwnerId !== newOwnerId) {
+          await OwnerTeam.addMember(t.id, oldOwnerId, newOwnerId, 'co-owner');
+          await query(
+            'UPDATE owner_team_members SET role = ? WHERE team_id = ? AND user_id = ?',
+            ['co-owner', t.id, oldOwnerId]
+          );
+        }
+        await query(
+          'UPDATE owner_team_members SET role = ? WHERE team_id = ? AND user_id = ?',
+          ['owner', t.id, newOwnerId]
+        );
+      }
+
+      // 3. Transfer branches, created_by references, subscriptions, and bagi_hasil_approval_settings
+      if (oldOwnerId && oldOwnerId !== newOwnerId) {
+        await query('UPDATE branches SET owner_id = ? WHERE owner_id = ?', [newOwnerId, oldOwnerId]);
+        await query('UPDATE users SET created_by = ? WHERE created_by = ? AND id != ?', [newOwnerId, oldOwnerId, newOwnerId]);
+        await query('DELETE FROM branch_pics WHERE user_id = ?', [newOwnerId]);
+
+        try {
+          await query('UPDATE subscriptions SET user_id = ? WHERE user_id = ?', [newOwnerId, oldOwnerId]);
+        } catch (e) {}
+
+        try {
+          await query('UPDATE bagi_hasil_approval_settings SET owner_id = ? WHERE owner_id = ?', [newOwnerId, oldOwnerId]);
+        } catch (e) {}
+      }
+
+      const [updatedTarget, updatedCurrentUser] = await Promise.all([
+        User.findById(newOwnerId),
+        User.findById(req.userId)
+      ]);
+
+      return res.json({
+        success: true,
+        message: `Peran Owner berhasil dipindahkan ke ${updatedTarget.name || updatedTarget.email}.`,
+        data: {
+          user: updatedTarget,
+          current_user: updatedCurrentUser,
+          transferred_ownership: true
+        }
+      });
+    }
+
+    // Prevent demoting the only Owner directly without picking a new Owner
+    if (targetUser.role === 'owner' && role && role !== 'owner') {
+      const otherCoOwner = ecosystemUsers.find(u => u.id !== targetUser.id && u.role === 'co-owner');
+      if (!otherCoOwner) {
+        return res.status(400).json({
+          success: false,
+          message: 'Harus ada minimal 1 Co-Owner untuk menggantikan posisi Owner Utama.'
+        });
+      }
+      // Automatically promote the first Co-Owner to Owner when current Owner switches to Co-Owner/Admin
+      const newOwnerId = otherCoOwner.id;
+      const oldOwnerId = targetUser.id;
+      await User.update(newOwnerId, { role: 'owner', createdBy: null });
+      await User.update(oldOwnerId, { role, createdBy: newOwnerId });
+      await query('UPDATE owner_teams SET primary_owner_id = ? WHERE primary_owner_id = ?', [newOwnerId, oldOwnerId]);
+      await query('UPDATE branches SET owner_id = ? WHERE owner_id = ?', [newOwnerId, oldOwnerId]);
+      await query('UPDATE users SET created_by = ? WHERE created_by = ? AND id != ?', [newOwnerId, oldOwnerId, newOwnerId]);
+      try {
+        await query('UPDATE subscriptions SET user_id = ? WHERE user_id = ?', [newOwnerId, oldOwnerId]);
+      } catch (e) {}
+      try {
+        await query('UPDATE bagi_hasil_approval_settings SET owner_id = ? WHERE owner_id = ?', [newOwnerId, oldOwnerId]);
+      } catch (e) {}
+
+      const [updatedTarget, updatedCurrentUser] = await Promise.all([
+        User.findById(oldOwnerId),
+        User.findById(req.userId)
+      ]);
+
+      return res.json({
+        success: true,
+        message: `Peran berhasil diubah. ${otherCoOwner.name || otherCoOwner.email} kini menjadi Owner Utama.`,
+        data: {
+          user: updatedTarget,
+          current_user: updatedCurrentUser,
+          transferred_ownership: true
+        }
+      });
+    }
+
+    // CASE 2: Role change between 'admin' and 'co-owner'
+    if (role && role !== targetUser.role && ['admin', 'co-owner'].includes(role)) {
+      let teams = await OwnerTeam.findByUserId(rootOwnerId);
+      if (teams.length === 0) {
+        const createdTeam = await OwnerTeam.create({
+          name: 'Default Team',
+          primaryOwnerId: rootOwnerId
+        });
+        teams = [createdTeam];
+      }
+
+      if (role === 'co-owner') {
+        for (const t of teams) {
+          await OwnerTeam.addMember(t.id, targetId, req.userId, 'co-owner');
+        }
+        await query('DELETE FROM branch_pics WHERE user_id = ?', [targetId]);
+      } else if (role === 'admin') {
+        await query('DELETE FROM owner_team_members WHERE user_id = ?', [targetId]);
+        await query(
+          'UPDATE bagi_hasil_approval_settings SET approver_1_user_id = CASE WHEN approver_1_user_id = ? THEN NULL ELSE approver_1_user_id END, approver_2_user_id = CASE WHEN approver_2_user_id = ? THEN NULL ELSE approver_2_user_id END WHERE owner_id = ?',
+          [targetId, targetId, rootOwnerId]
+        );
+      }
+    }
+
+    const updatedUser = await User.update(targetId, {
+      name: name !== undefined ? name : undefined,
+      role: role && ['admin', 'co-owner'].includes(role) ? role : undefined,
+      createdBy: targetUser.role === 'owner' ? undefined : rootOwnerId,
+      canCreate: can_create !== undefined ? can_create : undefined,
+      canEdit: can_edit !== undefined ? can_edit : undefined,
+      canDelete: can_delete !== undefined ? can_delete : undefined,
+    });
+
+    res.json({
+      success: true,
+      message: 'Hak akses & peran pengguna berhasil diperbarui',
+      data: {
+        user: updatedUser,
+        transferred_ownership: false
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Update 2-Tier Bagi Hasil Approvers (Owner and Co-Owner)
+const updateBagiHasilApprovers = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
+      return res.status(403).json({
+        success: false,
+        message: 'Hanya Owner dan Co-Owner yang dapat mengatur Approver 2 Tingkat untuk Bagi Hasil.'
+      });
+    }
+
+    const rootOwnerId = await User.resolveEcosystemOwnerId(req.userId);
+    const { approver_1_user_id, approver_2_user_id } = req.body;
+
+    const app1 = approver_1_user_id ? parseInt(approver_1_user_id) : null;
+    const app2 = approver_2_user_id ? parseInt(approver_2_user_id) : null;
+
+    await User.ensurePermissionColumns();
+    await query(
+      `INSERT INTO bagi_hasil_approval_settings (owner_id, approver_1_user_id, approver_2_user_id)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE approver_1_user_id = VALUES(approver_1_user_id), approver_2_user_id = VALUES(approver_2_user_id)`,
+      [rootOwnerId, app1, app2]
+    );
+
+    res.json({
+      success: true,
+      message: 'Pengaturan Approver 2 Tingkat Bagi Hasil berhasil disimpan',
+      data: {
+        bagi_hasil_approvers: {
+          approver_1_user_id: app1,
+          approver_2_user_id: app2
+        }
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Delete admin or co-owner user (soft delete) - owner and co-owner (only within own team)
 const deleteAdmin = async (req, res, next) => {
   try {
     if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Access denied. Only owner and co-owner can delete admin users.'
+        message: 'Access denied. Only owner and co-owner can delete users.'
       });
     }
 
-    let targetUserId = req.userId;
-    if (req.user.role === 'co-owner') {
-      const currentUser = await User.findById(req.userId);
-      if (currentUser && currentUser.created_by) {
-        targetUserId = currentUser.created_by;
-      }
-    }
-
+    const targetOwnerId = await User.resolveEcosystemOwnerId(req.userId);
     const { id } = req.params;
-    const teamAdmins = await User.findAdminsByOwnerTeam(targetUserId);
-    const adminUser = teamAdmins.find(a => a.id === parseInt(id));
+    const targetId = parseInt(id);
 
-    if (!adminUser) {
+    const teamUsers = await User.findTeamEcosystemUsers(targetOwnerId);
+    const targetUser = teamUsers.find(a => a.id === targetId);
+
+    if (!targetUser) {
       return res.status(404).json({
         success: false,
-        message: 'Admin user tidak ditemukan di dalam tim Anda'
+        message: 'User tidak ditemukan di dalam tim Anda'
       });
     }
 
-    await User.softDelete(id);
-    await query('DELETE FROM branch_pics WHERE user_id = ?', [id]);
+    if (targetUser.role === 'owner') {
+      return res.status(400).json({
+        success: false,
+        message: 'Akun Owner utama tidak dapat dihapus.'
+      });
+    }
+
+    if (req.user.role === 'co-owner' && targetUser.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Co-Owner hanya dapat menghapus akun Admin Cabang.'
+      });
+    }
+
+    await User.softDelete(targetId);
+    await query('DELETE FROM branch_pics WHERE user_id = ?', [targetId]);
+    await query('DELETE FROM owner_team_members WHERE user_id = ?', [targetId]);
 
     res.json({
       success: true,
-      message: 'Admin user berhasil dihapus'
+      message: 'User berhasil dihapus'
     });
   } catch (error) {
     next(error);
   }
 };
 
-// Reset admin password - owner and co-owner (only within own team)
+// Reset user password - owner and co-owner (only within own team)
 const resetAdminPassword = async (req, res, next) => {
   try {
     if (req.user.role !== 'owner' && req.user.role !== 'co-owner') {
       return res.status(403).json({
         success: false,
-        message: 'Access denied. Hanya owner atau co-owner yang dapat mereset password admin.'
+        message: 'Access denied. Hanya owner atau co-owner yang dapat mereset password.'
       });
     }
 
     const { id } = req.params;
+    const targetId = parseInt(id);
     const { newPassword } = req.body;
 
     if (!newPassword || newPassword.length < 6) {
@@ -357,29 +616,29 @@ const resetAdminPassword = async (req, res, next) => {
       });
     }
 
-    let targetUserId = req.userId;
-    if (req.user.role === 'co-owner') {
-      const currentUser = await User.findById(req.userId);
-      if (currentUser && currentUser.created_by) {
-        targetUserId = currentUser.created_by;
-      }
-    }
+    const targetOwnerId = await User.resolveEcosystemOwnerId(req.userId);
+    const teamUsers = await User.findTeamEcosystemUsers(targetOwnerId);
+    const targetUser = teamUsers.find(a => a.id === targetId);
 
-    const teamAdmins = await User.findAdminsByOwnerTeam(targetUserId);
-    const adminUser = teamAdmins.find(a => a.id === parseInt(id));
-
-    if (!adminUser) {
+    if (!targetUser) {
       return res.status(404).json({
         success: false,
-        message: 'Admin user tidak ditemukan di dalam tim Anda'
+        message: 'User tidak ditemukan di dalam tim Anda'
       });
     }
 
-    await User.changePassword(id, newPassword);
+    if (req.user.role === 'co-owner' && targetUser.role === 'owner') {
+      return res.status(403).json({
+        success: false,
+        message: 'Co-Owner tidak dapat mereset password Owner utama.'
+      });
+    }
+
+    await User.changePassword(targetId, newPassword);
 
     res.json({
       success: true,
-      message: `Password admin ${adminUser.name || adminUser.email} berhasil direset`
+      message: `Password ${targetUser.name || targetUser.email} berhasil direset`
     });
   } catch (error) {
     next(error);
@@ -457,6 +716,8 @@ module.exports = {
   getMe,
   logout,
   getAdmins,
+  updateUserAccess,
+  updateBagiHasilApprovers,
   deleteAdmin,
   resetAdminPassword,
   changePassword

@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
+const posUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 const { decodeId } = require('../utils/obfuscator');
 const {
   getAll,
@@ -23,7 +25,8 @@ const {
   deleteRepayment,
   createRefund,
   updateRefund,
-  deleteRefund
+  deleteRefund,
+  parsePosFile
 } = require('../controllers/transactionController');
 const { authenticate, authorize } = require('../middleware/auth');
 const { optionalBranchContext } = require('../middleware/branchContext');
@@ -58,6 +61,9 @@ router.get('/summary', getSummary);
 
 // Get edit requests
 router.get('/edit-requests', getEditRequests);
+
+// Parse POS Excel / CSV file for Omzet import
+router.post('/parse-pos-file', posUpload.single('file'), parsePosFile);
 
 // Get transaction by ID
 router.get('/:id', getById);

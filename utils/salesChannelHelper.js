@@ -19,13 +19,19 @@ async function computeBranchSystemSalesChannels(branchId, startDate, endDate) {
         tsc.sales_channel_id,
         sc.name AS sales_channel_name,
         tsc.amount AS gross_amount,
+        tsc.pb1_amount AS exact_pb1_amount,
         COALESCE(pm.is_taxable, 0) AS is_taxable,
         t.pb1 AS tx_pb1,
         COALESCE((
-            SELECT ROUND(SUM(tid.amount_app) * 10 / 110)
+            SELECT CASE
+                WHEN COUNT(tid.pb1_amount) > 0 THEN
+                    ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm_tid.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
+                ELSE
+                    ROUND(SUM(tid.amount_app) * 10 / 110)
+            END
             FROM transaction_income_details tid
             JOIN payment_methods pm_tid ON tid.payment_method_id = pm_tid.id
-            WHERE tid.transaction_id = t.id AND pm_tid.is_taxable = 1
+            WHERE tid.transaction_id = t.id AND (pm_tid.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
         ), t.pb1, 0) AS effective_tx_pb1
      FROM transaction_sales_channels tsc
      JOIN sales_channels sc ON tsc.sales_channel_id = sc.id
@@ -72,6 +78,8 @@ async function computeBranchSystemSalesChannels(branchId, startDate, endDate) {
       const chId = scd.sales_channel_id;
       const gross = parseFloat(scd.gross_amount) || 0;
       const isTax = scd.is_taxable == 1 || scd.is_taxable === true;
+      const hasExactPb1 = scd.exact_pb1_amount !== null && scd.exact_pb1_amount !== undefined;
+      const exactPb1 = hasExactPb1 ? (parseFloat(scd.exact_pb1_amount) || 0) : 0;
 
       if (!groupedMap.has(chId)) {
         groupedMap.set(chId, {
@@ -79,6 +87,8 @@ async function computeBranchSystemSalesChannels(branchId, startDate, endDate) {
           name: scd.sales_channel_name,
           gross_amount: 0,
           taxable_gross: 0,
+          has_exact_pb1: false,
+          exact_pb1_sum: 0,
           pb1_amount: 0,
           net_amount: 0
         });
@@ -86,23 +96,36 @@ async function computeBranchSystemSalesChannels(branchId, startDate, endDate) {
 
       const group = groupedMap.get(chId);
       group.gross_amount += gross;
-      if (isTax) {
+      if (hasExactPb1) {
+        group.has_exact_pb1 = true;
+        group.exact_pb1_sum += exactPb1;
+        if (exactPb1 > 0 || isTax) {
+          group.taxable_gross += gross;
+        }
+      } else if (isTax) {
         group.taxable_gross += gross;
+        group.exact_pb1_sum += Math.round((gross * 10) / 110);
       }
     }
 
     const groupedChannels = Array.from(groupedMap.values());
+    const txHasAnyExactPb1 = groupedChannels.some((g) => g.has_exact_pb1);
     groupedChannels.forEach((g) => {
-      g.pb1_amount = g.taxable_gross > 0 ? Math.round((g.taxable_gross * 10) / 110) : 0;
+      if (txHasAnyExactPb1) {
+        g.pb1_amount = Math.round(g.exact_pb1_sum);
+      } else {
+        g.pb1_amount = g.taxable_gross > 0 ? Math.round((g.taxable_gross * 10) / 110) : 0;
+      }
       g.net_amount = g.gross_amount - g.pb1_amount;
     });
 
-    // Reconcile channel PB1 sum with authoritative transaction PB1
+    // Reconcile channel PB1 sum with authoritative transaction PB1 (only when not using exact per-channel PB1)
     const effectiveTxPb1 = txData.effective_tx_pb1;
     const scPb1Sum = groupedChannels.reduce((sum, g) => sum + g.pb1_amount, 0);
     const taxableGroups = groupedChannels.filter((g) => g.taxable_gross > 0);
 
     if (
+      !txHasAnyExactPb1 &&
       effectiveTxPb1 > 0 &&
       Math.abs(effectiveTxPb1 - scPb1Sum) > 0 &&
       Math.abs(effectiveTxPb1 - scPb1Sum) <= 5 &&

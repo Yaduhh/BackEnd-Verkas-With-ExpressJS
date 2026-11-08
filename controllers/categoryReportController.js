@@ -167,10 +167,12 @@ const exportCategoryReport = async (req, res, next) => {
                         tsc.sales_channel_id, 
                         tsc.amount AS gross_amount,
                         CASE 
+                            WHEN tsc.pb1_amount IS NOT NULL THEN tsc.amount - ROUND(tsc.pb1_amount)
                             WHEN pm.is_taxable = 1 THEN tsc.amount - ROUND((tsc.amount * 10) / 110)
                             ELSE tsc.amount
                         END AS amount,
                         CASE 
+                            WHEN tsc.pb1_amount IS NOT NULL THEN ROUND(tsc.pb1_amount)
                             WHEN pm.is_taxable = 1 THEN ROUND((tsc.amount * 10) / 110)
                             ELSE 0
                         END AS pb1_amount,
