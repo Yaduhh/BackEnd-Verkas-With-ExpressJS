@@ -1,6 +1,7 @@
 const Branch = require('../models/Branch');
 const User = require('../models/User');
 const SalesChannel = require('../models/SalesChannel');
+const axios = require('axios');
 
 // Get all branches user has access to
 const getAll = async (req, res, next) => {
@@ -750,6 +751,766 @@ const deleteGroup = async (req, res, next) => {
   }
 };
 
+// Proxy secure hutang attachment file from Bosgil Group (supports streaming with HMAC-SHA256 verification)
+const proxyHutangFile = async (req, res, next) => {
+  try {
+    const { url, path: filePath, expires, sig } = req.query;
+    const bosgilBaseUrl = (process.env.BOSGIL_API_BASE_URL || 'http://localhost:3001').replace(/\/+$/, '');
+
+    let targetUrl = '';
+    if (url) {
+      if (url.startsWith('http://') || url.startsWith('https://')) {
+        targetUrl = url;
+      } else {
+        targetUrl = `${bosgilBaseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
+      }
+    } else if (filePath && expires && sig) {
+      targetUrl = `${bosgilBaseUrl}/api/secure-file/view?path=${encodeURIComponent(filePath)}&expires=${expires}&sig=${sig}`;
+    } else {
+      return res.status(400).send('Parameter berkas tidak lengkap');
+    }
+
+    const fileRes = await axios.get(targetUrl, {
+      responseType: 'stream',
+      timeout: 15000,
+      validateStatus: (status) => status < 400
+    });
+
+    if (fileRes.headers['content-type']) {
+      res.setHeader('Content-Type', fileRes.headers['content-type']);
+    }
+    if (fileRes.headers['content-disposition']) {
+      res.setHeader('Content-Disposition', fileRes.headers['content-disposition']);
+    }
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    return fileRes.data.pipe(res);
+  } catch (error) {
+    console.error('Error proxying hutang file from Bosgil:', error?.message);
+    return res.status(error?.response?.status || 500).send('Gagal memuat berkas');
+  }
+};
+
+// Get unpaid Purchasing Orders from Bosgil Group for this branch (Daftar Hutang)
+const getHutang = async (req, res, next) => {
+  try {
+    const branchId = parseInt(req.params.id, 10);
+    const { search, start_date, end_date, page = 1, limit = 5000 } = req.query;
+
+    const bosgilBaseUrl = (process.env.BOSGIL_API_BASE_URL || 'http://localhost:3001').replace(/\/+$/, '');
+    const response = await axios.get(`${bosgilBaseUrl}/api/verkas-integration/unpaid-pos`, {
+      params: {
+        branch_id: branchId,
+        search: search || '',
+        ...(start_date ? { start_date } : {}),
+        ...(end_date ? { end_date } : {}),
+        page: parseInt(page, 10) || 1,
+        limit: parseInt(limit, 10) || 5000
+      },
+      timeout: 15000
+    });
+
+    const payload = response.data;
+    if (payload && Array.isArray(payload.data)) {
+      payload.data = payload.data.map(po => {
+        const rewriteList = (list) => {
+          if (!Array.isArray(list)) return [];
+          return list.map(item => {
+            if (!item || !item.url) return item;
+            if (item.url.startsWith('/api/secure-file') || item.url.startsWith('/uploads')) {
+              return {
+                ...item,
+                url: `/api/branches/hutang/file?url=${encodeURIComponent(item.url)}`,
+                original_url: item.url
+              };
+            }
+            return item;
+          });
+        };
+
+        return {
+          ...po,
+          lampiran: rewriteList(po.lampiran),
+          lampiran_approval: rewriteList(po.lampiran_approval),
+          lampiran_bukti_potong: rewriteList(po.lampiran_bukti_potong),
+          riwayat_angsuran: Array.isArray(po.riwayat_angsuran)
+            ? po.riwayat_angsuran.map(t => ({
+                ...t,
+                lampiran_approval: rewriteList(t.lampiran_approval)
+              }))
+            : []
+        };
+      });
+    }
+
+    return res.json(payload);
+  } catch (error) {
+    console.error('Error fetching branch hutang from Bosgil:', error?.message);
+    return res.json({
+      success: true,
+      data: [],
+      summary: {
+        total_hutang: 0,
+        total_siap_diproses: 0,
+        total_belum_siap_diproses: 0,
+        total_count: 0
+      },
+      message: 'Gagal memuat data hutang dari Bosgil: ' + (error?.response?.data?.message || error.message)
+    });
+  }
+};
+
+// Export branch hutang (unpaid POs) to styled .xlsx Excel matching active UI filters
+const exportHutangExcel = async (req, res, next) => {
+  try {
+    const ExcelJS = require('exceljs');
+    const branchId = parseInt(req.params.id, 10);
+
+    const isPostItems = req.method === 'POST' && Array.isArray(req.body?.items);
+    let rows = [];
+    let branchName = req.body?.branchName || req.query.branch_name || '';
+    let outletName = req.body?.outletName || req.query.outlet_name || '';
+    const periodLabel = req.body?.periodLabel || req.query.period_label || 'Semua Periode';
+    const activeTab = req.body?.activeTab || req.query.tab || 'Semua';
+    const searchQuery = String(req.body?.searchQuery ?? req.query.search ?? '').trim();
+    const sortOrder = req.body?.sortOrder || req.query.sort || 'date_desc';
+
+    if (!branchName && branchId) {
+      try {
+        const b = await Branch.findById(branchId);
+        if (b?.name) branchName = b.name;
+      } catch (_) {}
+    }
+
+    if (isPostItems) {
+      rows = req.body.items;
+    } else {
+      const { start_date, end_date } = req.query;
+      const bosgilBaseUrl = (process.env.BOSGIL_API_BASE_URL || 'http://localhost:3001').replace(/\/+$/, '');
+      const response = await axios.get(`${bosgilBaseUrl}/api/verkas-integration/unpaid-pos`, {
+        params: {
+          branch_id: branchId,
+          ...(start_date ? { start_date } : {}),
+          ...(end_date ? { end_date } : {}),
+          page: 1,
+          limit: 5000
+        },
+        timeout: 20000
+      });
+
+      const payload = response.data || {};
+      if (!outletName && payload.branch?.outlet_name) {
+        outletName = payload.branch.outlet_name;
+      }
+      const rawList = Array.isArray(payload.data) ? payload.data : [];
+
+      const q = searchQuery.toLowerCase();
+      const qDigits = q.replace(/[^\d]/g, '');
+
+      rows = rawList.filter((po) => {
+        if (start_date || end_date) {
+          const dStr = po.tanggal ? String(po.tanggal).split('T')[0] : '';
+          if (!dStr) return false;
+          if (start_date && dStr < String(start_date)) return false;
+          if (end_date && dStr > String(end_date)) return false;
+        }
+
+        if (activeTab === 'Siap' && po.siap_diproses !== true) return false;
+        if (activeTab === 'BelumSiap' && po.siap_diproses !== false) return false;
+        if (activeTab === 'Angsuran' && po.is_angsuran !== true) return false;
+
+        if (!q) return true;
+        const matchText =
+          String(po.nomor_po || '').toLowerCase().includes(q) ||
+          String(po.supplier?.nama_supplier || '').toLowerCase().includes(q) ||
+          String(po.keterangan || '').toLowerCase().includes(q) ||
+          String(po.status_label || '').toLowerCase().includes(q) ||
+          String(po.creator?.nama || '').toLowerCase().includes(q);
+        if (matchText) return true;
+        if (qDigits.length >= 2) {
+          return (
+            String(Math.round(Number(po.nominal_awal) || 0)).includes(qDigits) ||
+            String(Math.round(Number(po.sisa_hutang) || 0)).includes(qDigits)
+          );
+        }
+        return false;
+      });
+
+      rows.sort((a, b) => {
+        if (sortOrder === 'date_asc') {
+          return new Date(a.tanggal).getTime() - new Date(b.tanggal).getTime();
+        }
+        if (sortOrder === 'amount_desc') {
+          return (Number(b.sisa_hutang) || 0) - (Number(a.sisa_hutang) || 0);
+        }
+        if (sortOrder === 'amount_asc') {
+          return (Number(a.sisa_hutang) || 0) - (Number(b.sisa_hutang) || 0);
+        }
+        return new Date(b.tanggal).getTime() - new Date(a.tanggal).getTime();
+      });
+    }
+
+    const tabLabelMap = {
+      Semua: 'Semua Tagihan',
+      Siap: 'Siap Diproses (Antre Bayar)',
+      BelumSiap: 'Belum Siap (Pending AP)',
+      Angsuran: 'Angsuran'
+    };
+    const tabDisplay = tabLabelMap[activeTab] || activeTab || 'Semua Tagihan';
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'VerKas';
+    workbook.created = new Date();
+
+    const sheet = workbook.addWorksheet('Daftar Hutang PO', {
+      views: [{ state: 'frozen', ySplit: 6, showGridLines: true }]
+    });
+
+    sheet.columns = [
+      { key: 'no', width: 6 },
+      { key: 'tanggal', width: 14 },
+      { key: 'nomor_po', width: 21 },
+      { key: 'supplier', width: 25 },
+      { key: 'outlet', width: 18 },
+      { key: 'kategori_status', width: 19 },
+      { key: 'status_proses', width: 28 },
+      { key: 'angsuran', width: 11 },
+      { key: 'keterangan', width: 42 },
+      { key: 'nominal_awal', width: 19 },
+      { key: 'nominal_bupot', width: 19 },
+      { key: 'nominal_terbayar', width: 19 },
+      { key: 'sisa_hutang', width: 21 }
+    ];
+
+    // Row 1: Title
+    sheet.mergeCells('A1:M1');
+    const titleCell = sheet.getCell('A1');
+    titleCell.value = 'DAFTAR HUTANG PURCHASING ORDER (PO)';
+    titleCell.font = { name: 'Calibri', size: 13, bold: true, color: { argb: 'FF1E1B4B' } };
+    titleCell.alignment = { vertical: 'middle', horizontal: 'left' };
+    sheet.getRow(1).height = 24;
+
+    // Row 2: Branch & Outlet
+    sheet.mergeCells('A2:M2');
+    const info1 = sheet.getCell('A2');
+    info1.value = `Buku Kas / Cabang: ${branchName || '-'}${outletName ? `   |   Outlet Bosgil: ${outletName}` : ''}`;
+    info1.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF334155' } };
+    sheet.getRow(2).height = 18;
+
+    // Row 3: Period
+    sheet.mergeCells('A3:M3');
+    const info2 = sheet.getCell('A3');
+    info2.value = `Periode Filter: ${periodLabel}`;
+    info2.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF4338CA' } };
+    sheet.getRow(3).height = 18;
+
+    // Row 4: Active Filter & Total Count
+    sheet.mergeCells('A4:M4');
+    const info3 = sheet.getCell('A4');
+    info3.value = `Tab Status: ${tabDisplay}${searchQuery ? `   |   Pencarian: "${searchQuery}"` : ''}   |   Total Ditampilkan: ${rows.length} Tagihan`;
+    info3.font = { name: 'Calibri', size: 10, color: { argb: 'FF475569' } };
+    sheet.getRow(4).height = 18;
+
+    // Row 5: Spacer
+    sheet.getRow(5).height = 8;
+
+    // Row 6: Table Headers
+    const headerValues = [
+      'No',
+      'Tanggal PO',
+      'Nomor PO',
+      'Supplier',
+      'Outlet',
+      'Kategori Status',
+      'Status Proses',
+      'Angsuran',
+      'Keterangan / Catatan',
+      'Nominal Awal',
+      'Potongan BUPOT',
+      'Telah Dicicil',
+      'Sisa Hutang'
+    ];
+    const headerRow = sheet.getRow(6);
+    headerRow.values = headerValues;
+    headerRow.height = 24;
+
+    for (let col = 1; col <= 13; col++) {
+      const cell = headerRow.getCell(col);
+      cell.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FF4338CA' }
+      };
+      cell.font = {
+        name: 'Calibri',
+        size: 10,
+        bold: true,
+        color: { argb: 'FFFFFFFF' }
+      };
+      cell.alignment = {
+        vertical: 'middle',
+        horizontal: col >= 10 ? 'right' : col === 1 || col === 2 || col === 8 ? 'center' : 'left',
+        wrapText: true
+      };
+      cell.border = {
+        top: { style: 'thin', color: { argb: 'FF3730A3' } },
+        bottom: { style: 'thin', color: { argb: 'FF3730A3' } },
+        left: { style: 'thin', color: { argb: 'FF3730A3' } },
+        right: { style: 'thin', color: { argb: 'FF3730A3' } }
+      };
+    }
+
+    const currencyFmt = '"Rp"#,##0';
+    let sumAwal = 0;
+    let sumBupot = 0;
+    let sumTerbayar = 0;
+    let sumSisa = 0;
+
+    rows.forEach((po, idx) => {
+      const awal = Number(po.nominal_awal) || 0;
+      const bupot = Number(po.nominal_bupot) || 0;
+      const terbayar = Number(po.nominal_terbayar) || 0;
+      const sisa = Number(po.sisa_hutang) || 0;
+
+      sumAwal += awal;
+      sumBupot += bupot;
+      sumTerbayar += terbayar;
+      sumSisa += sisa;
+
+      const isSiap = Boolean(po.siap_diproses);
+      const supplierName = po.supplier_name ?? po.supplier?.nama_supplier ?? '-';
+      const outletLabel = po.outlet_name ?? po.outlet?.nama_outlet ?? outletName ?? '-';
+      const statusProses = po.status_proses ?? po.status_label ?? (isSiap ? 'Siap Diproses' : 'Belum Siap');
+      const dateStr = po.tanggal ? String(po.tanggal).split('T')[0] : '-';
+
+      const r = sheet.addRow([
+        idx + 1,
+        dateStr,
+        po.nomor_po || '-',
+        supplierName || '-',
+        outletLabel || '-',
+        isSiap ? 'Siap Diproses' : 'Belum Siap (Pending AP)',
+        statusProses,
+        po.is_angsuran ? 'Ya' : 'Tidak',
+        po.keterangan || '-',
+        awal,
+        bupot,
+        terbayar,
+        sisa
+      ]);
+
+      const isEven = idx % 2 === 1;
+      for (let col = 1; col <= 13; col++) {
+        const cell = r.getCell(col);
+        cell.font = {
+          name: 'Calibri',
+          size: 10,
+          bold: col === 3 || col === 13,
+          color: {
+            argb:
+              col === 13
+                ? 'FFE11D48'
+                : col === 3
+                ? 'FF4338CA'
+                : col === 6
+                ? isSiap
+                  ? 'FF059669'
+                  : 'FFD97706'
+                : 'FF1E293B'
+          }
+        };
+        if (isEven) {
+          cell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFF8FAFC' }
+          };
+        }
+        cell.alignment = {
+          vertical: 'middle',
+          horizontal: col >= 10 ? 'right' : col === 1 || col === 2 || col === 8 ? 'center' : 'left',
+          wrapText: col === 9
+        };
+        if (col >= 10) {
+          cell.numFmt = currencyFmt;
+        }
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+          bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+          left: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+          right: { style: 'thin', color: { argb: 'FFE2E8F0' } }
+        };
+      }
+    });
+
+    // Total Row
+    const firstDataRow = 7;
+    const lastDataRow = rows.length > 0 ? 6 + rows.length : 6;
+    const totalRowIndex = lastDataRow + 1;
+    const totalRow = sheet.getRow(totalRowIndex);
+    totalRow.height = 24;
+
+    sheet.mergeCells(`A${totalRowIndex}:I${totalRowIndex}`);
+    const totalLabelCell = sheet.getCell(`A${totalRowIndex}`);
+    totalLabelCell.value = `TOTAL DITAMPILKAN (${rows.length} TAGIHAN)`;
+
+    if (rows.length > 0) {
+      sheet.getCell(`J${totalRowIndex}`).value = { formula: `SUM(J${firstDataRow}:J${lastDataRow})`, result: sumAwal };
+      sheet.getCell(`K${totalRowIndex}`).value = { formula: `SUM(K${firstDataRow}:K${lastDataRow})`, result: sumBupot };
+      sheet.getCell(`L${totalRowIndex}`).value = { formula: `SUM(L${firstDataRow}:L${lastDataRow})`, result: sumTerbayar };
+      sheet.getCell(`M${totalRowIndex}`).value = { formula: `SUM(M${firstDataRow}:M${lastDataRow})`, result: sumSisa };
+    } else {
+      sheet.getCell(`J${totalRowIndex}`).value = 0;
+      sheet.getCell(`K${totalRowIndex}`).value = 0;
+      sheet.getCell(`L${totalRowIndex}`).value = 0;
+      sheet.getCell(`M${totalRowIndex}`).value = 0;
+    }
+
+    for (let col = 1; col <= 13; col++) {
+      const cell = totalRow.getCell(col);
+      cell.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFEEF2FF' }
+      };
+      cell.font = {
+        name: 'Calibri',
+        size: 10,
+        bold: true,
+        color: { argb: col === 13 ? 'FFE11D48' : 'FF1E1B4B' }
+      };
+      cell.alignment = {
+        vertical: 'middle',
+        horizontal: col >= 10 ? 'right' : 'left'
+      };
+      if (col >= 10) {
+        cell.numFmt = currencyFmt;
+      }
+      cell.border = {
+        top: { style: 'medium', color: { argb: 'FF4338CA' } },
+        bottom: { style: 'double', color: { argb: 'FF4338CA' } },
+        left: { style: 'thin', color: { argb: 'FFC7D2FE' } },
+        right: { style: 'thin', color: { argb: 'FFC7D2FE' } }
+      };
+    }
+
+    const safeBranch = String(branchName || 'Cabang').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safePeriod = String(periodLabel || 'Semua_Periode').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const fileName = `Daftar_Hutang_PO_${safeBranch}_${safePeriod}.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Export branch hutang Recap by Supplier to PDF (matching classic Supplier Total sheet: Period -> NO | NAMA SUPPLIER | TOTAL HUTANG -> Yellow TOTAL)
+const exportHutangPdf = async (req, res, next) => {
+  try {
+    const PDFDocument = require('pdfkit');
+    const branchId = parseInt(req.params.id, 10);
+
+    const isPostItems = req.method === 'POST' && Array.isArray(req.body?.items);
+    let rows = [];
+    let branchName = req.body?.branchName || req.query.branch_name || '';
+    let outletName = req.body?.outletName || req.query.outlet_name || '';
+    const periodLabel = req.body?.periodLabel || req.query.period_label || 'Semua Periode';
+    const activeTab = req.body?.activeTab || req.query.tab || 'Semua';
+    const searchQuery = String(req.body?.searchQuery ?? req.query.search ?? '').trim();
+
+    if (!branchName && branchId) {
+      try {
+        const b = await Branch.findById(branchId);
+        if (b?.name) branchName = b.name;
+      } catch (_) {}
+    }
+
+    if (isPostItems) {
+      rows = req.body.items;
+    } else {
+      const { start_date, end_date } = req.query;
+      const bosgilBaseUrl = (process.env.BOSGIL_API_BASE_URL || 'http://localhost:3001').replace(/\/+$/, '');
+      const response = await axios.get(`${bosgilBaseUrl}/api/verkas-integration/unpaid-pos`, {
+        params: {
+          branch_id: branchId,
+          ...(start_date ? { start_date } : {}),
+          ...(end_date ? { end_date } : {}),
+          page: 1,
+          limit: 5000
+        },
+        timeout: 20000
+      });
+
+      const payload = response.data || {};
+      if (!outletName && payload.branch?.outlet_name) {
+        outletName = payload.branch.outlet_name;
+      }
+      const rawList = Array.isArray(payload.data) ? payload.data : [];
+
+      const q = searchQuery.toLowerCase();
+      const qDigits = q.replace(/[^\d]/g, '');
+
+      rows = rawList.filter((po) => {
+        if (start_date || end_date) {
+          const dStr = po.tanggal ? String(po.tanggal).split('T')[0] : '';
+          if (!dStr) return false;
+          if (start_date && dStr < String(start_date)) return false;
+          if (end_date && dStr > String(end_date)) return false;
+        }
+
+        if (activeTab === 'Siap' && po.siap_diproses !== true) return false;
+        if (activeTab === 'BelumSiap' && po.siap_diproses !== false) return false;
+        if (activeTab === 'Angsuran' && po.is_angsuran !== true) return false;
+
+        if (!q) return true;
+        const matchText =
+          String(po.nomor_po || '').toLowerCase().includes(q) ||
+          String(po.supplier?.nama_supplier || '').toLowerCase().includes(q) ||
+          String(po.keterangan || '').toLowerCase().includes(q) ||
+          String(po.status_label || '').toLowerCase().includes(q) ||
+          String(po.creator?.nama || '').toLowerCase().includes(q);
+        if (matchText) return true;
+        if (qDigits.length >= 2) {
+          return (
+            String(Math.round(Number(po.nominal_awal) || 0)).includes(qDigits) ||
+            String(Math.round(Number(po.sisa_hutang) || 0)).includes(qDigits)
+          );
+        }
+        return false;
+      });
+    }
+
+    // Aggregate total hutang grouped by Supplier
+    const supplierMap = new Map();
+    let grandTotalHutang = 0;
+
+    rows.forEach((po) => {
+      const sisa = Number(po.sisa_hutang) || 0;
+      grandTotalHutang += sisa;
+
+      const rawName = String(po.supplier_name ?? po.supplier?.nama_supplier ?? '').trim();
+      const hasSupplier = rawName && rawName !== '-';
+      const key = hasSupplier ? rawName.toUpperCase() : '__NO_SUPPLIER__';
+
+      let entry = supplierMap.get(key);
+      if (!entry) {
+        entry = {
+          isUnassigned: !hasSupplier,
+          supplierName: hasSupplier ? rawName.toUpperCase() : 'TANPA NAMA SUPPLIER',
+          poCount: 0,
+          totalHutang: 0
+        };
+        supplierMap.set(key, entry);
+      }
+      entry.poCount += 1;
+      entry.totalHutang += sisa;
+    });
+
+    const supplierRows = Array.from(supplierMap.values()).sort((a, b) => {
+      if (a.isUnassigned !== b.isUnassigned) return a.isUnassigned ? 1 : -1;
+      return a.supplierName.localeCompare(b.supplierName, 'id');
+    });
+
+    // If there are unassigned POs, include PO count in label for clarity
+    supplierRows.forEach((sr) => {
+      if (sr.isUnassigned) {
+        sr.supplierName = `TANPA NAMA SUPPLIER (${sr.poCount} PO)`;
+      }
+    });
+
+    const safeBranch = String(branchName || 'Cabang').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safePeriod = String(periodLabel || 'Semua_Periode').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const fileName = `Rekap_Hutang_Supplier_${safeBranch}_${safePeriod}.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+    const doc = new PDFDocument({
+      size: 'A4',
+      margin: 30,
+      info: {
+        Title: `Rekap Hutang Supplier - ${branchName || 'Outlet'} (${periodLabel})`,
+        Author: 'VerKas',
+        Subject: 'Rekapitulasi Hutang Berdasarkan Supplier',
+        Creator: 'VerKas Financial App'
+      }
+    });
+
+    doc.pipe(res);
+
+    const pageWidth = doc.page.width; // 595.28
+    const pageHeight = doc.page.height; // 841.89
+    const margin = 30;
+    const tableWidth = pageWidth - margin * 2; // 535.28
+
+    const colNoW = 55;
+    const colTotalW = 155;
+    const colSupplierW = tableWidth - colNoW - colTotalW; // 325.28
+
+    const xNo = margin;
+    const xSupplier = xNo + colNoW;
+    const xTotal = xSupplier + colSupplierW;
+
+    const fontRegular = 'Times-Roman';
+    const fontBold = 'Times-Bold';
+    const headerBlue = '#B8CCE4';
+    const totalYellow = '#FFFF00';
+
+    const formatIdNumber = (val) => {
+      const rounded = Math.round(Number(val) || 0);
+      if (rounded === 0) return '0';
+      return new Intl.NumberFormat('id-ID').format(rounded);
+    };
+
+    const drawMoneyCell = (val, cellX, textY, cellW, isBold = false) => {
+      const rounded = Math.round(Number(val) || 0);
+      doc.font(isBold ? fontBold : fontRegular).fontSize(10).fillColor('#000000');
+      if (rounded === 0) {
+        doc.text('0', cellX + 8, textY, { width: cellW - 16, align: 'center', lineBreak: false });
+      } else {
+        doc.text('Rp', cellX + 8, textY, { lineBreak: false });
+        doc.text(formatIdNumber(rounded), cellX + 24, textY, {
+          width: cellW - 32,
+          align: 'right',
+          lineBreak: false
+        });
+      }
+    };
+
+    const tabLabelMap = {
+      Semua: '',
+      Siap: 'SIAP DIPROSES',
+      BelumSiap: 'BELUM SIAP (PENDING AP)',
+      Angsuran: 'ANGSURAN'
+    };
+    const subFilterParts = [];
+    if (outletName || branchName) {
+      subFilterParts.push(`OUTLET: ${String(outletName || branchName).toUpperCase()}`);
+    }
+    if (tabLabelMap[activeTab]) {
+      subFilterParts.push(`STATUS: ${tabLabelMap[activeTab]}`);
+    }
+    if (searchQuery) {
+      subFilterParts.push(`FILTER: "${searchQuery.toUpperCase()}"`);
+    }
+
+    let y = margin;
+
+    if (subFilterParts.length > 0) {
+      doc.font(fontBold).fontSize(9).fillColor('#334155');
+      doc.text(subFilterParts.join('   •   '), margin, y, {
+        width: tableWidth,
+        align: 'left',
+        lineBreak: false
+      });
+      y += 15;
+    }
+
+    const periodHeaderText = String(periodLabel || 'SEMUA PERIODE').toUpperCase();
+
+    const drawTableHeaders = (startY) => {
+      let curY = startY;
+      const periodH = 22;
+      const colHeaderH = 22;
+
+      // Row 1: Merged Period Header (White background, bold centered uppercase)
+      doc.rect(margin, curY, tableWidth, periodH).fillColor('#FFFFFF').fill();
+      doc.strokeColor('#000000').lineWidth(0.9).rect(margin, curY, tableWidth, periodH).stroke();
+      doc.font(fontBold).fontSize(10.5).fillColor('#000000');
+      doc.text(periodHeaderText, margin, curY + 5.5, {
+        width: tableWidth,
+        align: 'center',
+        lineBreak: false
+      });
+      curY += periodH;
+
+      // Row 2: Column Headers (Light Steel Blue #B8CCE4)
+      doc.rect(margin, curY, tableWidth, colHeaderH).fillColor(headerBlue).fill();
+      doc.strokeColor('#000000').lineWidth(0.8).rect(margin, curY, tableWidth, colHeaderH).stroke();
+      doc.moveTo(xSupplier, curY).lineTo(xSupplier, curY + colHeaderH).stroke();
+      doc.moveTo(xTotal, curY).lineTo(xTotal, curY + colHeaderH).stroke();
+
+      const headerTextY = curY + 5.5;
+      doc.font(fontBold).fontSize(10).fillColor('#000000');
+      doc.text('NO', xNo, headerTextY, { width: colNoW, align: 'center', lineBreak: false });
+      doc.text('NAMA SUPPLIER', xSupplier, headerTextY, {
+        width: colSupplierW,
+        align: 'center',
+        lineBreak: false
+      });
+      doc.text('TOTAL HUTANG', xTotal, headerTextY, {
+        width: colTotalW,
+        align: 'center',
+        lineBreak: false
+      });
+
+      return curY + colHeaderH;
+    };
+
+    y = drawTableHeaders(y);
+
+    // Supplier Data Rows
+    supplierRows.forEach((sr, idx) => {
+      doc.font(fontRegular).fontSize(10);
+      const nameHeight = doc.heightOfString(sr.supplierName, { width: colSupplierW - 16 });
+      const rowH = Math.max(20, nameHeight + 8);
+
+      if (y + rowH > pageHeight - margin - 28) {
+        doc.addPage();
+        y = drawTableHeaders(margin);
+      }
+
+      doc.rect(margin, y, tableWidth, rowH).fillColor('#FFFFFF').fill();
+      doc.strokeColor('#000000').lineWidth(0.6).rect(margin, y, tableWidth, rowH).stroke();
+      doc.moveTo(xSupplier, y).lineTo(xSupplier, y + rowH).stroke();
+      doc.moveTo(xTotal, y).lineTo(xTotal, y + rowH).stroke();
+
+      const centerTextY = y + (rowH - 10) / 2;
+      const supplierTextY = y + Math.max(4, (rowH - nameHeight) / 2);
+
+      const noStr = String(idx + 1);
+      doc.font(fontRegular).fontSize(10).fillColor('#000000');
+      doc.text(noStr, xNo, centerTextY, { width: colNoW, align: 'center', lineBreak: false });
+      doc.text(sr.supplierName, xSupplier + 8, supplierTextY, {
+        width: colSupplierW - 16,
+        align: 'left'
+      });
+
+      drawMoneyCell(sr.totalHutang, xTotal, centerTextY, colTotalW, false);
+
+      y += rowH;
+    });
+
+    // Bottom Yellow TOTAL Row
+    const totalRowH = 23;
+    if (y + totalRowH > pageHeight - margin) {
+      doc.addPage();
+      y = drawTableHeaders(margin);
+    }
+
+    doc.rect(margin, y, tableWidth, totalRowH).fillColor(totalYellow).fill();
+    doc.strokeColor('#000000').lineWidth(0.9).rect(margin, y, tableWidth, totalRowH).stroke();
+    doc.moveTo(xTotal, y).lineTo(xTotal, y + totalRowH).stroke();
+
+    const totalTextY = y + 6;
+    doc.font(fontBold).fontSize(10.5).fillColor('#000000');
+    doc.text('TOTAL', xNo, totalTextY, {
+      width: colNoW + colSupplierW,
+      align: 'center',
+      lineBreak: false
+    });
+
+    drawMoneyCell(grandTotalHutang, xTotal, totalTextY, colTotalW, true);
+
+    doc.end();
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAll,
   getById,
@@ -764,7 +1525,11 @@ module.exports = {
   checkLimit,
   assignGroup,
   renameGroup,
-  deleteGroup
+  deleteGroup,
+  getHutang,
+  exportHutangExcel,
+  exportHutangPdf,
+  proxyHutangFile
 };
 
 

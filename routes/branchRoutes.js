@@ -14,12 +14,19 @@ const {
   checkLimit,
   assignGroup,
   renameGroup,
-  deleteGroup
+  deleteGroup,
+  getHutang,
+  exportHutangExcel,
+  exportHutangPdf,
+  proxyHutangFile
 } = require('../controllers/branchController');
 const { getLockedPeriods, toggleLock } = require('../controllers/lockedPeriodController');
 const { authenticate, authorize } = require('../middleware/auth');
 
-// All routes require authentication
+// Proxy secure hutang attachment file (protected by HMAC signature & expiry query params)
+router.get('/hutang/file', proxyHutangFile);
+
+// All other branch routes require authentication
 router.use(authenticate);
 
 // Group management routes (owner & co-owner)
@@ -38,6 +45,17 @@ router.get('/check-limit', checkLimit);
 
 // Get branch by ID
 router.get('/:id', getById);
+
+// Get branch hutang (unpaid POs from Bosgil Group)
+router.get('/:id/hutang', getHutang);
+
+// Export branch hutang to styled Excel (.xlsx) matching active filters
+router.get('/:id/hutang/export-excel', exportHutangExcel);
+router.post('/:id/hutang/export-excel', express.json({ limit: '10mb' }), exportHutangExcel);
+
+// Export branch hutang Recap by Supplier to PDF (.pdf) matching active filters
+router.get('/:id/hutang/export-pdf', exportHutangPdf);
+router.post('/:id/hutang/export-pdf', express.json({ limit: '10mb' }), exportHutangPdf);
 
 // Create branch (owner only)
 router.post('/', authorize('owner'), create);
