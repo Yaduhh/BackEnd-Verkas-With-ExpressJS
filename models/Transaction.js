@@ -220,7 +220,33 @@ class Transaction {
              END as pb1
     `;
     let joinDetails = '';
-    const params = [];
+    const joinDetailsParams = [];
+
+    // Validate Branch ID / Branch IDs upfront so subqueries are also branch-scoped
+    let validBranchParams = [];
+    let mainBranchClause = '';
+    let subBranchClause = '';
+
+    if (branchIds && Array.isArray(branchIds) && branchIds.length > 0) {
+      const validIds = branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
+      if (validIds.length === 0) {
+        throw new Error('Valid Branch IDs required');
+      }
+      const placeholders = validIds.map(() => '?').join(',');
+      validBranchParams = validIds;
+      mainBranchClause = `t.branch_id IN (${placeholders})`;
+      subBranchClause = `t_sub.branch_id IN (${placeholders})`;
+    } else if (branchId !== undefined && branchId !== null) {
+      const validBranchId = parseInt(branchId);
+      if (isNaN(validBranchId) || validBranchId <= 0) {
+        throw new Error(`Invalid Branch ID: ${branchId}`);
+      }
+      validBranchParams = [validBranchId];
+      mainBranchClause = 't.branch_id = ?';
+      subBranchClause = 't_sub.branch_id = ?';
+    } else {
+      throw new Error('Branch ID or branchIds is required for Transaction.findAll');
+    }
 
     const categoryName = (category && typeof category === 'string' && category.trim() !== '') ? category.trim() : null;
 
@@ -233,7 +259,7 @@ class Transaction {
              END as amount`;
 
       joinDetails += ` LEFT JOIN transaction_savings_details tsd ON t.id = tsd.transaction_id AND EXISTS (SELECT 1 FROM categories c2 WHERE c2.id = tsd.category_id AND (c2.name = ? OR c2.parent_id IN (SELECT id FROM categories WHERE name = ?)))`;
-      params.push(categoryName, categoryName);
+      joinDetailsParams.push(categoryName, categoryName);
     }
 
     if (mitraPiutangId !== null && mitraPiutangId !== undefined) {
@@ -254,21 +280,23 @@ class Transaction {
              END as paid_amount`;
 
       joinDetails += ` LEFT JOIN transaction_mitra_details tmd_filter ON t.id = tmd_filter.transaction_id AND tmd_filter.mitra_piutang_id = ?`;
-      params.push(validMitraId);
+      joinDetailsParams.push(validMitraId);
     }
 
     let joinFutureRefund = '';
+    const futureRefundParams = [];
     if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
       const parsedEnd = endDate.trim().split(' ')[0].split('T')[0];
       joinFutureRefund = `
         LEFT JOIN (
-          SELECT transaction_id, SUM(amount) as total_future_refund 
-          FROM transaction_refunds 
-          WHERE refund_date > ? 
-          GROUP BY transaction_id
+          SELECT tref.transaction_id, SUM(tref.amount) as total_future_refund 
+          FROM transaction_refunds tref
+          JOIN transactions t_sub ON t_sub.id = tref.transaction_id
+          WHERE tref.refund_date > ? AND ${subBranchClause}
+          GROUP BY tref.transaction_id
         ) t_future_ref ON t.id = t_future_ref.transaction_id
       `;
-      params.push(parsedEnd);
+      futureRefundParams.push(parsedEnd, ...validBranchParams);
     } else {
       joinFutureRefund = `
         LEFT JOIN (
@@ -276,6 +304,15 @@ class Transaction {
         ) t_future_ref ON 1=0
       `;
     }
+
+    const params = [
+      ...validBranchParams, // tid_agg
+      ...validBranchParams, // tr_sum
+      ...validBranchParams, // t_ref
+      ...joinDetailsParams, // joinDetails
+      ...futureRefundParams, // joinFutureRefund
+      ...validBranchParams  // main WHERE branch filter
+    ];
 
     let sql = `
       ${selectFields}
@@ -297,46 +334,32 @@ class Transaction {
                    ROUND(SUM(CASE WHEN pm.is_taxable = 1 THEN (CASE WHEN tid.amount_app > 0 THEN tid.amount_app ELSE tid.amount_cashier END) ELSE 0 END) * 10 / 110)
                END as calculated_pb1
         FROM transaction_income_details tid
+        JOIN transactions t_sub ON t_sub.id = tid.transaction_id
         LEFT JOIN bank_accounts ba_sub ON tid.bank_account_id = ba_sub.id
         LEFT JOIN payment_methods pm ON tid.payment_method_id = pm.id
+        WHERE ${subBranchClause}
         GROUP BY tid.transaction_id
       ) tid_agg ON t.id = tid_agg.transaction_id
       LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id
       LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
       LEFT JOIN (
-        SELECT transaction_id, SUM(amount) as total_repayment 
-        FROM transaction_repayments 
-        GROUP BY transaction_id
+        SELECT tr.transaction_id, SUM(tr.amount) as total_repayment 
+        FROM transaction_repayments tr
+        JOIN transactions t_sub ON t_sub.id = tr.transaction_id
+        WHERE ${subBranchClause}
+        GROUP BY tr.transaction_id
       ) tr_sum ON t.id = tr_sum.transaction_id
       LEFT JOIN (
-        SELECT transaction_id, SUM(amount) as total_refund 
-        FROM transaction_refunds 
-        GROUP BY transaction_id
+        SELECT tref.transaction_id, SUM(tref.amount) as total_refund 
+        FROM transaction_refunds tref
+        JOIN transactions t_sub ON t_sub.id = tref.transaction_id
+        WHERE ${subBranchClause}
+        GROUP BY tref.transaction_id
       ) t_ref ON t.id = t_ref.transaction_id
       ${joinDetails}
       ${joinFutureRefund}
-      WHERE 1=1
+      WHERE 1=1 AND ${mainBranchClause}
     `;
-
-    // Branch ID or Branch IDs filter for data isolation
-    if (branchIds && Array.isArray(branchIds) && branchIds.length > 0) {
-      const validIds = branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
-      if (validIds.length === 0) {
-        throw new Error('Valid Branch IDs required');
-      }
-      const placeholders = validIds.map(() => '?').join(',');
-      sql += ` AND t.branch_id IN (${placeholders})`;
-      params.push(...validIds);
-    } else if (branchId !== undefined && branchId !== null) {
-      const validBranchId = parseInt(branchId);
-      if (isNaN(validBranchId) || validBranchId <= 0) {
-        throw new Error(`Invalid Branch ID: ${branchId}`);
-      }
-      sql += ' AND t.branch_id = ?';
-      params.push(validBranchId);
-    } else {
-      throw new Error('Branch ID or branchIds is required for Transaction.findAll');
-    }
 
     if (userId !== undefined && userId !== null) {
       const validUserId = parseInt(userId);
@@ -1861,6 +1884,118 @@ class Transaction {
       total_pb1_paid: totalPb1Paid,
       saldo_pb1: fallbackSaldoPb1
     };
+  }
+
+  // Get aggregated balance and transaction count per Kas Simpanan subcategory in a single query
+  static async getSavingsSummary({ branchId, startDate, endDate } = {}) {
+    const validBranchId = parseInt(branchId);
+    if (isNaN(validBranchId) || validBranchId <= 0) {
+      throw new Error(`Invalid Branch ID: ${branchId}`);
+    }
+
+    let dateClause = '';
+    const dateParams = [];
+    if (startDate && typeof startDate === 'string' && startDate.trim() !== '') {
+      const parsedStart = startDate.trim().split(' ')[0].split('T')[0];
+      dateClause += ' AND t.transaction_date >= ?';
+      dateParams.push(`${parsedStart} 00:00:00`);
+    }
+    if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
+      const parsedEnd = endDate.trim().split(' ')[0].split('T')[0];
+      dateClause += ' AND t.transaction_date <= ?';
+      dateParams.push(`${parsedEnd} 23:59:59`);
+    }
+
+    const sql = `
+      SELECT
+        matched.sub_category_id AS category_id,
+        COUNT(*) AS tx_count,
+        COALESCE(SUM(CASE WHEN matched.is_umum = 1 AND matched.type = 'expense' THEN ABS(matched.eff_amount) ELSE 0 END), 0) AS total_allocation,
+        COALESCE(SUM(CASE WHEN matched.type = 'income' THEN ABS(matched.eff_amount) ELSE 0 END), 0) AS total_income,
+        COALESCE(SUM(CASE WHEN (matched.is_umum = 0 OR matched.is_umum IS NULL) AND matched.type = 'expense' THEN ABS(matched.eff_amount) ELSE 0 END), 0) AS total_spending
+      FROM (
+        SELECT
+          sub_c.id AS sub_category_id,
+          t.id AS transaction_id,
+          t.type,
+          t.is_umum,
+          tsd.amount AS eff_amount
+        FROM transactions t
+        JOIN transaction_savings_details tsd ON tsd.transaction_id = t.id
+        JOIN categories tsd_cat ON tsd_cat.id = tsd.category_id
+        JOIN categories sub_c ON (
+          sub_c.parent_id IS NOT NULL
+          AND sub_c.status_deleted = false
+          AND (sub_c.branch_id = ? OR sub_c.branch_id IS NULL)
+          AND (
+            tsd_cat.id = sub_c.id
+            OR tsd_cat.name = sub_c.name
+            OR tsd_cat.parent_id = sub_c.id
+          )
+        )
+        WHERE t.branch_id = ?
+          AND t.status_deleted = false
+          AND (t.is_draft = false OR t.is_draft IS NULL)
+          ${dateClause}
+
+        UNION ALL
+
+        SELECT
+          sub_c.id AS sub_category_id,
+          t.id AS transaction_id,
+          t.type,
+          t.is_umum,
+          t.amount AS eff_amount
+        FROM transactions t
+        JOIN categories c ON c.id = t.category_id
+        JOIN categories sub_c ON (
+          sub_c.parent_id IS NOT NULL
+          AND sub_c.status_deleted = false
+          AND (sub_c.branch_id = ? OR sub_c.branch_id IS NULL)
+          AND (
+            c.id = sub_c.id
+            OR c.name = sub_c.name
+            OR c.parent_id = sub_c.id
+          )
+        )
+        WHERE t.branch_id = ?
+          AND t.status_deleted = false
+          AND (t.is_draft = false OR t.is_draft IS NULL)
+          ${dateClause}
+          AND NOT EXISTS (
+            SELECT 1
+            FROM transaction_savings_details tsd2
+            JOIN categories c2 ON c2.id = tsd2.category_id
+            WHERE tsd2.transaction_id = t.id
+              AND (c2.id = sub_c.id OR c2.name = sub_c.name OR c2.parent_id = sub_c.id)
+          )
+      ) AS matched
+      GROUP BY matched.sub_category_id
+    `;
+
+    const params = [
+      validBranchId,
+      validBranchId,
+      ...dateParams,
+      validBranchId,
+      validBranchId,
+      ...dateParams
+    ];
+
+    const rows = await query(sql, params);
+    return rows.map((r) => {
+      const totalAllocation = parseFloat(r.total_allocation || 0);
+      const totalIncome = parseFloat(r.total_income || 0);
+      const totalSpending = parseFloat(r.total_spending || 0);
+      return {
+        category_id: Number(r.category_id),
+        tx_count: Number(r.tx_count || 0),
+        total_allocation: totalAllocation,
+        total_income: totalIncome,
+        total_spending: totalSpending,
+        balance: totalAllocation + totalIncome - totalSpending
+      };
+    });
   }
 
   static async adjustSavingsAllocation(conn, categoryId, bankAccountId, type, amount, multiplier = 1) {

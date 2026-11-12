@@ -1689,6 +1689,52 @@ const getSummary = async (req, res, next) => {
   }
 };
 
+// Get aggregated Kas Simpanan summary per subcategory (single lightweight query)
+const getSavingsSummary = async (req, res, next) => {
+  try {
+    const { start_date, end_date } = req.query;
+    const branchId = req.branchId || req.headers['x-branch-id'];
+
+    if (!branchId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Branch ID is required. Please provide X-Branch-Id header.'
+      });
+    }
+
+    const validBranchId = parseInt(branchId);
+    if (isNaN(validBranchId) || validBranchId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid Branch ID. Please provide a valid X-Branch-Id header.'
+      });
+    }
+
+    const Branch = require('../models/Branch');
+    const hasAccess = await Branch.userHasAccess(req.userId, validBranchId, req.user.role);
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    const data = await Transaction.getSavingsSummary({
+      branchId: validBranchId,
+      startDate: start_date || undefined,
+      endDate: end_date || undefined
+    });
+
+    res.json({
+      success: true,
+      message: 'Ringkasan kas simpanan berhasil dimuat',
+      data
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const createRepayment = async (req, res, next) => {
   const { transaction: dbTransaction, query } = require('../config/database');
   try {
@@ -3139,6 +3185,7 @@ const parsePosFile = async (req, res, next) => {
 module.exports = {
   getAll,
   getSummary,
+  getSavingsSummary,
   getById,
   create,
   update,

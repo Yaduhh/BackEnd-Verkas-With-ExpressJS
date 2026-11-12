@@ -19,6 +19,7 @@ const {
   rejectDelete,
   getEditRequests,
   getSummary,
+  getSavingsSummary,
   getHistory,
   createRepayment,
   updateRepayment,
@@ -58,6 +59,9 @@ router.get('/', getAll);
 
 // Get summary
 router.get('/summary', getSummary);
+
+// Get aggregated Kas Simpanan summary per subcategory
+router.get('/savings-summary', getSavingsSummary);
 
 // Get edit requests
 router.get('/edit-requests', getEditRequests);

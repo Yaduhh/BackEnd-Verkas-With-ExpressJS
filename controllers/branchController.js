@@ -2,6 +2,7 @@ const Branch = require('../models/Branch');
 const User = require('../models/User');
 const SalesChannel = require('../models/SalesChannel');
 const axios = require('axios');
+const zlib = require('zlib');
 
 // Get all branches user has access to
 const getAll = async (req, res, next) => {
@@ -790,59 +791,114 @@ const proxyHutangFile = async (req, res, next) => {
   }
 };
 
+const hutangMicroCache = new Map();
+const hutangInFlight = new Map();
+const HUTANG_MICRO_TTL_MS = 4000;
+
+const sendPossiblyGzippedJson = (req, res, payloadObj, preserializedBuf = null) => {
+  const acceptEncoding = String(req.headers['accept-encoding'] || '');
+  const jsonBuf = preserializedBuf || Buffer.from(JSON.stringify(payloadObj), 'utf8');
+  if (acceptEncoding.includes('gzip') && jsonBuf.length > 1024) {
+    return zlib.gzip(jsonBuf, { level: zlib.constants.Z_BEST_SPEED }, (err, compressed) => {
+      if (err) return res.json(payloadObj);
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Vary', 'Accept-Encoding');
+      return res.send(compressed);
+    });
+  }
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  return res.send(jsonBuf);
+};
+
 // Get unpaid Purchasing Orders from Bosgil Group for this branch (Daftar Hutang)
 const getHutang = async (req, res, next) => {
   try {
     const branchId = parseInt(req.params.id, 10);
-    const { search, start_date, end_date, page = 1, limit = 5000 } = req.query;
+    const { search, start_date, end_date, page = 1, limit = 5000, lite, po_id, refresh } = req.query;
+    const isForceRefresh = refresh === '1' || refresh === 'true';
+    const isLite = lite === '1' || lite === 'true';
+    const cacheKey = `${branchId}|${search || ''}|${start_date || ''}|${end_date || ''}|${page}|${limit}|${isLite ? 1 : 0}|${po_id || ''}`;
 
-    const bosgilBaseUrl = (process.env.BOSGIL_API_BASE_URL || 'http://localhost:3001').replace(/\/+$/, '');
-    const response = await axios.get(`${bosgilBaseUrl}/api/verkas-integration/unpaid-pos`, {
-      params: {
-        branch_id: branchId,
-        search: search || '',
-        ...(start_date ? { start_date } : {}),
-        ...(end_date ? { end_date } : {}),
-        page: parseInt(page, 10) || 1,
-        limit: parseInt(limit, 10) || 5000
-      },
-      timeout: 15000
-    });
-
-    const payload = response.data;
-    if (payload && Array.isArray(payload.data)) {
-      payload.data = payload.data.map(po => {
-        const rewriteList = (list) => {
-          if (!Array.isArray(list)) return [];
-          return list.map(item => {
-            if (!item || !item.url) return item;
-            if (item.url.startsWith('/api/secure-file') || item.url.startsWith('/uploads')) {
-              return {
-                ...item,
-                url: `/api/branches/hutang/file?url=${encodeURIComponent(item.url)}`,
-                original_url: item.url
-              };
-            }
-            return item;
-          });
-        };
-
-        return {
-          ...po,
-          lampiran: rewriteList(po.lampiran),
-          lampiran_approval: rewriteList(po.lampiran_approval),
-          lampiran_bukti_potong: rewriteList(po.lampiran_bukti_potong),
-          riwayat_angsuran: Array.isArray(po.riwayat_angsuran)
-            ? po.riwayat_angsuran.map(t => ({
-                ...t,
-                lampiran_approval: rewriteList(t.lampiran_approval)
-              }))
-            : []
-        };
-      });
+    if (!isForceRefresh) {
+      const cached = hutangMicroCache.get(cacheKey);
+      if (cached && Date.now() - cached.ts < HUTANG_MICRO_TTL_MS) {
+        return sendPossiblyGzippedJson(req, res, cached.payload, cached.jsonBuf);
+      }
     }
 
-    return res.json(payload);
+    let fetchPromise = !isForceRefresh ? hutangInFlight.get(cacheKey) : null;
+    if (!fetchPromise) {
+      fetchPromise = (async () => {
+        const bosgilBaseUrl = (process.env.BOSGIL_API_BASE_URL || 'http://localhost:3001').replace(/\/+$/, '');
+        const response = await axios.get(`${bosgilBaseUrl}/api/verkas-integration/unpaid-pos`, {
+          params: {
+            branch_id: branchId,
+            search: search || '',
+            ...(start_date ? { start_date } : {}),
+            ...(end_date ? { end_date } : {}),
+            ...(isLite ? { lite: '1' } : {}),
+            ...(po_id ? { po_id } : {}),
+            page: parseInt(page, 10) || 1,
+            limit: parseInt(limit, 10) || 5000
+          },
+          timeout: 15000
+        });
+
+        const payload = response.data;
+        if (payload && Array.isArray(payload.data) && !isLite) {
+          const rewriteList = (list) => {
+            if (!Array.isArray(list) || list.length === 0) return [];
+            return list.map(item => {
+              if (!item || !item.url) return item;
+              if (item.url.startsWith('/api/secure-file') || item.url.startsWith('/uploads')) {
+                return {
+                  ...item,
+                  url: `/api/branches/hutang/file?url=${encodeURIComponent(item.url)}`
+                };
+              }
+              return item;
+            });
+          };
+
+          payload.data = payload.data.map(po => {
+            if (po.details_loaded === false) return po;
+            return {
+              ...po,
+              lampiran: rewriteList(po.lampiran),
+              lampiran_approval: rewriteList(po.lampiran_approval),
+              lampiran_bukti_potong: rewriteList(po.lampiran_bukti_potong),
+              riwayat_angsuran: Array.isArray(po.riwayat_angsuran) && po.riwayat_angsuran.length > 0
+                ? po.riwayat_angsuran.map(t => ({
+                    ...t,
+                    lampiran_approval: rewriteList(t.lampiran_approval)
+                  }))
+                : []
+            };
+          });
+        }
+
+        const jsonBuf = Buffer.from(JSON.stringify(payload), 'utf8');
+        hutangMicroCache.set(cacheKey, { ts: Date.now(), payload, jsonBuf });
+        if (hutangMicroCache.size > 40) {
+          const firstKey = hutangMicroCache.keys().next().value;
+          if (firstKey) hutangMicroCache.delete(firstKey);
+        }
+        return { payload, jsonBuf };
+      })();
+
+      if (!isForceRefresh) {
+        hutangInFlight.set(cacheKey, fetchPromise);
+      }
+      fetchPromise.finally(() => {
+        if (hutangInFlight.get(cacheKey) === fetchPromise) {
+          hutangInFlight.delete(cacheKey);
+        }
+      }).catch(() => {});
+    }
+
+    const { payload, jsonBuf } = await fetchPromise;
+    return sendPossiblyGzippedJson(req, res, payload, jsonBuf);
   } catch (error) {
     console.error('Error fetching branch hutang from Bosgil:', error?.message);
     return res.json({
