@@ -45,7 +45,7 @@ router.delete('/:id', softDelete);
 router.post('/:id/restore', restore);
 
 // Hard delete (permanent, admin only)
-router.delete('/:id/force', authorize('admin', 'owner'), hardDelete);
+router.delete('/:id/force', authorize('admin', 'kasir', 'owner'), hardDelete);
 
 module.exports = router;
 

@@ -187,34 +187,68 @@ const getAll = async (req, res, next) => {
       payment_method_category_id,
       include_income_details,
       include_product_items,
-      is_draft
+      is_draft,
+      group_name,
+      branch_ids
     } = req.query;
 
-    // Get branch_id from header or middleware
-    const branchId = req.branchId || req.headers['x-branch-id'];
-
-    if (!branchId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Branch ID is required. Please provide X-Branch-Id header.'
-      });
-    }
-
-    // JANGAN filter berdasarkan userId karena admin bisa input transaksi
-    // Hanya filter berdasarkan branchId untuk mengambil semua transaksi di branch tersebut
     // Ensure page and limit are valid integers
     const validPage = parseInt(page);
     const validLimit = parseInt(limit);
     const finalPage = (!isNaN(validPage) && validPage > 0) ? validPage : 1;
     const finalLimit = (!isNaN(validLimit) && validLimit > 0) ? validLimit : 20;
 
-    // Ensure branchId is valid integer
-    const validBranchId = parseInt(branchId);
-    if (isNaN(validBranchId)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid Branch ID. Please provide a valid X-Branch-Id header.'
-      });
+    let validBranchId;
+    let targetBranchIds = null;
+
+    if (group_name || branch_ids) {
+      const Branch = require('../models/Branch');
+      const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user.role);
+      const accessibleIds = accessibleBranches.map(b => b.id);
+      let targetBranches = [];
+
+      if (branch_ids) {
+        const ids = (typeof branch_ids === 'string' ? branch_ids.split(',') : branch_ids)
+          .map(id => parseInt(String(id).trim(), 10))
+          .filter(id => !isNaN(id) && accessibleIds.includes(id));
+        targetBranches = accessibleBranches.filter(b => ids.includes(b.id));
+      } else if (group_name && group_name !== 'Semua' && group_name !== 'ALL') {
+        targetBranches = accessibleBranches.filter(
+          b => b.group_name && b.group_name.toLowerCase() === String(group_name).toLowerCase()
+        );
+      } else {
+        targetBranches = accessibleBranches;
+      }
+
+      targetBranchIds = targetBranches.map(b => b.id);
+      if (targetBranchIds.length === 0) {
+        return res.json({
+          success: true,
+          data: {
+            transactions: [],
+            pagination: { page: finalPage, limit: finalLimit, total: 0 }
+          }
+        });
+      }
+    } else {
+      // Get branch_id from header or middleware
+      const branchId = req.branchId || req.headers['x-branch-id'];
+
+      if (!branchId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Branch ID is required. Please provide X-Branch-Id header.'
+        });
+      }
+
+      // Ensure branchId is valid integer
+      validBranchId = parseInt(branchId);
+      if (isNaN(validBranchId)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid Branch ID. Please provide a valid X-Branch-Id header.'
+        });
+      }
     }
 
     const isDraftFilter = is_draft !== undefined ? (is_draft === 'true' || is_draft === true) : undefined;
@@ -223,6 +257,7 @@ const getAll = async (req, res, next) => {
     const transactions = await Transaction.findAll({
       userId: filterUserId,
       branchId: validBranchId,
+      branchIds: targetBranchIds,
       type: type || undefined,
       category: category || undefined,
       startDate: start_date || undefined,
@@ -247,7 +282,8 @@ const getAll = async (req, res, next) => {
 
     const total = await Transaction.count({
       userId: filterUserId,
-      branchId: parseInt(branchId),
+      branchId: validBranchId,
+      branchIds: targetBranchIds,
       type,
       category,
       startDate: start_date,
@@ -342,7 +378,7 @@ const create = async (req, res, next) => {
       });
     }
 
-    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_savings, mitra_details, savings_details, income_details, sales_channel_details, product_items, is_pb1_payment, is_draft, total_customer, tc, apc } = req.body;
+    const { type, category, amount, pb1, note, date, lampiran, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_savings, is_petty_cash, mitra_details, savings_details, petty_cash_details, income_details, sales_channel_details, product_items, is_pb1_payment, is_draft, total_customer, tc, apc } = req.body;
 
     const isDraft = is_draft === true || is_draft === 'true' || is_draft === 1;
 
@@ -504,12 +540,14 @@ const create = async (req, res, next) => {
       isUmum: (is_pb1_payment === true || is_pb1_payment === 'true' || is_pb1_payment === 1) ? false : isUmum,
       isDebtPayment,
       isSavings: is_savings === true || is_savings === 'true' || is_savings === 1,
+      isPettyCash: is_petty_cash === true || is_petty_cash === 'true' || is_petty_cash === 1,
       paidAmount,
       remainingDebt,
       mitraPiutangId,
       bankAccountId: bank_account_id ? parseInt(bank_account_id) : null,
       mitraDetails: mitra_details || [],
       savingsDetails: savings_details || [],
+      pettyCashDetails: petty_cash_details || [],
       incomeDetails: income_details || [],
       salesChannelDetails: sales_channel_details || [],
       productItems: product_items || [],
@@ -597,7 +635,7 @@ const update = async (req, res, next) => {
     }
 
     const { id } = req.params;
-    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, mitra_details, savings_details, income_details, sales_channel_details, product_items, is_pb1_payment, is_draft, total_customer, tc, apc } = req.body;
+    const { type, category, amount, pb1, note, date, transaction_date, lampiran, reason, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_petty_cash, mitra_details, savings_details, petty_cash_details, income_details, sales_channel_details, product_items, is_pb1_payment, is_draft, total_customer, tc, apc } = req.body;
 
     // Check if transaction exists and belongs to user
     const existing = await Transaction.findById(id);
@@ -630,8 +668,8 @@ const update = async (req, res, next) => {
       ? (is_draft === true || is_draft === 'true' || is_draft === 1) 
       : Boolean(existing.is_draft);
 
-    // 1. Approval requirement for Admin (skipped if editing an unpublished draft)
-    if (!existing.is_draft && req.user.role === 'admin' && branchData.require_edit_approval === 1) {
+    // 1. Approval requirement for Admin/Kasir (skipped if editing an unpublished draft)
+    if (!existing.is_draft && (req.user.role === 'admin' || req.user.role === 'kasir') && branchData.require_edit_approval === 1) {
       if (existing.edit_accepted !== 2) {
         return res.status(403).json({
           success: false,
@@ -745,6 +783,14 @@ const update = async (req, res, next) => {
 
     if (savings_details !== undefined) {
       updateData.savingsDetails = savings_details;
+    }
+
+    if (is_petty_cash !== undefined) {
+      updateData.isPettyCash = is_petty_cash;
+    }
+
+    if (petty_cash_details !== undefined) {
+      updateData.pettyCashDetails = petty_cash_details;
     }
 
     if (income_details !== undefined) {
@@ -1003,8 +1049,8 @@ const softDelete = async (req, res, next) => {
       });
     }
 
-    // Check if delete approval is required for Admin role (skipped for drafts)
-    if (!existing.is_draft && req.user.role === 'admin' && branchData.require_delete_approval === 1) {
+    // Check if delete approval is required for Admin/Kasir role (skipped for drafts)
+    if (!existing.is_draft && (req.user.role === 'admin' || req.user.role === 'kasir') && branchData.require_delete_approval === 1) {
       if (existing.delete_accepted !== 2) {
         return res.status(403).json({
           success: false,
@@ -1198,8 +1244,8 @@ const requestEdit = async (req, res, next) => {
     const { id } = req.params;
     const { reason } = req.body;
 
-    // Only admin can request edit
-    if (req.user.role !== 'admin') {
+    // Only admin/kasir can request edit
+    if (req.user.role !== 'admin' && req.user.role !== 'kasir') {
       return res.status(403).json({
         success: false,
         message: 'Hanya admin yang dapat mengajukan permintaan edit'
@@ -1554,7 +1600,7 @@ const getEditRequests = async (req, res, next) => {
       if (req.user.role === 'owner' || req.user.role === 'co-owner') {
         // Owner and co-owner: get from all their accessible branches (pass null to getEditRequests)
         branchId = null;
-      } else if (req.user.role === 'admin') {
+      } else if (req.user.role === 'admin' || req.user.role === 'kasir') {
         // Admin: get from their assigned branch(es)
         const Branch = require('../models/Branch');
         const adminBranch = await Branch.findByPIC(req.userId);
@@ -2049,8 +2095,11 @@ const deleteRepayment = async (req, res, next) => {
         await conn.execute(`UPDATE transactions SET status_deleted = 1 WHERE id = ?`, [repayment.income_transaction_id]);
       }
 
-      // 3. Delete repayment record
-      await conn.execute(`DELETE FROM transaction_repayments WHERE id = ?`, [repaymentId]);
+      // 3. Soft delete repayment record
+      await conn.execute(
+        `UPDATE transaction_repayments SET deleted_at = NOW(), deleted_by = ? WHERE id = ?`,
+        [req.userId, repaymentId]
+      );
     });
 
     await LogService.logActivity({
@@ -2091,7 +2140,7 @@ const requestDelete = async (req, res, next) => {
     const { id } = req.params;
     const { reason } = req.body;
 
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'admin' && req.user.role !== 'kasir') {
       return res.status(403).json({
         success: false,
         message: 'Hanya admin yang dapat mengajukan permintaan hapus'
@@ -3182,6 +3231,201 @@ const parsePosFile = async (req, res, next) => {
   }
 };
 
+const exportExpenseReportExcel = async (req, res, next) => {
+  try {
+    const ExcelJS = require('exceljs');
+    const {
+      branchName = 'Cabang',
+      periodLabel = '',
+      isGroupMode = false,
+      filters = {},
+      transactions = [],
+      categories = []
+    } = req.body || {};
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'VerKas';
+    workbook.created = new Date();
+
+    // --- SHEET 1: Rincian Transaksi ---
+    const wsTrx = workbook.addWorksheet('Rincian Transaksi');
+    const colCount = isGroupMode ? 9 : 8;
+
+    wsTrx.mergeCells(1, 1, 1, colCount);
+    const titleCell = wsTrx.getCell(1, 1);
+    titleCell.value = 'LAPORAN PENGELUARAN';
+    titleCell.font = { bold: true, size: 14, color: { argb: 'FF1E293B' } };
+
+    wsTrx.mergeCells(2, 1, 2, colCount);
+    wsTrx.getCell(2, 1).value = `Buku Kas / Grup: ${branchName}  |  Periode: ${periodLabel || '-'}`;
+    wsTrx.getCell(2, 1).font = { size: 10, color: { argb: 'FF475569' } };
+
+    const activeFilterParts = [];
+    if (filters.category) activeFilterParts.push(`Kategori: ${filters.category}`);
+    if (filters.product) activeFilterParts.push(`Rincian: ${filters.product}`);
+    if (filters.searchQuery) activeFilterParts.push(`Cari: "${filters.searchQuery}"`);
+    activeFilterParts.push(`Urutan: ${filters.sortOrder === 'terlama' ? 'Terlama' : 'Terbaru'}`);
+
+    wsTrx.mergeCells(3, 1, 3, colCount);
+    wsTrx.getCell(3, 1).value = `Filter Aktif: ${activeFilterParts.join('  •  ')}`;
+    wsTrx.getCell(3, 1).font = { size: 10, italic: true, color: { argb: 'FF64748B' } };
+
+    const headers = isGroupMode
+      ? ['No', 'Tanggal', 'Waktu', 'Buku Kas', 'Kategori', 'Rincian Item', 'Catatan', 'Pembuat', 'Nominal (Rp)']
+      : ['No', 'Tanggal', 'Waktu', 'Kategori', 'Rincian Item', 'Catatan', 'Pembuat', 'Nominal (Rp)'];
+
+    const headerRow = wsTrx.getRow(5);
+    headers.forEach((h, idx) => {
+      const cell = headerRow.getCell(idx + 1);
+      cell.value = h;
+      cell.font = { bold: true, size: 10, color: { argb: 'FFFFFFFF' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F46E5' } };
+      cell.alignment = { vertical: 'middle', horizontal: idx === headers.length - 1 ? 'right' : (idx === 0 ? 'center' : 'left') };
+      cell.border = {
+        top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+        bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } }
+      };
+    });
+    headerRow.height = 24;
+
+    const getRpNumFmt = (val) => {
+      const hasDecimals = Math.abs(Number(val || 0) % 1) > 0.0001;
+      return hasDecimals
+        ? '_("Rp"* #,##0.00_);_("Rp"* -#,##0.00_);_("Rp"* "-"??_);_(@_)'
+        : '_("Rp"* #,##0_);_("Rp"* -#,##0_);_("Rp"* "-"??_);_(@_)';
+    };
+
+    let totalNominal = 0;
+    transactions.forEach((tx, idx) => {
+      const dt = tx.transaction_date ? new Date(tx.transaction_date) : null;
+      const dateStr = dt && !isNaN(dt.getTime())
+        ? dt.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' })
+        : '-';
+      const timeStr = dt && !isNaN(dt.getTime())
+        ? `${String(dt.getHours()).padStart(2, '0')}.${String(dt.getMinutes()).padStart(2, '0')} WIB`
+        : '-';
+      const amountNum = Number(tx.amount || 0);
+      totalNominal += amountNum;
+
+      const rowValues = isGroupMode
+        ? [idx + 1, dateStr, timeStr, tx.branch_name || '-', tx.category_name || 'Tanpa Kategori', tx.product_detail || '-', tx.note || '-', tx.user_name || '-', amountNum]
+        : [idx + 1, dateStr, timeStr, tx.category_name || 'Tanpa Kategori', tx.product_detail || '-', tx.note || '-', tx.user_name || '-', amountNum];
+
+      const row = wsTrx.getRow(6 + idx);
+      rowValues.forEach((val, cIdx) => {
+        const cell = row.getCell(cIdx + 1);
+        cell.value = val;
+        cell.font = { size: 10, color: { argb: 'FF1E293B' } };
+        if (cIdx === 0) cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        else if (cIdx === rowValues.length - 1) {
+          cell.alignment = { vertical: 'middle' };
+          cell.numFmt = getRpNumFmt(amountNum);
+          cell.font = { size: 10, bold: true, color: { argb: 'FFBE123C' } };
+        } else {
+          cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+        }
+        cell.border = { bottom: { style: 'thin', color: { argb: 'FFF1F5F9' } } };
+      });
+    });
+
+    const totalRowIdx = 6 + transactions.length;
+    const totalRow = wsTrx.getRow(totalRowIdx);
+    wsTrx.mergeCells(totalRowIdx, 1, totalRowIdx, colCount - 1);
+    totalRow.getCell(1).value = `TOTAL PENGELUARAN (${transactions.length} Transaksi)`;
+    totalRow.getCell(1).font = { bold: true, size: 10, color: { argb: 'FF881337' } };
+    totalRow.getCell(1).alignment = { horizontal: 'right', vertical: 'middle' };
+    const totalValCell = totalRow.getCell(colCount);
+    totalValCell.value = totalNominal;
+    totalValCell.numFmt = getRpNumFmt(totalNominal);
+    totalValCell.font = { bold: true, size: 11, color: { argb: 'FF881337' } };
+    totalValCell.alignment = { vertical: 'middle' };
+    for (let c = 1; c <= colCount; c++) {
+      totalRow.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF1F2' } };
+      totalRow.getCell(c).border = {
+        top: { style: 'medium', color: { argb: 'FFFDA4AF' } },
+        bottom: { style: 'medium', color: { argb: 'FFFDA4AF' } }
+      };
+    }
+    totalRow.height = 24;
+
+    const widths = isGroupMode
+      ? [6, 15, 12, 18, 22, 28, 38, 18, 18]
+      : [6, 15, 12, 22, 28, 38, 18, 18];
+    widths.forEach((w, i) => {
+      wsTrx.getColumn(i + 1).width = w;
+    });
+
+    // --- SHEET 2: Ringkasan Kategori ---
+    const wsCat = workbook.addWorksheet('Ringkasan Kategori');
+    wsCat.mergeCells(1, 1, 1, 5);
+    wsCat.getCell(1, 1).value = 'RINGKASAN PENGELUARAN PER KATEGORI';
+    wsCat.getCell(1, 1).font = { bold: true, size: 13, color: { argb: 'FF1E293B' } };
+    wsCat.mergeCells(2, 1, 2, 5);
+    wsCat.getCell(2, 1).value = `${branchName}  |  Periode: ${periodLabel || '-'}`;
+    wsCat.getCell(2, 1).font = { size: 10, color: { argb: 'FF475569' } };
+
+    const catHeaders = ['No', 'Kategori / Rincian', 'Transaksi', 'Nominal (Rp)', 'Persentase (%)'];
+    const catHeaderRow = wsCat.getRow(4);
+    catHeaders.forEach((h, idx) => {
+      const cell = catHeaderRow.getCell(idx + 1);
+      cell.value = h;
+      cell.font = { bold: true, size: 10, color: { argb: 'FFFFFFFF' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFBE123C' } };
+      cell.alignment = { vertical: 'middle', horizontal: idx >= 3 ? 'right' : (idx === 0 || idx === 2 ? 'center' : 'left') };
+    });
+    catHeaderRow.height = 22;
+
+    let rIdx = 5;
+    categories.forEach((cat, idx) => {
+      const row = wsCat.getRow(rIdx++);
+      row.getCell(1).value = idx + 1;
+      row.getCell(1).alignment = { horizontal: 'center' };
+      row.getCell(2).value = cat.categoryName || '-';
+      row.getCell(3).value = `${cat.count || 0} Trx`;
+      row.getCell(3).alignment = { horizontal: 'center' };
+      row.getCell(4).value = Number(cat.total || 0);
+      row.getCell(4).numFmt = getRpNumFmt(cat.total);
+      row.getCell(4).alignment = { vertical: 'middle' };
+      row.getCell(5).value = `${Number(cat.percentage || 0).toFixed(1)}%`;
+      row.getCell(5).alignment = { horizontal: 'right' };
+      for (let c = 1; c <= 5; c++) {
+        row.getCell(c).font = { bold: true, size: 10, color: { argb: 'FF1E293B' } };
+        row.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FAFC' } };
+      }
+
+      (cat.items || []).forEach((sub) => {
+        const subRow = wsCat.getRow(rIdx++);
+        subRow.getCell(1).value = '•';
+        subRow.getCell(1).alignment = { horizontal: 'center' };
+        subRow.getCell(2).value = `   ↳ ${sub.productName || '-'}`;
+        subRow.getCell(3).value = `${sub.count || 0} Trx`;
+        subRow.getCell(3).alignment = { horizontal: 'center' };
+        subRow.getCell(4).value = Number(sub.total || 0);
+        subRow.getCell(4).numFmt = getRpNumFmt(sub.total);
+        subRow.getCell(4).alignment = { vertical: 'middle' };
+        subRow.getCell(5).value = `${Number(sub.percentageOfCategory || 0).toFixed(1)}%`;
+        subRow.getCell(5).alignment = { horizontal: 'right' };
+        for (let c = 1; c <= 5; c++) {
+          subRow.getCell(c).font = { size: 9.5, color: { argb: 'FF475569' } };
+        }
+      });
+    });
+
+    [6, 42, 14, 20, 16].forEach((w, i) => {
+      wsCat.getColumn(i + 1).width = w;
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const safeName = String(branchName || 'Laporan').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safePeriod = String(periodLabel || 'Periode').replace(/[^a-zA-Z0-9_-]/g, '_');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="Laporan_Pengeluaran_${safeName}_${safePeriod}.xlsx"`);
+    res.send(Buffer.from(buffer));
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAll,
   getSummary,
@@ -3206,7 +3450,8 @@ module.exports = {
   createRefund,
   updateRefund,
   deleteRefund,
-  parsePosFile
+  parsePosFile,
+  exportExpenseReportExcel
 };
 
 

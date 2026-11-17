@@ -7,6 +7,7 @@ router.use(authenticate);
 
 router.get('/', paymentMethodController.getAll);
 router.post('/', paymentMethodController.create);
+router.put('/reorder', paymentMethodController.reorder);
 router.put('/:id', paymentMethodController.update);
 router.delete('/:id', paymentMethodController.delete);
 

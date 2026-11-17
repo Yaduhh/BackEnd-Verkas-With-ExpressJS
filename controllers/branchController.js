@@ -149,10 +149,10 @@ const getById = async (req, res, next) => {
   }
 };
 
-// Get current branch (for admin, their assigned branch)
+// Get current branch (for admin/kasir, their assigned branch)
 const getCurrent = async (req, res, next) => {
   try {
-    if (req.user.role === 'admin') {
+    if (req.user.role === 'admin' || req.user.role === 'kasir') {
       const branch = await Branch.getAdminBranch(req.userId);
       if (!branch) {
         return res.status(404).json({
@@ -262,10 +262,10 @@ const create = async (req, res, next) => {
     if (picIds.length > 0) {
       for (const pid of picIds) {
         const pic = await User.findById(pid);
-        if (!pic || pic.role !== 'admin') {
+        if (!pic || (pic.role !== 'admin' && pic.role !== 'kasir')) {
           return res.status(400).json({
             success: false,
-            message: `User ${pid} must be an admin user`
+            message: `User ${pid} must be an admin or kasir user`
           });
         }
       }
@@ -368,10 +368,10 @@ const update = async (req, res, next) => {
     // Verify PIC if provided
     if (pic_id !== undefined && pic_id !== null) {
       const pic = await User.findById(pic_id);
-      if (!pic || pic.role !== 'admin') {
+      if (!pic || (pic.role !== 'admin' && pic.role !== 'kasir')) {
         return res.status(400).json({
           success: false,
-          message: 'PIC must be an admin user'
+          message: 'PIC must be an admin or kasir user'
         });
       }
     }

@@ -19,7 +19,7 @@ class Branch {
 
     // Get all PICs for this branch
     const pics = await query(
-      `SELECT u.id, u.name, u.email
+      `SELECT u.id, u.name, u.email, u.role
        FROM branch_pics bp
        INNER JOIN users u ON bp.user_id = u.id
        WHERE bp.branch_id = ? AND u.status_deleted = false
@@ -59,7 +59,7 @@ class Branch {
     // Get PICs for each branch
     for (const branch of branches) {
       const pics = await query(
-        `SELECT u.id, u.name, u.email
+        `SELECT u.id, u.name, u.email, u.role
          FROM branch_pics bp
          INNER JOIN users u ON bp.user_id = u.id
          WHERE bp.branch_id = ? AND u.status_deleted = false
@@ -129,7 +129,7 @@ class Branch {
     // Get PICs for each branch
     for (const branch of branches) {
       const pics = await query(
-        `SELECT u.id, u.name, u.email
+        `SELECT u.id, u.name, u.email, u.role
          FROM branch_pics bp
          INNER JOIN users u ON bp.user_id = u.id
          WHERE bp.branch_id = ? AND u.status_deleted = false
@@ -214,8 +214,8 @@ class Branch {
       );
 
       return uniqueBranches;
-    } else if (userRole === 'admin') {
-      // Admin: get all branches where they are PIC
+    } else if (userRole === 'admin' || userRole === 'kasir') {
+      // Admin / Kasir: get all branches where they are PIC
       return await this.findAllByPIC(userId);
     } else if (userRole === 'master') {
       // Master: get all branches (developer access)
@@ -291,12 +291,12 @@ class Branch {
     return await this.findById(id);
   }
 
-  // Assign PIC (admin) to branch (owner only) - supports multiple PICs
+  // Assign PIC (admin or kasir) to branch (owner only) - supports multiple PICs
   static async assignPIC(branchId, picId) {
-    // Verify picId is admin role
+    // Verify picId is admin or kasir role
     const pic = await User.findById(picId);
-    if (!pic || pic.role !== 'admin') {
-      throw new Error('PIC must be an admin user');
+    if (!pic || (pic.role !== 'admin' && pic.role !== 'kasir')) {
+      throw new Error('PIC must be an admin or kasir user');
     }
 
     // Check if already assigned
@@ -351,12 +351,12 @@ class Branch {
     // Remove all existing PICs
     await query('DELETE FROM branch_pics WHERE branch_id = ?', [branchId]);
 
-    // Verify all picIds are admin role
+    // Verify all picIds are admin or kasir role
     if (picIds && picIds.length > 0) {
       for (const picId of picIds) {
         const pic = await User.findById(picId);
-        if (!pic || pic.role !== 'admin') {
-          throw new Error(`User ${picId} must be an admin user`);
+        if (!pic || (pic.role !== 'admin' && pic.role !== 'kasir')) {
+          throw new Error(`User ${picId} must be an admin or kasir user`);
         }
       }
 

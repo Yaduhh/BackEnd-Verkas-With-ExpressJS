@@ -40,6 +40,16 @@ class Transaction {
     );
     transaction.savings_details = savingsDetails;
 
+    // Fetch petty cash top-up details
+    const pettyCashDetails = await query(
+      `SELECT pct.id, pct.petty_cash_id, pct.amount, pc.name as petty_cash_name
+       FROM petty_cash_transactions pct
+       JOIN petty_cashes pc ON pct.petty_cash_id = pc.id
+       WHERE pct.source_transaction_id = ? AND pct.status_deleted = 0`,
+      [id]
+    );
+    transaction.petty_cash_details = pettyCashDetails;
+
     // Fetch income details
     const incomeDetails = await query(
       `SELECT tid.*, pm.name as payment_method_name, pm.is_taxable as is_taxable, pm.is_taxable as payment_method_is_taxable, ba.name as bank_account_name, ba.type as bank_account_type
@@ -133,7 +143,7 @@ class Transaction {
        LEFT JOIN users u ON tr.user_id = u.id
        LEFT JOIN transactions t_inc ON tr.income_transaction_id = t_inc.id
        LEFT JOIN bank_accounts ba ON t_inc.bank_account_id = ba.id
-       WHERE tr.transaction_id = ?
+       WHERE tr.transaction_id = ? AND tr.deleted_at IS NULL
        ORDER BY tr.payment_date DESC, tr.created_at DESC`,
       [id]
     );
@@ -179,6 +189,9 @@ class Transaction {
     branchIds = null, // Optional array of branch IDs for multi-branch consolidation
     type,
     category,
+    categories = null,
+    search = null,
+    lampiranStatus = null,
     startDate,
     endDate,
     sort = 'terbaru',
@@ -186,6 +199,7 @@ class Transaction {
     onlyDeleted = false,
     page = 1,
     limit = 20,
+    offset: explicitOffset = null,
     excludeFolders = false,
     onlyFolders = false,
     isUmum = undefined,
@@ -340,13 +354,13 @@ class Transaction {
         WHERE ${subBranchClause}
         GROUP BY tid.transaction_id
       ) tid_agg ON t.id = tid_agg.transaction_id
-      LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id
+      LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id AND tr_notif.deleted_at IS NULL
       LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
       LEFT JOIN (
         SELECT tr.transaction_id, SUM(tr.amount) as total_repayment 
         FROM transaction_repayments tr
         JOIN transactions t_sub ON t_sub.id = tr.transaction_id
-        WHERE ${subBranchClause}
+        WHERE ${subBranchClause} AND tr.deleted_at IS NULL
         GROUP BY tr.transaction_id
       ) tr_sum ON t.id = tr_sum.transaction_id
       LEFT JOIN (
@@ -393,6 +407,45 @@ class Transaction {
         OR EXISTS (SELECT 1 FROM transaction_savings_details tsd JOIN categories c2 ON tsd.category_id = c2.id WHERE tsd.transaction_id = t.id AND (c2.name = ? OR c2.parent_id IN (SELECT id FROM categories WHERE name = ?)))
       )`;
       params.push(category.trim(), category.trim(), category.trim(), category.trim());
+    }
+
+    if (Array.isArray(categories) && categories.length > 0) {
+      const cleanCats = categories.map(c => String(c).trim()).filter(Boolean);
+      if (cleanCats.length > 0) {
+        const placeholders = cleanCats.map(() => '?').join(',');
+        sql += ` AND (
+          c.name IN (${placeholders})
+          OR c.parent_id IN (SELECT id FROM categories WHERE name IN (${placeholders}))
+          OR EXISTS (
+            SELECT 1 FROM transaction_savings_details tsd
+            JOIN categories c2 ON tsd.category_id = c2.id
+            WHERE tsd.transaction_id = t.id
+              AND (c2.name IN (${placeholders}) OR c2.parent_id IN (SELECT id FROM categories WHERE name IN (${placeholders})))
+          )
+        )`;
+        params.push(...cleanCats, ...cleanCats, ...cleanCats, ...cleanCats);
+      }
+    }
+
+    if (search && typeof search === 'string' && search.trim() !== '') {
+      const likeTerm = `%${search.trim()}%`;
+      sql += ` AND (
+        c.name LIKE ?
+        OR t.note LIKE ?
+        OR COALESCE(u.name, u.email) LIKE ?
+        OR b.name LIKE ?
+        OR b.code LIKE ?
+        OR COALESCE(ba.name, tid_agg.bank_account_names) LIKE ?
+      )`;
+      params.push(likeTerm, likeTerm, likeTerm, likeTerm, likeTerm, likeTerm);
+    }
+
+    if (lampiranStatus === 'Merah') {
+      sql += ` AND c.min_attachment > 0 AND tr_notif.transaction_id IS NULL AND (t.lampiran IS NULL OR t.lampiran = '' OR t.lampiran = '[]')`;
+    } else if (lampiranStatus === 'Kuning') {
+      sql += ` AND c.min_attachment > 0 AND tr_notif.transaction_id IS NULL AND t.lampiran IS NOT NULL AND t.lampiran != '' AND t.lampiran != '[]' AND (CASE WHEN JSON_VALID(t.lampiran) AND JSON_TYPE(t.lampiran) = 'ARRAY' THEN JSON_LENGTH(t.lampiran) ELSE 1 END) < c.min_attachment`;
+    } else if (lampiranStatus === 'Hijau') {
+      sql += ` AND c.min_attachment > 0 AND tr_notif.transaction_id IS NULL AND t.lampiran IS NOT NULL AND t.lampiran != '' AND t.lampiran != '[]' AND (CASE WHEN JSON_VALID(t.lampiran) AND JSON_TYPE(t.lampiran) = 'ARRAY' THEN JSON_LENGTH(t.lampiran) ELSE 1 END) >= c.min_attachment`;
     }
 
     if (startDate && typeof startDate === 'string' && startDate.trim() !== '') {
@@ -471,9 +524,10 @@ class Transaction {
     // Pagination - ensure limit and offset are valid integers
     const validLimit = parseInt(limit);
     const validPage = parseInt(page);
+    const parsedOffset = explicitOffset !== null && explicitOffset !== undefined ? parseInt(explicitOffset) : NaN;
     const finalLimit = (!isNaN(validLimit) && validLimit > 0) ? validLimit : 20;
     const finalPage = (!isNaN(validPage) && validPage > 0) ? validPage : 1;
-    const offset = (finalPage - 1) * finalLimit;
+    const offset = (!isNaN(parsedOffset) && parsedOffset >= 0) ? parsedOffset : (finalPage - 1) * finalLimit;
 
     // Use string interpolation for LIMIT/OFFSET since they're validated integers
     // This avoids issues with prepared statements and LIMIT/OFFSET in some MySQL versions
@@ -545,10 +599,258 @@ class Transaction {
     return transactions;
   }
 
+  // Fast 2-phase cursor-paginated ledger query (avoids full-table GROUP BY subqueries & deep OFFSET scans)
+  static async findLedgerPage({
+    branchIds = [],
+    type,
+    fundSource = null,
+    categories = null,
+    search = null,
+    lampiranStatus = null,
+    startDate,
+    endDate,
+    sort = 'terbaru',
+    limit = 100,
+    cursor = null
+  } = {}) {
+    const validIds = Array.isArray(branchIds)
+      ? branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0)
+      : [];
+    if (validIds.length === 0) {
+      return { transactions: [], hasMore: false, nextCursor: null };
+    }
+
+    const branchPlaceholders = validIds.map(() => '?').join(',');
+    const finalLimit = Math.min(500, Math.max(10, parseInt(limit) || 100));
+    const isAsc = sort === 'terlama';
+
+    // Phase 1: Lightweight ID + cursor query (no derived-table GROUP BY scans)
+    let idSql = `
+      SELECT t.id,
+             DATE_FORMAT(t.transaction_date, '%Y-%m-%d %H:%i:%s') as cursor_date,
+             DATE_FORMAT(t.created_at, '%Y-%m-%d %H:%i:%s') as cursor_created_at
+      FROM transactions t
+    `;
+    const idParams = [];
+
+    if (categories?.length || lampiranStatus || (search && search.trim())) {
+      idSql += ` LEFT JOIN categories c ON t.category_id = c.id`;
+    }
+    if (lampiranStatus) {
+      idSql += ` LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id AND tr_notif.deleted_at IS NULL`;
+    }
+    if (search && search.trim()) {
+      idSql += `
+        LEFT JOIN branches b ON t.branch_id = b.id
+        LEFT JOIN users u ON t.user_id = u.id
+        LEFT JOIN bank_accounts ba ON t.bank_account_id = ba.id
+      `;
+    }
+
+    idSql += ` WHERE t.branch_id IN (${branchPlaceholders}) AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)`;
+    idParams.push(...validIds);
+
+    if (fundSource === 'kas_berjalan') {
+      idSql += ` AND t.is_umum = true AND (t.is_savings = 0 OR t.is_savings IS NULL)`;
+    } else if (fundSource === 'kas_simpanan') {
+      idSql += ` AND (t.is_umum = false OR t.is_savings = 1 OR EXISTS (SELECT 1 FROM transaction_savings_details tsd_f WHERE tsd_f.transaction_id = t.id))`;
+    } else if (fundSource === 'kas_kecil') {
+      idSql += ` AND (t.is_petty_cash = 1 OR EXISTS (SELECT 1 FROM petty_cash_transactions pct_f WHERE pct_f.source_transaction_id = t.id))`;
+    }
+
+    if (type && typeof type === 'string' && type.trim() !== '') {
+      idSql += ' AND t.type = ?';
+      idParams.push(type.trim());
+    }
+
+    if (startDate && typeof startDate === 'string' && startDate.trim() !== '') {
+      idSql += ' AND t.transaction_date >= ?';
+      idParams.push(startDate.trim() + ' 00:00:00');
+    }
+
+    if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
+      idSql += ' AND t.transaction_date <= ?';
+      idParams.push(endDate.trim() + ' 23:59:59');
+    }
+
+    if (Array.isArray(categories) && categories.length > 0) {
+      const cleanCats = categories.map(c => String(c).trim()).filter(Boolean);
+      if (cleanCats.length > 0) {
+        const placeholders = cleanCats.map(() => '?').join(',');
+        idSql += ` AND (
+          c.name IN (${placeholders})
+          OR c.parent_id IN (SELECT id FROM categories WHERE name IN (${placeholders}))
+          OR EXISTS (
+            SELECT 1 FROM transaction_savings_details tsd
+            JOIN categories c2 ON tsd.category_id = c2.id
+            WHERE tsd.transaction_id = t.id
+              AND (c2.name IN (${placeholders}) OR c2.parent_id IN (SELECT id FROM categories WHERE name IN (${placeholders})))
+          )
+        )`;
+        idParams.push(...cleanCats, ...cleanCats, ...cleanCats, ...cleanCats);
+      }
+    }
+
+    if (search && typeof search === 'string' && search.trim() !== '') {
+      const likeTerm = `%${search.trim()}%`;
+      idSql += ` AND (
+        c.name LIKE ?
+        OR t.note LIKE ?
+        OR COALESCE(u.name, u.email) LIKE ?
+        OR b.name LIKE ?
+        OR b.code LIKE ?
+        OR ba.name LIKE ?
+        OR EXISTS (
+          SELECT 1 FROM transaction_income_details tid_s
+          JOIN bank_accounts ba_s ON tid_s.bank_account_id = ba_s.id
+          WHERE tid_s.transaction_id = t.id AND ba_s.name LIKE ?
+        )
+      )`;
+      idParams.push(likeTerm, likeTerm, likeTerm, likeTerm, likeTerm, likeTerm, likeTerm);
+    }
+
+    if (lampiranStatus === 'Merah') {
+      idSql += ` AND c.min_attachment > 0 AND tr_notif.transaction_id IS NULL AND (t.lampiran IS NULL OR t.lampiran = '' OR t.lampiran = '[]')`;
+    } else if (lampiranStatus === 'Kuning') {
+      idSql += ` AND c.min_attachment > 0 AND tr_notif.transaction_id IS NULL AND t.lampiran IS NOT NULL AND t.lampiran != '' AND t.lampiran != '[]' AND (CASE WHEN JSON_VALID(t.lampiran) AND JSON_TYPE(t.lampiran) = 'ARRAY' THEN JSON_LENGTH(t.lampiran) ELSE 1 END) < c.min_attachment`;
+    } else if (lampiranStatus === 'Hijau') {
+      idSql += ` AND c.min_attachment > 0 AND tr_notif.transaction_id IS NULL AND t.lampiran IS NOT NULL AND t.lampiran != '' AND t.lampiran != '[]' AND (CASE WHEN JSON_VALID(t.lampiran) AND JSON_TYPE(t.lampiran) = 'ARRAY' THEN JSON_LENGTH(t.lampiran) ELSE 1 END) >= c.min_attachment`;
+    }
+
+    if (cursor && cursor.date && cursor.created_at && cursor.id) {
+      const op = isAsc ? '>' : '<';
+      idSql += ` AND (t.transaction_date ${op} ? OR (t.transaction_date = ? AND (t.created_at ${op} ? OR (t.created_at = ? AND t.id ${op} ?))))`;
+      idParams.push(cursor.date, cursor.date, cursor.created_at, cursor.created_at, parseInt(cursor.id));
+    }
+
+    idSql += isAsc
+      ? ` ORDER BY t.transaction_date ASC, t.created_at ASC, t.id ASC`
+      : ` ORDER BY t.transaction_date DESC, t.created_at DESC, t.id DESC`;
+    idSql += ` LIMIT ${finalLimit + 1}`;
+
+    const idRows = await query(idSql, idParams);
+    const hasMore = idRows.length > finalLimit;
+    const pageIdRows = hasMore ? idRows.slice(0, finalLimit) : idRows;
+
+    if (pageIdRows.length === 0) {
+      return { transactions: [], hasMore: false, nextCursor: null };
+    }
+
+    const lastRow = pageIdRows[pageIdRows.length - 1];
+    const nextCursor = hasMore
+      ? { date: lastRow.cursor_date, created_at: lastRow.cursor_created_at, id: lastRow.id }
+      : null;
+
+    // Phase 2: Hydrate full details ONLY for the <= 100 matched IDs
+    const pageIds = pageIdRows.map(r => r.id);
+    const idPlaceholders = pageIds.map(() => '?').join(',');
+
+    let futureRefundJoin = `LEFT JOIN (SELECT NULL as transaction_id, 0 as total_future_refund) t_future_ref ON 1=0`;
+    const hydrateParams = [...pageIds, ...pageIds, ...pageIds, ...pageIds, ...pageIds];
+    if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
+      const parsedEnd = endDate.trim().split(' ')[0].split('T')[0];
+      futureRefundJoin = `
+        LEFT JOIN (
+          SELECT tref.transaction_id, SUM(tref.amount) as total_future_refund
+          FROM transaction_refunds tref
+          WHERE tref.transaction_id IN (${idPlaceholders}) AND tref.refund_date > ?
+          GROUP BY tref.transaction_id
+        ) t_future_ref ON t.id = t_future_ref.transaction_id
+      `;
+      hydrateParams.push(...pageIds, parsedEnd);
+    }
+    hydrateParams.push(...pageIds);
+
+    const hydrateSql = `
+      SELECT t.*, b.name as branch_name, b.code as branch_code,
+             c.name as category_name, c.min_attachment as category_min_attachment, COALESCE(u.name, u.email) as user_name,
+             mp.nama as mitra_piutang_nama,
+             COALESCE(ba.name, tid_agg.bank_account_names) as bank_account_name,
+             COALESCE(ba.type, tid_agg.bank_account_type) as bank_account_type,
+             tr_notif.transaction_id as parent_transaction_id,
+             t_parent.transaction_date as parent_transaction_date,
+             COALESCE(tr_sum.total_repayment, 0) as total_repayment,
+             COALESCE(t_ref.total_refund, 0) as total_refund,
+             COALESCE(t_future_ref.total_future_refund, 0) as future_refund,
+             tsd_agg.savings_names,
+             COALESCE(tsd_agg.total_savings_amount, 0) as total_savings_amount,
+             pct_agg.petty_cash_names,
+             (ABS(t.amount) + COALESCE(t_ref.total_refund, 0)) as original_amount,
+             (ABS(t.amount) + COALESCE(t_future_ref.total_future_refund, 0)) as net_amount,
+             CASE
+               WHEN t.type = 'income' THEN COALESCE(tid_agg.calculated_pb1, t.pb1, 0)
+               ELSE 0
+             END as pb1
+      FROM transactions t
+      LEFT JOIN branches b ON t.branch_id = b.id
+      LEFT JOIN categories c ON t.category_id = c.id
+      LEFT JOIN users u ON t.user_id = u.id
+      LEFT JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
+      LEFT JOIN bank_accounts ba ON t.bank_account_id = ba.id
+      LEFT JOIN (
+        SELECT tid.transaction_id,
+               GROUP_CONCAT(DISTINCT ba_sub.name SEPARATOR ', ') as bank_account_names,
+               MAX(ba_sub.type) as bank_account_type,
+               CASE
+                 WHEN COUNT(CASE WHEN pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL THEN 1 END) = 0 THEN NULL
+                 WHEN COUNT(tid.pb1_amount) > 0 THEN
+                   ROUND(SUM(CASE WHEN pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL THEN COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND((CASE WHEN tid.amount_app > 0 THEN tid.amount_app ELSE tid.amount_cashier END) * 10 / 110) ELSE 0 END) ELSE 0 END))
+                 ELSE
+                   ROUND(SUM(CASE WHEN pm.is_taxable = 1 THEN (CASE WHEN tid.amount_app > 0 THEN tid.amount_app ELSE tid.amount_cashier END) ELSE 0 END) * 10 / 110)
+               END as calculated_pb1
+        FROM transaction_income_details tid
+        LEFT JOIN bank_accounts ba_sub ON tid.bank_account_id = ba_sub.id
+        LEFT JOIN payment_methods pm ON tid.payment_method_id = pm.id
+        WHERE tid.transaction_id IN (${idPlaceholders})
+        GROUP BY tid.transaction_id
+      ) tid_agg ON t.id = tid_agg.transaction_id
+      LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id AND tr_notif.deleted_at IS NULL
+      LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
+      LEFT JOIN (
+        SELECT tr.transaction_id, SUM(tr.amount) as total_repayment
+        FROM transaction_repayments tr
+        WHERE tr.transaction_id IN (${idPlaceholders}) AND tr.deleted_at IS NULL
+        GROUP BY tr.transaction_id
+      ) tr_sum ON t.id = tr_sum.transaction_id
+      LEFT JOIN (
+        SELECT tref.transaction_id, SUM(tref.amount) as total_refund
+        FROM transaction_refunds tref
+        WHERE tref.transaction_id IN (${idPlaceholders})
+        GROUP BY tref.transaction_id
+      ) t_ref ON t.id = t_ref.transaction_id
+      LEFT JOIN (
+        SELECT tsd.transaction_id,
+               GROUP_CONCAT(DISTINCT c_sav.name ORDER BY c_sav.name SEPARATOR ', ') as savings_names,
+               SUM(tsd.amount) as total_savings_amount
+        FROM transaction_savings_details tsd
+        LEFT JOIN categories c_sav ON tsd.category_id = c_sav.id
+        WHERE tsd.transaction_id IN (${idPlaceholders})
+        GROUP BY tsd.transaction_id
+      ) tsd_agg ON t.id = tsd_agg.transaction_id
+      LEFT JOIN (
+        SELECT pct.source_transaction_id as transaction_id,
+               GROUP_CONCAT(DISTINCT pc.name ORDER BY pc.name SEPARATOR ', ') as petty_cash_names
+        FROM petty_cash_transactions pct
+        JOIN petty_cashes pc ON pct.petty_cash_id = pc.id
+        WHERE pct.source_transaction_id IN (${idPlaceholders})
+        GROUP BY pct.source_transaction_id
+      ) pct_agg ON t.id = pct_agg.transaction_id
+      ${futureRefundJoin}
+      WHERE t.id IN (${idPlaceholders})
+    `;
+
+    const hydratedRows = await query(hydrateSql, hydrateParams);
+    const byId = new Map(hydratedRows.map(r => [r.id, r]));
+    const transactions = pageIds.map(id => byId.get(id)).filter(Boolean);
+
+    return { transactions, hasMore, nextCursor };
+  }
+
   // Count total (for pagination)
   static async count({
     userId,
     branchId,  // Required for branch isolation
+    branchIds = null,
     type,
     category,
     startDate,
@@ -574,8 +876,14 @@ class Transaction {
     `;
     const params = [];
 
-    // Branch ID is required for data isolation
-    if (branchId) {
+    // Branch ID / Branch IDs is required for data isolation
+    if (branchIds && Array.isArray(branchIds) && branchIds.length > 0) {
+      const validIds = branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
+      if (validIds.length > 0) {
+        sql += ` AND t.branch_id IN (${validIds.map(() => '?').join(',')})`;
+        params.push(...validIds);
+      }
+    } else if (branchId) {
       sql += ' AND t.branch_id = ?';
       params.push(branchId);
     }
@@ -674,12 +982,13 @@ class Transaction {
     return results[0].total;
   }
 
-  static async create({ userId, branchId, type, categoryId, amount, totalCustomer = null, apc = null, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, isSavings = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, bankAccountId = null, mitraDetails = [], savingsDetails = [], incomeDetails = [], salesChannelDetails = [], productItems = [], isPb1Payment = false, isDraft = false, externalReferenceId = null }) {
+  static async create({ userId, branchId, type, categoryId, amount, totalCustomer = null, apc = null, pb1 = null, note, transactionDate, lampiran, isUmum = true, isDebtPayment = false, isSavings = false, isPettyCash = false, paidAmount = null, remainingDebt = null, mitraPiutangId = null, bankAccountId = null, mitraDetails = [], savingsDetails = [], pettyCashDetails = [], incomeDetails = [], salesChannelDetails = [], productItems = [], isPb1Payment = false, isDraft = false, externalReferenceId = null }) {
     const transactionId = await dbTransaction(async (conn) => {
+      const hasPettyCash = Boolean(isPettyCash || (pettyCashDetails && pettyCashDetails.length > 0));
       const [result] = await conn.execute(
-        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, total_customer, apc, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, bank_account_id, is_draft, external_reference_id, status_deleted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
-        [userId, branchId, type, categoryId, amount, totalCustomer || null, apc || null, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, isSavings || (savingsDetails && savingsDetails.length > 0) || false, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment, bankAccountId, isDraft ? 1 : 0, externalReferenceId || null]
+        `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, total_customer, apc, pb1, note, transaction_date, lampiran, is_umum, is_debt_payment, is_savings, is_petty_cash, paid_amount, remaining_debt, mitra_piutang_id, is_pb1_payment, bank_account_id, is_draft, external_reference_id, status_deleted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
+        [userId, branchId, type, categoryId, amount, totalCustomer || null, apc || null, pb1, note || null, transactionDate, lampiran || null, isUmum, isDebtPayment, isSavings || (savingsDetails && savingsDetails.length > 0) || false, hasPettyCash, paidAmount, remainingDebt, mitraPiutangId, isPb1Payment, bankAccountId, isDraft ? 1 : 0, externalReferenceId || null]
       );
 
       const newId = result.insertId;
@@ -708,6 +1017,19 @@ class Transaction {
              VALUES (?, ?, ?)`,
             [newId, detail.category_id, detail.amount]
           );
+        }
+      }
+
+      // Insert petty cash top-up details (if not draft)
+      if (!isDraft && pettyCashDetails && pettyCashDetails.length > 0) {
+        for (const detail of pettyCashDetails) {
+          if (detail.petty_cash_id && parseFloat(detail.amount) > 0) {
+            await conn.execute(
+              `INSERT INTO petty_cash_transactions (petty_cash_id, branch_id, type, amount, description, transaction_date, source_transaction_id, created_by)
+               VALUES (?, ?, 'topup', ?, ?, ?, ?, ?)`,
+              [detail.petty_cash_id, branchId, detail.amount, note || 'Top-up dari Kas Berjalan', transactionDate, newId, userId || null]
+            );
+          }
         }
       }
 
@@ -786,11 +1108,11 @@ class Transaction {
   }
 
   // Update transaction
-  static async update(id, { branchId, type, categoryId, amount, totalCustomer, apc, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, isSavings, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, incomeDetails, salesChannelDetails, productItems, isPb1Payment, isDraft }) {
+  static async update(id, { branchId, type, categoryId, amount, totalCustomer, apc, pb1, note, transactionDate, lampiran, isUmum, isDebtPayment, isSavings, isPettyCash, paidAmount, remainingDebt, mitraPiutangId, bankAccountId, mitraDetails, savingsDetails, pettyCashDetails, incomeDetails, salesChannelDetails, productItems, isPb1Payment, isDraft }) {
     await dbTransaction(async (conn) => {
       // Get old transaction data first to reverse allocation
       const [oldRows] = await conn.execute(
-        'SELECT branch_id, category_id, bank_account_id, type, amount, is_savings, is_draft FROM transactions WHERE id = ?',
+        'SELECT branch_id, category_id, bank_account_id, type, amount, is_savings, is_draft, transaction_date, note, user_id FROM transactions WHERE id = ?',
         [id]
       );
       const oldTx = oldRows[0];
@@ -868,6 +1190,13 @@ class Transaction {
       } else if (savingsDetails !== undefined) {
         updates.push('is_savings = ?');
         params.push(Boolean(savingsDetails && savingsDetails.length > 0));
+      }
+      if (isPettyCash !== undefined) {
+        updates.push('is_petty_cash = ?');
+        params.push(Boolean(isPettyCash === true || isPettyCash === 'true' || isPettyCash === 1 || (pettyCashDetails && pettyCashDetails.length > 0)));
+      } else if (pettyCashDetails !== undefined) {
+        updates.push('is_petty_cash = ?');
+        params.push(Boolean(pettyCashDetails && pettyCashDetails.length > 0));
       }
       if (isPb1Payment !== undefined) {
         updates.push('is_pb1_payment = ?');
@@ -950,7 +1279,7 @@ class Transaction {
           for (const detail of mitraDetails) {
             // Recalculate based on actual repayments for this (possibly new) partner
             const [repaymentSumRows] = await conn.execute(
-              `SELECT SUM(amount) as total_repayment FROM transaction_repayments WHERE transaction_id = ? AND mitra_piutang_id = ?`,
+              `SELECT SUM(amount) as total_repayment FROM transaction_repayments WHERE transaction_id = ? AND mitra_piutang_id = ? AND deleted_at IS NULL`,
               [id, detail.mitra_piutang_id]
             );
             const totalRepayment = parseFloat(repaymentSumRows[0].total_repayment || 0);
@@ -990,6 +1319,26 @@ class Transaction {
                VALUES (?, ?, ?)`,
               [id, detail.category_id, detail.amount]
             );
+          }
+        }
+      }
+
+      // Handle petty cash top-up details
+      if (pettyCashDetails !== undefined) {
+        await conn.execute(`DELETE FROM petty_cash_transactions WHERE source_transaction_id = ?`, [id]);
+        const effectiveDraft = isDraft !== undefined ? (isDraft === true || isDraft === 'true' || isDraft === 1) : Boolean(oldTx?.is_draft);
+        if (!effectiveDraft && pettyCashDetails && pettyCashDetails.length > 0) {
+          const effectiveBranchId = branchId !== undefined && branchId !== null ? parseInt(branchId) : oldTx?.branch_id;
+          const effectiveDate = transactionDate !== undefined ? transactionDate : oldTx?.transaction_date;
+          const effectiveNote = note !== undefined ? note : oldTx?.note;
+          for (const detail of pettyCashDetails) {
+            if (detail.petty_cash_id && parseFloat(detail.amount) > 0) {
+              await conn.execute(
+                `INSERT INTO petty_cash_transactions (petty_cash_id, branch_id, type, amount, description, transaction_date, source_transaction_id, created_by)
+                 VALUES (?, ?, 'topup', ?, ?, ?, ?, ?)`,
+                [detail.petty_cash_id, effectiveBranchId, detail.amount, effectiveNote || 'Top-up dari Kas Berjalan', effectiveDate, id, oldTx?.user_id || null]
+              );
+            }
           }
         }
       }
@@ -1212,6 +1561,12 @@ class Transaction {
       // 2. Soft delete the main transaction
       await conn.execute(
         'UPDATE transactions SET status_deleted = true, deleted_at = ? WHERE id = ?',
+        [now, id]
+      );
+
+      // 2b. Soft delete any linked petty cash top-ups
+      await conn.execute(
+        'UPDATE petty_cash_transactions SET status_deleted = 1, deleted_at = ? WHERE source_transaction_id = ?',
         [now, id]
       );
 
@@ -1521,9 +1876,10 @@ class Transaction {
       LEFT JOIN (
         SELECT transaction_id, SUM(amount) as total_repayment 
         FROM transaction_repayments 
+        WHERE deleted_at IS NULL
         GROUP BY transaction_id
       ) tr_sum ON t.id = tr_sum.transaction_id
-      LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id
+      LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id AND tr_notif.deleted_at IS NULL
       LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
       LEFT JOIN (
         SELECT transaction_id, SUM(amount) as total_refund 
@@ -1629,6 +1985,7 @@ class Transaction {
              FROM transaction_repayments tr
              JOIN transactions t ON tr.transaction_id = t.id
              WHERE tr.payment_date BETWEEN ? AND ?
+               AND tr.deleted_at IS NULL
                AND t.transaction_date < ?
                AND t.branch_id = ?
                AND t.status_deleted = false
@@ -1802,6 +2159,7 @@ class Transaction {
                 FROM transaction_repayments tr
                 WHERE tr.transaction_id = t.id
                   AND tr.payment_date > ?
+                  AND tr.deleted_at IS NULL
               ), 0)), 0)
               FROM transactions t
               JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
@@ -1815,6 +2173,7 @@ class Transaction {
                 WHERE tr.transaction_id = t.id
                   AND tr.mitra_piutang_id = mp.id
                   AND tr.payment_date > ?
+                  AND tr.deleted_at IS NULL
               ), 0)), 0)
               FROM transaction_mitra_details tmd
               JOIN transactions t ON tmd.transaction_id = t.id

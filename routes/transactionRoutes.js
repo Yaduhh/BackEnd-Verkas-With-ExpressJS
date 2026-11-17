@@ -27,7 +27,8 @@ const {
   createRefund,
   updateRefund,
   deleteRefund,
-  parsePosFile
+  parsePosFile,
+  exportExpenseReportExcel
 } = require('../controllers/transactionController');
 const { authenticate, authorize } = require('../middleware/auth');
 const { optionalBranchContext } = require('../middleware/branchContext');
@@ -69,6 +70,9 @@ router.get('/edit-requests', getEditRequests);
 // Parse POS Excel / CSV file for Omzet import
 router.post('/parse-pos-file', posUpload.single('file'), parsePosFile);
 
+// Export Expense Report Excel
+router.post('/export-expense-report', exportExpenseReportExcel);
+
 // Get transaction by ID
 router.get('/:id', getById);
 
@@ -88,7 +92,7 @@ router.delete('/:id', softDelete);
 router.post('/:id/restore', restore);
 
 // Hard delete (permanent, admin only)
-router.delete('/:id/force', authorize('admin', 'owner'), hardDelete);
+router.delete('/:id/force', authorize('admin', 'kasir', 'owner'), hardDelete);
 
 // Request edit (admin only)
 router.post('/:id/request-edit', requestEdit);

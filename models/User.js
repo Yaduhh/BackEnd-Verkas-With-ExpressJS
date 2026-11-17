@@ -252,16 +252,15 @@ class User {
     return true;
   }
 
-  // Get all admin users (for PIC selection)
+  // Get all admin/kasir users (for PIC selection)
   static async findAllAdmins() {
     return await query(
-      'SELECT id, email, name, role, created_at, updated_at FROM users WHERE role = ? AND status_deleted = false ORDER BY name ASC, email ASC',
-      ['admin']
+      `SELECT id, email, name, role, created_at, updated_at FROM users WHERE role IN ('admin', 'kasir') AND status_deleted = false ORDER BY name ASC, email ASC`
     );
   }
 
-  // Get admin users by owner's team
-  // Returns admin users that were created by this owner/co-owners in their team OR are assigned as PIC to owner's branches
+  // Get admin & kasir users by owner's team
+  // Returns admin/kasir users that were created by this owner/co-owners in their team OR are assigned as PIC to owner's branches
   static async findAdminsByOwnerTeam(ownerId) {
     await this.ensurePermissionColumns();
     const OwnerTeam = require('./OwnerTeam');
@@ -288,11 +287,11 @@ class User {
       ])];
     }
 
-    // Build query: get admins created by this owner/team members OR admins that are PIC in owner's branches
+    // Build query: get admins/kasir created by this owner/team members OR admins/kasir that are PIC in owner's branches
     let sql = `
       SELECT DISTINCT u.id, u.email, u.name, u.role, u.created_by, u.can_create, u.can_edit, u.can_delete, u.created_at, u.updated_at
       FROM users u
-      WHERE u.role = 'admin' 
+      WHERE u.role IN ('admin', 'kasir')
       AND u.status_deleted = false
       AND (
         u.created_by IN (${creatorIds.map(() => '?').join(',')})
@@ -321,7 +320,7 @@ class User {
     return rows.map(normalizePermissions);
   }
 
-  // Get all ecosystem users (owner, co-owner, and admin) belonging to an owner's team ecosystem
+  // Get all ecosystem users (owner, co-owner, admin, and kasir) belonging to an owner's team ecosystem
   static async findTeamEcosystemUsers(ownerId) {
     await this.ensurePermissionColumns();
     const OwnerTeam = require('./OwnerTeam');
@@ -361,7 +360,7 @@ class User {
       SELECT DISTINCT u.id, u.email, u.name, u.role, u.created_by, u.can_create, u.can_edit, u.can_delete, u.created_at, u.updated_at
       FROM users u
       WHERE u.status_deleted = false
-      AND u.role IN ('owner', 'co-owner', 'admin')
+      AND u.role IN ('owner', 'co-owner', 'admin', 'kasir')
       AND (
         u.id IN (${ecosystemUserIds.map(() => '?').join(',')})
         OR u.created_by IN (${ecosystemUserIds.map(() => '?').join(',')})
@@ -388,7 +387,8 @@ class User {
           WHEN 'owner' THEN 1
           WHEN 'co-owner' THEN 2
           WHEN 'admin' THEN 3
-          ELSE 4
+          WHEN 'kasir' THEN 4
+          ELSE 5
         END ASC,
         u.name ASC, u.email ASC
     `;

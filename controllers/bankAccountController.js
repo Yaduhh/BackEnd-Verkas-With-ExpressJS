@@ -1,5 +1,4 @@
 const BankAccount = require('../models/BankAccount');
-const LogService = require('../services/logService');
 
 const getAll = async (req, res, next) => {
   try {
@@ -25,7 +24,18 @@ const getAll = async (req, res, next) => {
 
 const create = async (req, res, next) => {
   try {
-    const { name, accountNumber, account_number, type } = req.body;
+    const {
+      name,
+      accountNumber,
+      account_number,
+      type,
+      initialBalance,
+      initial_balance,
+      initialBalanceDate,
+      initial_balance_date,
+      initialBalanceNote,
+      initial_balance_note
+    } = req.body;
     const branchId = req.branchId || req.headers['x-branch-id'] || null;
 
     if (!name) {
@@ -42,11 +52,21 @@ const create = async (req, res, next) => {
       });
     }
 
+    const resolvedInitialBalance =
+      initialBalance !== undefined ? initialBalance : (initial_balance !== undefined ? initial_balance : 0);
+    const resolvedInitialDate =
+      initialBalanceDate !== undefined ? initialBalanceDate : (initial_balance_date !== undefined ? initial_balance_date : null);
+    const resolvedInitialNote =
+      initialBalanceNote !== undefined ? initialBalanceNote : (initial_balance_note !== undefined ? initial_balance_note : null);
+
     const account = await BankAccount.create({
       name,
       accountNumber: accountNumber || account_number || null,
       branchId: parseInt(branchId),
-      type: type || 'savings'
+      type: type || 'savings',
+      initialBalance: resolvedInitialBalance,
+      initialBalanceDate: resolvedInitialDate,
+      initialBalanceNote: resolvedInitialNote
     });
 
     res.status(201).json({
@@ -62,7 +82,22 @@ const create = async (req, res, next) => {
 const updateAccount = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, accountNumber, account_number, type } = req.body;
+    const {
+      name,
+      accountNumber,
+      account_number,
+      type,
+      initialBalance,
+      initial_balance,
+      initialBalanceDate,
+      initial_balance_date,
+      initialBalanceNote,
+      initial_balance_note,
+      linkedPettyCashId,
+      linked_petty_cash_id,
+      linkedPettyCashLockBank,
+      linked_petty_cash_lock_bank
+    } = req.body;
 
     const account = await BankAccount.findById(id);
     if (!account) {
@@ -73,11 +108,21 @@ const updateAccount = async (req, res, next) => {
     }
 
     const resolvedAccountNumber = accountNumber !== undefined ? accountNumber : account_number;
+    const resolvedInitialBalance = initialBalance !== undefined ? initialBalance : initial_balance;
+    const resolvedInitialDate = initialBalanceDate !== undefined ? initialBalanceDate : initial_balance_date;
+    const resolvedInitialNote = initialBalanceNote !== undefined ? initialBalanceNote : initial_balance_note;
+    const resolvedLinkedPettyCashId = linkedPettyCashId !== undefined ? linkedPettyCashId : linked_petty_cash_id;
+    const resolvedLinkedPettyCashLockBank = linkedPettyCashLockBank !== undefined ? linkedPettyCashLockBank : linked_petty_cash_lock_bank;
 
     const updated = await BankAccount.update(id, {
       name,
       accountNumber: resolvedAccountNumber,
-      type
+      type,
+      initialBalance: resolvedInitialBalance,
+      initialBalanceDate: resolvedInitialDate,
+      initialBalanceNote: resolvedInitialNote,
+      linkedPettyCashId: resolvedLinkedPettyCashId,
+      linkedPettyCashLockBank: resolvedLinkedPettyCashLockBank
     });
 
     res.json({

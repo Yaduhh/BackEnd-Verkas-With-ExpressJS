@@ -510,11 +510,18 @@ const bulkRepayment = async (req, res, next) => {
 
       // 3. Create notification / cash record in transactions (is_debt_payment = 1)
       const repaymentNote = note || `Pelunasan Piutang Gelondongan: ${existingMitra.nama}`;
-      await conn.execute(
+      const [incResult] = await conn.execute(
         `INSERT INTO transactions (user_id, branch_id, type, amount, note, transaction_date, lampiran, is_umum, is_debt_payment, paid_amount, remaining_debt, status_deleted, category_id, bank_account_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, false, NULL, ?)`,
         [req.userId, parseInt(branchId), 'income', repaymentAmount, repaymentNote, paymentDate, lampiranValue, true, repaymentAmount, bank_account_id ? parseInt(bank_account_id) : null]
       );
+
+      if (incResult?.insertId) {
+        await conn.execute(
+          `UPDATE transaction_repayments SET income_transaction_id = ? WHERE bulk_repayment_id = ?`,
+          [incResult.insertId, bulkRepaymentId]
+        );
+      }
     });
 
     // Log activity

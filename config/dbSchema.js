@@ -89,7 +89,9 @@ const DB_SCHEMA = `
     payment_date DATETIME NOT NULL,
     note VARCHAR(255) NULL,
     lampiran VARCHAR(255) NULL,
-    created_at TIMESTAMP
+    created_at TIMESTAMP,
+    deleted_at DATETIME NULL,
+    deleted_by INT NULL -- references users(id)
   )
 
 - transaction_edits (
@@ -131,6 +133,11 @@ const DB_SCHEMA = `
 - bank_accounts (
     id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
+    account_number VARCHAR(100) NULL,
+    type ENUM('savings', 'operational', 'income', 'both') DEFAULT 'savings',
+    initial_balance DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+    initial_balance_date DATE NULL,
+    initial_balance_note VARCHAR(255) NULL,
     branch_id INT NOT NULL, -- references branches(id)
     is_active TINYINT(1) DEFAULT 1
   )

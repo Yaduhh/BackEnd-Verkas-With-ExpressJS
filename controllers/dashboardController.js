@@ -141,6 +141,12 @@ function formatSection(date, items, transactions, req) {
         user_name: item.user_name || null,
         bank_account_name: item.bank_account_name || null,
         bank_account_type: item.bank_account_type || null,
+        is_umum: item.is_umum !== undefined && item.is_umum !== null ? Boolean(item.is_umum) : true,
+        is_savings: item.is_savings === true || item.is_savings === 1 || item.is_savings === '1',
+        savings_names: item.savings_names || null,
+        total_savings_amount: item.total_savings_amount !== undefined && item.total_savings_amount !== null ? parseFloat(item.total_savings_amount) : 0,
+        is_petty_cash: item.is_petty_cash === true || item.is_petty_cash === 1 || item.is_petty_cash === '1',
+        petty_cash_names: item.petty_cash_names || null,
         edit_accepted: item.edit_accepted !== undefined && item.edit_accepted !== null ? parseInt(item.edit_accepted) : 0, // 0 = default, 1 = pending, 2 = approved, 3 = rejected
         is_debt_payment: item.is_debt_payment === true || item.is_debt_payment === 1 || item.is_debt_payment === '1', // Pembayaran hutang
         paid_amount: item.paid_amount !== undefined && item.paid_amount !== null ? parseFloat(item.paid_amount) : null,
@@ -1228,6 +1234,143 @@ const getGlobalBalanceSummary = async (req, res, next) => {
   }
 };
 
+// Buku Besar (Multi-Branch Ledger without Summary/Stats, Server-Side Paginated & Filtered)
+const getLedger = async (req, res, next) => {
+  try {
+    const {
+      branchIds,
+      tab = 'Bulanan',
+      year,
+      month,
+      date,
+      startDate,
+      endDate,
+      type,
+      fundSource,
+      categories,
+      lampiran,
+      search,
+      sort = 'terbaru',
+      page = 1,
+      limit = 100,
+      cursorDate,
+      cursorCreatedAt,
+      cursorId
+    } = req.query;
+
+    const Branch = require('../models/Branch');
+    const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user.role);
+    const accessibleIds = accessibleBranches.map(b => b.id);
+
+    let targetBranches = accessibleBranches;
+    if (branchIds) {
+      const ids = (typeof branchIds === 'string' ? branchIds.split(',') : branchIds)
+        .map(id => parseInt(id.trim ? id.trim() : id))
+        .filter(id => !isNaN(id) && accessibleIds.includes(id));
+      targetBranches = accessibleBranches.filter(b => ids.includes(b.id));
+    }
+
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const pageLimit = Math.min(500, Math.max(10, parseInt(limit) || 100));
+
+    if (targetBranches.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          branches: accessibleBranches.map(b => ({ id: b.id, name: b.name, code: b.code, group_name: b.group_name })),
+          sections: [],
+          page: pageNum,
+          limit: pageLimit,
+          hasMore: false
+        }
+      });
+    }
+
+    const targetBranchIds = targetBranches.map(b => b.id);
+    const currentYear = parseInt(year) || new Date().getFullYear();
+    const currentMonth = parseInt(month) || (new Date().getMonth() + 1);
+
+    let finalStart = '';
+    let finalEnd = '';
+
+    if (tab === 'Harian') {
+      finalStart = startDate || date || formatDate(new Date());
+      finalEnd = endDate || date || formatDate(new Date());
+    } else if (tab === 'Tahunan') {
+      const yearRange = getYearRange(currentYear);
+      finalStart = yearRange.start;
+      finalEnd = yearRange.end;
+    } else {
+      const monthRange = getMonthRange(currentYear, currentMonth);
+      finalStart = monthRange.start;
+      finalEnd = monthRange.end;
+    }
+
+    const parsedCategories = categories
+      ? (Array.isArray(categories) ? categories : String(categories).split(',')).map(c => c.trim()).filter(Boolean)
+      : null;
+
+    const validType = type === 'income' || type === 'expense' ? type : undefined;
+    const validFundSource = ['kas_berjalan', 'kas_simpanan', 'kas_kecil'].includes(String(fundSource || '').trim())
+      ? String(fundSource).trim()
+      : null;
+    const validSort = sort === 'terlama' ? 'terlama' : 'terbaru';
+    const validLampiran = lampiran === 'Merah' || lampiran === 'Kuning' || lampiran === 'Hijau' ? lampiran : null;
+
+    const cursor = cursorDate && cursorCreatedAt && cursorId
+      ? { date: String(cursorDate), created_at: String(cursorCreatedAt), id: parseInt(cursorId) }
+      : null;
+
+    const { transactions: pageTransactions, hasMore, nextCursor } = await Transaction.findLedgerPage({
+      branchIds: targetBranchIds,
+      startDate: finalStart,
+      endDate: finalEnd,
+      type: validType,
+      fundSource: validFundSource,
+      categories: parsedCategories,
+      search: search ? String(search) : null,
+      lampiranStatus: validLampiran,
+      sort: validSort,
+      limit: pageLimit,
+      cursor
+    });
+
+    // Group transactions by date
+    const transactionsByDate = {};
+    pageTransactions.forEach(t => {
+      let dateStr = t.transaction_date;
+      if (dateStr instanceof Date) {
+        dateStr = formatDate(dateStr);
+      } else if (typeof dateStr === 'string' && dateStr.includes('T')) {
+        dateStr = dateStr.split('T')[0];
+      }
+      if (!transactionsByDate[dateStr]) {
+        transactionsByDate[dateStr] = [];
+      }
+      transactionsByDate[dateStr].push(t);
+    });
+
+    const sortedDates = Object.keys(transactionsByDate).sort((a, b) =>
+      validSort === 'terlama' ? a.localeCompare(b) : b.localeCompare(a)
+    );
+    const sections = sortedDates.map(d => formatSection(d, transactionsByDate[d], transactionsByDate[d], req));
+
+    res.json({
+      success: true,
+      data: {
+        branches: accessibleBranches.map(b => ({ id: b.id, name: b.name, code: b.code, group_name: b.group_name })),
+        sections,
+        page: pageNum,
+        limit: pageLimit,
+        hasMore,
+        nextCursor
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getHarian,
   getMingguan,
@@ -1235,5 +1378,6 @@ module.exports = {
   getBulananAll,
   getTahunan,
   getGroupDashboard,
-  getGlobalBalanceSummary
+  getGlobalBalanceSummary,
+  getLedger
 };

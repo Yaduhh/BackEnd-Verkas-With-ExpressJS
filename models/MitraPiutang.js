@@ -55,6 +55,7 @@ class MitraPiutang {
         WHERE tr.transaction_id = t.id
         AND tr.mitra_piutang_id = mp.id
         AND tr.payment_date > ?
+        AND tr.deleted_at IS NULL
       ), 0)`;
       repayParams.push(endDate + ' 23:59:59');
     }

@@ -247,7 +247,7 @@ const createUser = async (req, res, next) => {
       });
     }
 
-    const validRoles = ['owner', 'co-owner', 'admin', 'master'];
+    const validRoles = ['owner', 'co-owner', 'admin', 'kasir', 'master'];
     if (role && !validRoles.includes(role)) {
       return res.status(400).json({
         success: false,
@@ -298,7 +298,7 @@ const updateUser = async (req, res, next) => {
 
     // Validate role if provided
     if (role) {
-      const validRoles = ['owner', 'co-owner', 'admin', 'master'];
+      const validRoles = ['owner', 'co-owner', 'admin', 'kasir', 'master'];
       if (!validRoles.includes(role)) {
         return res.status(400).json({
           success: false,

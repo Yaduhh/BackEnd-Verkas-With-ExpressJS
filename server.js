@@ -28,8 +28,10 @@ const assistantRoutes = require('./routes/assistantRoutes');
 const salesChannelRoutes = require('./routes/salesChannelRoutes');
 const productRoutes = require('./routes/productRoutes');
 const stockRoutes = require('./routes/stockRoutes');
+const pettyCashRoutes = require('./routes/pettyCashRoutes');
 const externalApiRoutes = require('./routes/externalApiRoutes');
 const apiKeyRoutes = require('./routes/apiKeyRoutes');
+const cashierReportRoutes = require('./routes/cashierReportRoutes');
 
 // Initialize app
 const app = express();
@@ -306,6 +308,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/mitra-piutang', mitraPiutangRoutes);
+app.use('/api/petty-cash', pettyCashRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/export', exportRoutes);
 app.use('/api/upload', uploadRoutes);
@@ -327,6 +330,7 @@ app.use('/api/products', productRoutes);
 app.use('/api/stocks', stockRoutes);
 app.use('/api/external/v1', externalApiRoutes);
 app.use('/api/api-keys', apiKeyRoutes);
+app.use('/api/cashier-reports', cashierReportRoutes);
 
 // 404 handler
 app.use(notFound);

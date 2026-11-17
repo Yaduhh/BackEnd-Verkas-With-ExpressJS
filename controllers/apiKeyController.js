@@ -6,7 +6,7 @@ const apiKeyController = {
   getAll: async (req, res, next) => {
     try {
       const isMaster = req.user && req.user.role === 'master';
-      const targetOwnerId = (req.user?.role === 'admin' && req.user?.created_by) ? req.user.created_by : req.userId;
+      const targetOwnerId = ((req.user?.role === 'admin' || req.user?.role === 'kasir') && req.user?.created_by) ? req.user.created_by : req.userId;
       const keys = isMaster ? await ApiKey.findAll() : await ApiKey.findByOwner(targetOwnerId);
       return res.json({
         success: true,
@@ -41,7 +41,7 @@ const apiKeyController = {
         }
       }
 
-      const targetOwnerId = (req.user?.role === 'admin' && req.user?.created_by) ? req.user.created_by : req.userId;
+      const targetOwnerId = ((req.user?.role === 'admin' || req.user?.role === 'kasir') && req.user?.created_by) ? req.user.created_by : req.userId;
 
       const newKey = await ApiKey.create({
         owner_id: targetOwnerId,
@@ -67,7 +67,7 @@ const apiKeyController = {
     try {
       const { id } = req.params;
       const isMaster = req.user && req.user.role === 'master';
-      const targetOwnerId = (req.user?.role === 'admin' && req.user?.created_by) ? req.user.created_by : req.userId;
+      const targetOwnerId = ((req.user?.role === 'admin' || req.user?.role === 'kasir') && req.user?.created_by) ? req.user.created_by : req.userId;
       const success = await ApiKey.revoke(id, isMaster ? null : targetOwnerId);
       if (!success) {
         return res.status(404).json({
@@ -91,7 +91,7 @@ const apiKeyController = {
     try {
       const { id } = req.params;
       const isMaster = req.user && req.user.role === 'master';
-      const targetOwnerId = (req.user?.role === 'admin' && req.user?.created_by) ? req.user.created_by : req.userId;
+      const targetOwnerId = ((req.user?.role === 'admin' || req.user?.role === 'kasir') && req.user?.created_by) ? req.user.created_by : req.userId;
       const success = await ApiKey.activate(id, isMaster ? null : targetOwnerId);
       if (!success) {
         return res.status(404).json({
@@ -115,7 +115,7 @@ const apiKeyController = {
     try {
       const { id } = req.params;
       const isMaster = req.user && req.user.role === 'master';
-      const targetOwnerId = (req.user?.role === 'admin' && req.user?.created_by) ? req.user.created_by : req.userId;
+      const targetOwnerId = ((req.user?.role === 'admin' || req.user?.role === 'kasir') && req.user?.created_by) ? req.user.created_by : req.userId;
       const success = await ApiKey.delete(id, isMaster ? null : targetOwnerId);
       if (!success) {
         return res.status(404).json({

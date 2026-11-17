@@ -27,9 +27,9 @@ const getConsolidatedReport = async (req, res, next) => {
         const year = parseInt(req.query.year) || new Date().getFullYear();
         const { branchIds, group_name } = req.query;
 
-        const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+        const startDate = hasCustomRange ? customStart : `${year}-${String(month).padStart(2, '0')}-01`;
         const daysInMonth = new Date(year, month, 0).getDate();
-        const endDate = `${year}-${String(month).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
+        const endDate = hasCustomRange ? customEnd : `${year}-${String(month).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
 
         // Get branches accessible to the user
         const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user.role);
@@ -204,6 +204,7 @@ const getConsolidatedReport = async (req, res, next) => {
                       FROM transaction_repayments tr
                       WHERE tr.transaction_id = t.id
                         AND tr.payment_date > ?
+                        AND tr.deleted_at IS NULL
                     ), 0)), 0)
                     FROM transactions t
                     JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
@@ -217,6 +218,7 @@ const getConsolidatedReport = async (req, res, next) => {
                       WHERE tr.transaction_id = t.id
                         AND tr.mitra_piutang_id = mp.id
                         AND tr.payment_date > ?
+                        AND tr.deleted_at IS NULL
                     ), 0)), 0)
                     FROM transaction_mitra_details tmd
                     JOIN transactions t ON tmd.transaction_id = t.id
@@ -321,6 +323,9 @@ const getGroupFinancialReport = async (req, res, next) => {
         const { group_name, branchIds } = req.query;
         const month = parseInt(req.query.month) || new Date().getMonth() + 1;
         const year = parseInt(req.query.year) || new Date().getFullYear();
+        const customStart = typeof req.query.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate) ? req.query.startDate : null;
+        const customEnd = typeof req.query.endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.endDate) ? req.query.endDate : null;
+        const hasCustomRange = Boolean(customStart && customEnd);
 
         const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user?.role || 'owner');
         const accessibleIds = accessibleBranches.map(b => b.id);
@@ -344,9 +349,9 @@ const getGroupFinancialReport = async (req, res, next) => {
         const targetGroupName = (group_name && group_name !== 'Semua') ? group_name : (targetBranches[0]?.group_name || 'Gabungan');
         const savedGroupReport = await GroupReport.findByGroupAndPeriod(targetOwnerId, targetGroupName, month, year);
 
-        const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+        const startDate = hasCustomRange ? customStart : `${year}-${String(month).padStart(2, '0')}-01`;
         const daysInMonth = new Date(year, month, 0).getDate();
-        const endDate = `${year}-${String(month).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
+        const endDate = hasCustomRange ? customEnd : `${year}-${String(month).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
 
         const prevMonthDate = new Date(year, month - 2, 1);
         const prevMonthName = prevMonthDate.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
@@ -508,6 +513,7 @@ const getGroupFinancialReport = async (req, res, next) => {
                       FROM transaction_repayments tr
                       WHERE tr.transaction_id = t.id
                         AND tr.payment_date > ?
+                        AND tr.deleted_at IS NULL
                     ), 0)), 0)
                     FROM transactions t
                     JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
@@ -521,6 +527,7 @@ const getGroupFinancialReport = async (req, res, next) => {
                       WHERE tr.transaction_id = t.id
                         AND tr.mitra_piutang_id = mp.id
                         AND tr.payment_date > ?
+                        AND tr.deleted_at IS NULL
                     ), 0)), 0)
                     FROM transaction_mitra_details tmd
                     JOIN transactions t ON tmd.transaction_id = t.id
@@ -543,6 +550,7 @@ const getGroupFinancialReport = async (req, res, next) => {
                  FROM transaction_repayments tr
                  JOIN transactions t ON tr.transaction_id = t.id
                  WHERE tr.payment_date BETWEEN ? AND ?
+                   AND tr.deleted_at IS NULL
                    AND t.transaction_date < ?
                    AND t.branch_id = ?
                    AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)`,

@@ -1,15 +1,15 @@
 const Branch = require('../models/Branch');
 
-// Get current branch from header or auto-assign for admin
+// Get current branch from header or auto-assign for admin / kasir
 const getCurrentBranch = async (req, res, next) => {
   try {
     const branchId = req.headers['x-branch-id'];
     
-    if (req.user.role === 'admin') {
-      // Admin: if branch ID is provided in header, use it (admin can be PIC of multiple branches)
+    if (req.user.role === 'admin' || req.user.role === 'kasir') {
+      // Admin / Kasir: if branch ID is provided in header, use it (can be PIC of multiple branches)
       if (branchId) {
         const parsedBranchId = parseInt(branchId);
-        // Verify admin has access to this branch (they must be PIC)
+        // Verify admin/kasir has access to this branch (they must be PIC)
         const hasAccess = await Branch.userHasAccess(req.userId, parsedBranchId, req.user.role);
         if (!hasAccess) {
           return res.status(403).json({
@@ -75,8 +75,8 @@ const optionalBranchContext = async (req, res, next) => {
       if (hasAccess) {
         req.branchId = parsedBranchId;
       }
-    } else if (req.user.role === 'admin') {
-      // Auto-assign for admin (fallback to first branch if no header)
+    } else if (req.user.role === 'admin' || req.user.role === 'kasir') {
+      // Auto-assign for admin / kasir (fallback to first branch if no header)
       const branch = await Branch.getAdminBranch(req.userId);
       if (branch) {
         req.branchId = branch.id;

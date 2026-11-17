@@ -16,7 +16,7 @@ router.use((req, res, next) => {
   }
 
   const role = (req.user.role || '').toLowerCase().trim();
-  const allowedRoles = ['owner', 'co-owner', 'master', 'admin'];
+  const allowedRoles = ['owner', 'co-owner', 'master', 'admin', 'kasir'];
 
   if (!allowedRoles.includes(role)) {
     console.warn(`[ApiKeyRoutes 403] User: ${req.user.email} (ID: ${req.user.id}), Role: "${req.user.role}"`);

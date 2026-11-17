@@ -228,14 +228,14 @@ const addMember = async (req, res, next) => {
         });
       }
       
-      // Validate role: only allow admin and co-owner to be created via ManageTeamScreen
+      // Validate role: allow admin, kasir, and co-owner to be created via ManageTeamScreen
       // Owner can only be created via self-registration (RegisterScreen)
       // Master is for developers only
-      const allowedRoles = ['admin', 'co-owner'];
+      const allowedRoles = ['admin', 'kasir', 'co-owner'];
       if (!allowedRoles.includes(role)) {
         return res.status(400).json({
           success: false,
-          message: `Role must be either "admin" or "co-owner". Owner can only be created via registration.`
+          message: `Role must be "admin", "kasir", or "co-owner". Owner can only be created via registration.`
         });
       }
       
@@ -251,8 +251,8 @@ const addMember = async (req, res, next) => {
         });
       }
       
-      // Enforce max_admin limit if role is admin
-      if (userRole === 'admin') {
+      // Enforce max_admin limit if role is admin or kasir
+      if (userRole === 'admin' || userRole === 'kasir') {
         let ownerId = req.userId;
         if (req.user.role === 'co-owner' && req.user.created_by) {
           ownerId = req.user.created_by;
@@ -269,13 +269,13 @@ const addMember = async (req, res, next) => {
         }
 
         if (maxAdmin !== null) {
-          // Count active admins in this owner's team ecosystem
+          // Count active admins & kasir in this owner's team ecosystem
           const adminsInTeam = await User.findAdminsByOwnerTeam(ownerId);
           const currentAdmins = adminsInTeam.length;
           if (currentAdmins >= maxAdmin) {
             return res.status(403).json({
               success: false,
-              message: `Batas maksimal admin (${maxAdmin}) untuk paket langganan Anda telah tercapai. Silakan upgrade paket langganan Anda.`,
+              message: `Batas maksimal admin/kasir (${maxAdmin}) untuk paket langganan Anda telah tercapai. Silakan upgrade paket langganan Anda.`,
               code: 'ADMIN_LIMIT_EXCEEDED'
             });
           }
@@ -318,8 +318,8 @@ const addMember = async (req, res, next) => {
     if (user.role === 'owner' || user.role === 'co-owner') {
       // Owner and co-owner users are added to team as members
       members = await OwnerTeam.addMember(id, targetUserId, req.userId, user.role === 'co-owner' ? 'co-owner' : 'owner');
-    } else if (user.role === 'admin') {
-      // Admin users are not added to team, just created as user
+    } else if (user.role === 'admin' || user.role === 'kasir') {
+      // Admin & Kasir users are not added to team, just created as user
       // They will be assigned to branches as PIC, not team members
       members = [];
     } else if (user.role === 'master') {
@@ -328,13 +328,14 @@ const addMember = async (req, res, next) => {
     } else {
       return res.status(400).json({
         success: false,
-        message: 'Can only add owner, co-owner, or admin users to team'
+        message: 'Can only add owner, co-owner, admin, or kasir users to team'
       });
     }
     
     res.json({
       success: true,
       message: user.role === 'admin' ? 'Admin user created successfully' : 
+               user.role === 'kasir' ? 'Kasir user created successfully' :
                user.role === 'master' ? 'Master user created successfully' :
                (user.role === 'owner' || user.role === 'co-owner') ? `${user.role === 'co-owner' ? 'Co-owner' : 'Owner'} user created and added to team successfully` : 
                'Member added successfully',

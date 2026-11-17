@@ -127,6 +127,9 @@ const getReport = async (req, res, next) => {
         const { branchId } = req.params;
         const month = parseInt(req.query.month) || new Date().getMonth() + 1;
         const year = parseInt(req.query.year) || new Date().getFullYear();
+        const customStart = typeof req.query.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate) ? req.query.startDate : null;
+        const customEnd = typeof req.query.endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.endDate) ? req.query.endDate : null;
+        const hasCustomRange = Boolean(customStart && customEnd);
 
         // Validasi akses
         const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
@@ -135,9 +138,9 @@ const getReport = async (req, res, next) => {
         }
 
         // Use transaction_date instead of created_at for better accounting accuracy
-        const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+        const startDate = hasCustomRange ? customStart : `${year}-${String(month).padStart(2, '0')}-01`;
         const daysInMonth = new Date(year, month, 0).getDate();
-        const endDate = `${year}-${String(month).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
+        const endDate = hasCustomRange ? customEnd : `${year}-${String(month).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
 
         // Previous month for Pelunasan Piutang label
         const prevMonthDate = new Date(year, month - 2, 1);
@@ -395,6 +398,7 @@ const getReport = async (req, res, next) => {
                   FROM transaction_repayments tr
                   WHERE tr.transaction_id = t.id
                     AND tr.payment_date > ?
+                    AND tr.deleted_at IS NULL
                 ), 0)), 0)
                 FROM transactions t
                 JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
@@ -408,6 +412,7 @@ const getReport = async (req, res, next) => {
                   WHERE tr.transaction_id = t.id
                     AND tr.mitra_piutang_id = mp.id
                     AND tr.payment_date > ?
+                    AND tr.deleted_at IS NULL
                 ), 0)), 0)
                 FROM transaction_mitra_details tmd
                 JOIN transactions t ON tmd.transaction_id = t.id
@@ -436,6 +441,7 @@ const getReport = async (req, res, next) => {
              FROM transaction_repayments tr
              JOIN transactions t ON tr.transaction_id = t.id
              WHERE tr.payment_date BETWEEN ? AND ?
+               AND tr.deleted_at IS NULL
                AND t.transaction_date < ?
                AND t.branch_id = ?
                AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)`,
@@ -1100,6 +1106,7 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                   FROM transaction_repayments tr
                   WHERE tr.transaction_id = t.id
                     AND tr.payment_date > ?
+                    AND tr.deleted_at IS NULL
                 ), 0)), 0)
                 FROM transactions t
                 JOIN mitra_piutang mp ON t.mitra_piutang_id = mp.id
@@ -1113,6 +1120,7 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                   WHERE tr.transaction_id = t.id
                     AND tr.mitra_piutang_id = mp.id
                     AND tr.payment_date > ?
+                    AND tr.deleted_at IS NULL
                 ), 0)), 0)
                 FROM transaction_mitra_details tmd
                 JOIN transactions t ON tmd.transaction_id = t.id
@@ -1135,7 +1143,7 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
         const systemPengeluaran = folderPengeluaran + totalPiutangMitra;
 
         const debtRepaymentResult = await query(
-            `SELECT SUM(tr.amount) as total FROM transaction_repayments tr JOIN transactions t ON tr.transaction_id = t.id WHERE tr.payment_date BETWEEN ? AND ? AND t.transaction_date < ? AND t.branch_id = ? AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)`,
+            `SELECT SUM(tr.amount) as total FROM transaction_repayments tr JOIN transactions t ON tr.transaction_id = t.id WHERE tr.payment_date BETWEEN ? AND ? AND tr.deleted_at IS NULL AND t.transaction_date < ? AND t.branch_id = ? AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)`,
             [startDate, endDate, startDate, branchId]
         );
         const pelunasanPiutangBulanLalu = parseFloat(debtRepaymentResult[0].total) || 0;

@@ -5,16 +5,41 @@ const { query } = require('../config/database');
 const getSalesChannelCategoryReport = async (req, res, next) => {
   try {
     const { categoryId } = req.params;
+    const { month, year, start_date, end_date, sort = 'terlama', group_name, branch_ids } = req.query;
     const branchId = req.branchId || req.headers['x-branch-id'] || req.query.branch_id;
-    if (!branchId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Branch ID wajib disertakan'
-      });
-    }
 
-    const parsedBranchId = parseInt(branchId);
-    const { month, year, start_date, end_date, sort = 'terlama' } = req.query;
+    let targetBranchIds = [];
+    let targetBranches = [];
+    const isGroupMode = Boolean(group_name || branch_ids);
+
+    if (isGroupMode) {
+      const Branch = require('../models/Branch');
+      const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user.role);
+      const accessibleIds = accessibleBranches.map(b => b.id);
+
+      if (branch_ids) {
+        const ids = (typeof branch_ids === 'string' ? branch_ids.split(',') : branch_ids)
+          .map(id => parseInt(String(id).trim(), 10))
+          .filter(id => !isNaN(id) && accessibleIds.includes(id));
+        targetBranches = accessibleBranches.filter(b => ids.includes(b.id));
+      } else if (group_name && group_name !== 'Semua' && group_name !== 'ALL') {
+        targetBranches = accessibleBranches.filter(
+          b => b.group_name && b.group_name.toLowerCase() === String(group_name).toLowerCase()
+        );
+      } else {
+        targetBranches = accessibleBranches;
+      }
+
+      targetBranchIds = targetBranches.map(b => b.id);
+    } else {
+      if (!branchId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Branch ID wajib disertakan'
+        });
+      }
+      targetBranchIds = [parseInt(branchId, 10)];
+    }
 
     const currentYear = year ? parseInt(year) : new Date().getFullYear();
     const currentMonth = month !== undefined ? parseInt(month) : (new Date().getMonth() + 1);
@@ -31,14 +56,37 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
       endStr = `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`;
     }
 
+    if (targetBranchIds.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          category: { id: categoryId, name: categoryId === 'omzet' ? 'Omzet Penjualan' : 'Semua Kategori', code: null },
+          period: { month: currentMonth, year: currentYear, startDate: startStr, endDate: endStr },
+          summary: {
+            total_gross: 0,
+            total_pb1: 0,
+            total_net: 0,
+            transaction_count: 0,
+            allocated_transaction_count: 0,
+            channel_count: 0
+          },
+          sales_channels: [],
+          transactions: [],
+          branches: []
+        }
+      });
+    }
+
     // Resolve Category
     let categoryInfo = {
-      id: categoryId === 'null' || categoryId === 'uncategorized' ? null : (categoryId === 'all' ? 'all' : parseInt(categoryId)),
-      name: 'Semua Kategori',
+      id: categoryId === 'null' || categoryId === 'uncategorized'
+        ? null
+        : (categoryId === 'all' || categoryId === 'omzet' ? categoryId : parseInt(categoryId)),
+      name: categoryId === 'omzet' ? 'Omzet Penjualan' : 'Semua Kategori',
       code: null
     };
 
-    if (categoryInfo.id !== 'all' && categoryInfo.id !== null) {
+    if (categoryInfo.id !== 'all' && categoryInfo.id !== 'omzet' && categoryInfo.id !== null) {
       const catRows = await query(
         `SELECT id, name, code, parent_id FROM categories WHERE id = ? LIMIT 1`,
         [categoryInfo.id]
@@ -53,18 +101,23 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
       categoryInfo.name = 'Tanpa Kategori';
     }
 
+    const branchPlaceholders = targetBranchIds.map(() => '?').join(',');
+
     // Query Sales Channels for this category
     let channelQuery = `
-      SELECT sc.*, c.name as category_name
+      SELECT sc.*, c.name as category_name, b.name as branch_name, b.code as branch_code
       FROM sales_channels sc
       LEFT JOIN categories c ON sc.category_id = c.id
-      WHERE sc.branch_id = ? AND sc.status_deleted = 0
+      LEFT JOIN branches b ON sc.branch_id = b.id
+      WHERE sc.branch_id IN (${branchPlaceholders}) AND sc.status_deleted = 0
     `;
-    const channelParams = [parsedBranchId];
+    const channelParams = [...targetBranchIds];
 
     if (categoryInfo.id !== 'all') {
       if (categoryInfo.id === null) {
         channelQuery += ` AND sc.category_id IS NULL`;
+      } else if (categoryInfo.id === 'omzet') {
+        channelQuery += ` AND (LOWER(c.name) LIKE '%omzet%' OR LOWER(c.name) LIKE '%omset%' OR sc.category_id IS NULL)`;
       } else {
         const isOmzet = /omzet|omset/i.test(categoryInfo.name || '');
         if (isOmzet) {
@@ -93,23 +146,42 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
 
     // Query transactions in date range
     let trxQuery = `
-      SELECT t.id, t.transaction_date, t.amount, t.pb1, t.note, t.lampiran, t.type, t.category_id,
-             c.name as category_name, c.code as category_code, u.name as user_name
+      SELECT t.id, t.branch_id, t.transaction_date, t.amount, t.pb1, t.note, t.lampiran, t.type, t.category_id,
+             c.name as category_name, c.code as category_code, u.name as user_name,
+             b.name as branch_name, b.code as branch_code
       FROM transactions t
       LEFT JOIN categories c ON t.category_id = c.id
       LEFT JOIN users u ON t.user_id = u.id
-      WHERE t.branch_id = ? 
+      LEFT JOIN branches b ON t.branch_id = b.id
+      WHERE t.branch_id IN (${branchPlaceholders})
         AND t.status_deleted = 0
         AND (t.is_draft = 0 OR t.is_draft IS NULL)
         AND t.type = 'income'
         AND t.transaction_date >= ?
         AND t.transaction_date <= ?
     `;
-    const trxParams = [parsedBranchId, `${startStr} 00:00:00`, `${endStr} 23:59:59`];
+    const trxParams = [...targetBranchIds, `${startStr} 00:00:00`, `${endStr} 23:59:59`];
 
     if (categoryInfo.id !== 'all') {
       if (categoryInfo.id === null) {
         trxQuery += ` AND t.category_id IS NULL`;
+      } else if (categoryInfo.id === 'omzet') {
+        trxQuery += ` AND (
+          LOWER(c.name) LIKE '%omzet%'
+          OR LOWER(c.name) LIKE '%omset%'
+          OR EXISTS (
+            SELECT 1 FROM categories cp
+            WHERE cp.id = c.parent_id AND (LOWER(cp.name) LIKE '%omzet%' OR LOWER(cp.name) LIKE '%omset%')
+          )
+          OR EXISTS (
+            SELECT 1 FROM transaction_sales_channels tsc_sub
+            WHERE tsc_sub.transaction_id = t.id
+              AND tsc_sub.sales_channel_id IN (${channelIds.length > 0 ? channelIds.map(() => '?').join(',') : 'NULL'})
+          )
+        )`;
+        if (channelIds.length > 0) {
+          trxParams.push(...channelIds);
+        }
       } else {
         trxQuery += ` AND (
           t.category_id = ? 
@@ -389,6 +461,9 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
 
       return {
         id: c.id,
+        branch_id: c.branch_id,
+        branch_name: c.branch_name,
+        branch_code: c.branch_code,
         name: c.name,
         description: c.description,
         category_id: c.category_id,
@@ -406,6 +481,8 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
       success: true,
       data: {
         category: categoryInfo,
+        group_name: group_name || null,
+        branches: targetBranches.map(b => ({ id: b.id, name: b.name, code: b.code })),
         period: {
           month: currentMonth,
           year: currentYear,

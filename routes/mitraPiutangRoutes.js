@@ -9,7 +9,7 @@ const {
   restore,
   bulkRepayment
 } = require('../controllers/mitraPiutangController');
-const { getMitraPiutangReport } = require('../controllers/mitraPiutangReportController');
+const { getMitraPiutangReport, deleteMitraRepayment } = require('../controllers/mitraPiutangReportController');
 const { authenticate } = require('../middleware/auth');
 const { getCurrentBranch } = require('../middleware/branch');
 
@@ -19,6 +19,9 @@ router.use(getCurrentBranch);
 
 // Get report
 router.get('/report', getMitraPiutangReport);
+
+// Soft delete a repayment record from report / mitra history
+router.delete('/repayments/:repaymentId', deleteMitraRepayment);
 
 // Get all mitra piutang
 router.get('/', getAll);

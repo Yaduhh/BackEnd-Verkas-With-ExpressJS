@@ -127,7 +127,7 @@ const getActivityLogs = async (req, res, next) => {
         startDate: start_date,
         endDate: end_date,
       });
-    } else if (userRole === 'admin') {
+    } else if (userRole === 'admin' || userRole === 'kasir') {
       // Admin: hanya bisa lihat log di branch yang mereka assign
       if (!branchId) {
         return res.status(400).json({

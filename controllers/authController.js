@@ -458,8 +458,8 @@ const updateUserAccess = async (req, res, next) => {
       });
     }
 
-    // CASE 2: Role change between 'admin' and 'co-owner'
-    if (role && role !== targetUser.role && ['admin', 'co-owner'].includes(role)) {
+    // CASE 2: Role change between 'admin', 'kasir', and 'co-owner'
+    if (role && role !== targetUser.role && ['admin', 'kasir', 'co-owner'].includes(role)) {
       let teams = await OwnerTeam.findByUserId(rootOwnerId);
       if (teams.length === 0) {
         const createdTeam = await OwnerTeam.create({
@@ -474,7 +474,7 @@ const updateUserAccess = async (req, res, next) => {
           await OwnerTeam.addMember(t.id, targetId, req.userId, 'co-owner');
         }
         await query('DELETE FROM branch_pics WHERE user_id = ?', [targetId]);
-      } else if (role === 'admin') {
+      } else if (role === 'admin' || role === 'kasir') {
         await query('DELETE FROM owner_team_members WHERE user_id = ?', [targetId]);
         await query(
           'UPDATE bagi_hasil_approval_settings SET approver_1_user_id = CASE WHEN approver_1_user_id = ? THEN NULL ELSE approver_1_user_id END, approver_2_user_id = CASE WHEN approver_2_user_id = ? THEN NULL ELSE approver_2_user_id END WHERE owner_id = ?',
@@ -485,7 +485,7 @@ const updateUserAccess = async (req, res, next) => {
 
     const updatedUser = await User.update(targetId, {
       name: name !== undefined ? name : undefined,
-      role: role && ['admin', 'co-owner'].includes(role) ? role : undefined,
+      role: role && ['admin', 'kasir', 'co-owner'].includes(role) ? role : undefined,
       createdBy: targetUser.role === 'owner' ? undefined : rootOwnerId,
       canCreate: can_create !== undefined ? can_create : undefined,
       canEdit: can_edit !== undefined ? can_edit : undefined,
@@ -575,10 +575,10 @@ const deleteAdmin = async (req, res, next) => {
       });
     }
 
-    if (req.user.role === 'co-owner' && targetUser.role !== 'admin') {
+    if (req.user.role === 'co-owner' && targetUser.role !== 'admin' && targetUser.role !== 'kasir') {
       return res.status(403).json({
         success: false,
-        message: 'Co-Owner hanya dapat menghapus akun Admin Cabang.'
+        message: 'Co-Owner hanya dapat menghapus akun Admin Cabang atau Kasir.'
       });
     }
 

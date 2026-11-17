@@ -1,4 +1,62 @@
 const { query } = require('../config/database');
+const { ensurePettyCashLockColumn, normalizeLockBankFlag } = require('../utils/pettyCashHelper');
+
+let columnsReadyPromise = null;
+
+async function ensureInitialBalanceColumns() {
+  if (!columnsReadyPromise) {
+    columnsReadyPromise = (async () => {
+      try {
+        const cols = await query(
+          `SELECT COLUMN_NAME
+           FROM INFORMATION_SCHEMA.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE()
+             AND TABLE_NAME = 'bank_accounts'
+             AND COLUMN_NAME IN ('initial_balance', 'initial_balance_date', 'initial_balance_note')`
+        );
+        const existing = new Set(cols.map((c) => c.COLUMN_NAME));
+
+        if (!existing.has('initial_balance')) {
+          await query(
+            `ALTER TABLE bank_accounts
+             ADD COLUMN initial_balance DECIMAL(15, 2) NOT NULL DEFAULT 0.00 AFTER type`
+          );
+        }
+        if (!existing.has('initial_balance_date')) {
+          await query(
+            `ALTER TABLE bank_accounts
+             ADD COLUMN initial_balance_date DATE NULL DEFAULT NULL AFTER initial_balance`
+          );
+        }
+        if (!existing.has('initial_balance_note')) {
+          await query(
+            `ALTER TABLE bank_accounts
+             ADD COLUMN initial_balance_note VARCHAR(255) NULL DEFAULT NULL AFTER initial_balance_date`
+          );
+        }
+      } catch (err) {
+        columnsReadyPromise = null;
+        throw err;
+      }
+    })();
+  }
+  return columnsReadyPromise;
+}
+
+function normalizeDateOnly(val) {
+  if (!val) return null;
+  if (val instanceof Date) {
+    if (isNaN(val.getTime())) return null;
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0');
+    const d = String(val.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  const str = String(val).trim();
+  if (!str) return null;
+  const match = str.match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : null;
+}
 
 const BALANCE_SQL = `
   CAST(
@@ -15,6 +73,8 @@ const BALANCE_SQL = `
         )
       ELSE
         (
+          COALESCE(ba.initial_balance, 0)
+          +
           COALESCE(
             (SELECT SUM(
                CASE 
@@ -26,7 +86,8 @@ const BALANCE_SQL = `
              WHERE t.bank_account_id = ba.id 
                AND t.type = 'income'
                AND t.status_deleted = false 
-               AND (t.is_draft = false OR t.is_draft IS NULL)),
+               AND (t.is_draft = false OR t.is_draft IS NULL)
+               AND (ba.initial_balance_date IS NULL OR DATE(t.transaction_date) >= ba.initial_balance_date)),
             0
           )
           +
@@ -36,7 +97,8 @@ const BALANCE_SQL = `
              JOIN transactions t ON tid.transaction_id = t.id
              WHERE tid.bank_account_id = ba.id
                AND t.status_deleted = false
-               AND (t.is_draft = false OR t.is_draft IS NULL)),
+               AND (t.is_draft = false OR t.is_draft IS NULL)
+               AND (ba.initial_balance_date IS NULL OR DATE(t.transaction_date) >= ba.initial_balance_date)),
             0
           )
           -
@@ -46,7 +108,20 @@ const BALANCE_SQL = `
              WHERE t.bank_account_id = ba.id
                AND t.type = 'expense'
                AND t.status_deleted = false
-               AND (t.is_draft = false OR t.is_draft IS NULL)),
+               AND (t.is_draft = false OR t.is_draft IS NULL)
+               AND (ba.initial_balance_date IS NULL OR DATE(t.transaction_date) >= ba.initial_balance_date)),
+            0
+          )
+          -
+          COALESCE(
+            (SELECT SUM(pct.amount)
+             FROM petty_cash_transactions pct
+             JOIN petty_cashes pc ON pct.petty_cash_id = pc.id
+             WHERE pct.bank_account_id = ba.id
+               AND pct.type = 'expense'
+               AND pct.status_deleted = 0
+               AND pc.status_deleted = 0
+               AND (ba.initial_balance_date IS NULL OR DATE(pct.transaction_date) >= ba.initial_balance_date)),
             0
           )
           +
@@ -54,7 +129,8 @@ const BALANCE_SQL = `
             (SELECT SUM(ft.amount)
              FROM fund_transfers ft
              WHERE ft.to_bank_account_id = ba.id
-               AND ft.status_deleted = 0),
+               AND ft.status_deleted = 0
+               AND (ba.initial_balance_date IS NULL OR DATE(ft.transfer_date) >= ba.initial_balance_date)),
             0
           )
           -
@@ -62,7 +138,20 @@ const BALANCE_SQL = `
             (SELECT SUM(ft.amount)
              FROM fund_transfers ft
              WHERE ft.from_bank_account_id = ba.id
-               AND ft.status_deleted = 0),
+               AND ft.status_deleted = 0
+               AND (ba.initial_balance_date IS NULL OR DATE(ft.transfer_date) >= ba.initial_balance_date)),
+            0
+          )
+          +
+          COALESCE(
+            (SELECT SUM(pct.amount)
+             FROM petty_cash_transactions pct
+             JOIN petty_cashes pc ON pct.petty_cash_id = pc.id
+             WHERE pc.bank_account_id = ba.id
+               AND pct.type = 'topup'
+               AND pct.status_deleted = 0
+               AND pc.status_deleted = 0
+               AND (ba.initial_balance_date IS NULL OR DATE(pct.transaction_date) >= ba.initial_balance_date)),
             0
           )
         )
@@ -72,9 +161,25 @@ const BALANCE_SQL = `
 
 class BankAccount {
   static async findAll(branchId, type = null) {
+    await ensureInitialBalanceColumns();
+    await ensurePettyCashLockColumn();
+
     let sql = `
       SELECT 
-        ba.*,
+        ba.id,
+        ba.name,
+        ba.account_number,
+        ba.branch_id,
+        ba.type,
+        CAST(COALESCE(ba.initial_balance, 0) AS DECIMAL(15, 2)) AS initial_balance,
+        DATE_FORMAT(ba.initial_balance_date, '%Y-%m-%d') AS initial_balance_date,
+        ba.initial_balance_note,
+        ba.is_active,
+        ba.created_at,
+        ba.updated_at,
+        (SELECT pc.id FROM petty_cashes pc WHERE pc.bank_account_id = ba.id AND pc.status_deleted = 0 LIMIT 1) AS linked_petty_cash_id,
+        (SELECT pc.name FROM petty_cashes pc WHERE pc.bank_account_id = ba.id AND pc.status_deleted = 0 LIMIT 1) AS linked_petty_cash_name,
+        COALESCE((SELECT pc.lock_bank_account FROM petty_cashes pc WHERE pc.bank_account_id = ba.id AND pc.status_deleted = 0 LIMIT 1), 0) AS linked_petty_cash_lock_bank,
         ${BALANCE_SQL}
       FROM bank_accounts ba
       WHERE ba.branch_id = ? AND ba.is_active = 1
@@ -93,33 +198,92 @@ class BankAccount {
     }
 
     sql += ' ORDER BY ba.name ASC';
-    return await query(sql, params);
+    const rows = await query(sql, params);
+    return rows.map((row) => ({
+      ...row,
+      linked_petty_cash_lock_bank: Boolean(row.linked_petty_cash_id && row.linked_petty_cash_lock_bank),
+      initial_balance: Number(row.initial_balance || 0),
+      balance: Number(row.balance || 0)
+    }));
   }
 
   static async findById(id) {
+    await ensureInitialBalanceColumns();
+    await ensurePettyCashLockColumn();
+
     const results = await query(
       `SELECT 
-        ba.*,
+        ba.id,
+        ba.name,
+        ba.account_number,
+        ba.branch_id,
+        ba.type,
+        CAST(COALESCE(ba.initial_balance, 0) AS DECIMAL(15, 2)) AS initial_balance,
+        DATE_FORMAT(ba.initial_balance_date, '%Y-%m-%d') AS initial_balance_date,
+        ba.initial_balance_note,
+        ba.is_active,
+        ba.created_at,
+        ba.updated_at,
+        (SELECT pc.id FROM petty_cashes pc WHERE pc.bank_account_id = ba.id AND pc.status_deleted = 0 LIMIT 1) AS linked_petty_cash_id,
+        (SELECT pc.name FROM petty_cashes pc WHERE pc.bank_account_id = ba.id AND pc.status_deleted = 0 LIMIT 1) AS linked_petty_cash_name,
+        COALESCE((SELECT pc.lock_bank_account FROM petty_cashes pc WHERE pc.bank_account_id = ba.id AND pc.status_deleted = 0 LIMIT 1), 0) AS linked_petty_cash_lock_bank,
         ${BALANCE_SQL}
       FROM bank_accounts ba
       WHERE ba.id = ?`,
       [id]
     );
-    return results[0] || null;
+    if (!results[0]) return null;
+    return {
+      ...results[0],
+      linked_petty_cash_lock_bank: Boolean(results[0].linked_petty_cash_id && results[0].linked_petty_cash_lock_bank),
+      initial_balance: Number(results[0].initial_balance || 0),
+      balance: Number(results[0].balance || 0)
+    };
   }
 
-  static async create({ name, accountNumber = null, branchId, type = 'savings' }) {
+  static async create({
+    name,
+    accountNumber = null,
+    branchId,
+    type = 'savings',
+    initialBalance = 0,
+    initialBalanceDate = null,
+    initialBalanceNote = null
+  }) {
+    await ensureInitialBalanceColumns();
+
     const validTypes = ['savings', 'operational', 'income', 'both'];
     const selectedType = validTypes.includes(type) ? type : 'savings';
+    const isSavings = selectedType === 'savings';
+
+    const parsedInitialBalance = isSavings ? 0 : (Number.isFinite(Number(initialBalance)) ? Number(initialBalance) : 0);
+    const parsedInitialDate = isSavings ? null : normalizeDateOnly(initialBalanceDate);
+    const parsedInitialNote = isSavings
+      ? null
+      : (initialBalanceNote && String(initialBalanceNote).trim() ? String(initialBalanceNote).trim() : null);
 
     const result = await query(
-      'INSERT INTO bank_accounts (name, account_number, branch_id, type) VALUES (?, ?, ?, ?)',
-      [name, accountNumber, branchId, selectedType]
+      `INSERT INTO bank_accounts (name, account_number, branch_id, type, initial_balance, initial_balance_date, initial_balance_note)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [name, accountNumber, branchId, selectedType, parsedInitialBalance, parsedInitialDate, parsedInitialNote]
     );
     return await this.findById(result.insertId);
   }
 
-  static async update(id, { name, accountNumber, type }) {
+  static async update(
+    id,
+    { name, accountNumber, type, initialBalance, initialBalanceDate, initialBalanceNote, linkedPettyCashId, linkedPettyCashLockBank }
+  ) {
+    await ensureInitialBalanceColumns();
+    await ensurePettyCashLockColumn();
+
+    const existing = await this.findById(id);
+    if (!existing) return null;
+
+    const validTypes = ['savings', 'operational', 'income', 'both'];
+    const effectiveType = type !== undefined && validTypes.includes(type) ? type : existing.type;
+    const isSavings = effectiveType === 'savings';
+
     const updates = [];
     const params = [];
 
@@ -133,11 +297,45 @@ class BankAccount {
       params.push(accountNumber);
     }
 
-    if (type !== undefined) {
-      const validTypes = ['savings', 'operational', 'income', 'both'];
-      if (validTypes.includes(type)) {
-        updates.push('type = ?');
-        params.push(type);
+    if (type !== undefined && validTypes.includes(type)) {
+      updates.push('type = ?');
+      params.push(type);
+    }
+
+    if (isSavings) {
+      if (
+        type === 'savings' ||
+        initialBalance !== undefined ||
+        initialBalanceDate !== undefined ||
+        initialBalanceNote !== undefined
+      ) {
+        updates.push('initial_balance = ?', 'initial_balance_date = ?', 'initial_balance_note = ?');
+        params.push(0, null, null);
+      }
+      // Savings account cannot remain linked to Kas Kecil
+      await query(
+        `UPDATE petty_cashes SET bank_account_id = NULL, lock_bank_account = 0 WHERE bank_account_id = ? AND status_deleted = 0`,
+        [id]
+      );
+    } else {
+      if (initialBalance !== undefined) {
+        const num = Number(initialBalance);
+        updates.push('initial_balance = ?');
+        params.push(Number.isFinite(num) ? num : 0);
+      }
+
+      if (initialBalanceDate !== undefined) {
+        updates.push('initial_balance_date = ?');
+        params.push(normalizeDateOnly(initialBalanceDate));
+      }
+
+      if (initialBalanceNote !== undefined) {
+        const cleanNote =
+          initialBalanceNote && String(initialBalanceNote).trim()
+            ? String(initialBalanceNote).trim()
+            : null;
+        updates.push('initial_balance_note = ?');
+        params.push(cleanNote);
       }
     }
 
@@ -147,6 +345,69 @@ class BankAccount {
         `UPDATE bank_accounts SET ${updates.join(', ')} WHERE id = ?`,
         params
       );
+    }
+
+    // Handle linked Kas Kecil association & initial balance sync
+    if (!isSavings && linkedPettyCashId !== undefined) {
+      if (linkedPettyCashId === null || linkedPettyCashId === '') {
+        await query(
+          `UPDATE petty_cashes SET bank_account_id = NULL, lock_bank_account = 0 WHERE bank_account_id = ? AND status_deleted = 0`,
+          [id]
+        );
+      } else {
+        const targetPcId = parseInt(linkedPettyCashId, 10);
+        const pcRows = await query(
+          `SELECT id, initial_balance FROM petty_cashes WHERE id = ? AND branch_id = ? AND status_deleted = 0`,
+          [targetPcId, existing.branch_id]
+        );
+        if (!pcRows || pcRows.length === 0) {
+          throw new Error('Kantong Kas Kecil tidak ditemukan di buku kas ini');
+        }
+        // Clear any prior pocket linked to this bank account
+        await query(
+          `UPDATE petty_cashes SET bank_account_id = NULL, lock_bank_account = 0 WHERE bank_account_id = ? AND id != ? AND status_deleted = 0`,
+          [id, targetPcId]
+        );
+        if (linkedPettyCashLockBank !== undefined) {
+          const nextLock = normalizeLockBankFlag(linkedPettyCashLockBank, id);
+          await query(
+            `UPDATE petty_cashes SET bank_account_id = ?, lock_bank_account = ? WHERE id = ? AND branch_id = ?`,
+            [id, nextLock, targetPcId, existing.branch_id]
+          );
+        } else {
+          await query(
+            `UPDATE petty_cashes SET bank_account_id = ? WHERE id = ? AND branch_id = ?`,
+            [id, targetPcId, existing.branch_id]
+          );
+        }
+
+        const [refreshedBa] = await query(`SELECT initial_balance FROM bank_accounts WHERE id = ?`, [id]);
+        const currentBaInitial = Number(refreshedBa?.initial_balance || 0);
+        const currentPcInitial = Number(pcRows[0].initial_balance || 0);
+        if (initialBalance !== undefined && Number(initialBalance) > 0) {
+          await query(`UPDATE petty_cashes SET initial_balance = ? WHERE id = ?`, [Number(initialBalance), targetPcId]);
+        } else if (currentBaInitial === 0 && currentPcInitial > 0) {
+          await query(`UPDATE bank_accounts SET initial_balance = ? WHERE id = ?`, [currentPcInitial, id]);
+        } else if (currentBaInitial > 0 && currentPcInitial === 0) {
+          await query(`UPDATE petty_cashes SET initial_balance = ? WHERE id = ?`, [currentBaInitial, targetPcId]);
+        }
+      }
+    } else if (!isSavings) {
+      if (linkedPettyCashLockBank !== undefined) {
+        const nextLock = normalizeLockBankFlag(linkedPettyCashLockBank, id);
+        await query(
+          `UPDATE petty_cashes SET lock_bank_account = ? WHERE bank_account_id = ? AND status_deleted = 0`,
+          [nextLock, id]
+        );
+      }
+      if (initialBalance !== undefined) {
+        // Keep already linked pocket's initial_balance in sync when user edits Rekening initial balance
+        const num = Number(initialBalance);
+        await query(
+          `UPDATE petty_cashes SET initial_balance = ? WHERE bank_account_id = ? AND status_deleted = 0`,
+          [Number.isFinite(num) ? num : 0, id]
+        );
+      }
     }
 
     return await this.findById(id);
@@ -160,8 +421,13 @@ class BankAccount {
     const account = await this.findById(id);
     if (!account) return null;
 
-    // 1. Direct Income Summary
-    const [directIncome] = await query(`
+    const isSavings = account.type === 'savings';
+    const initialBalance = isSavings ? 0 : Number(account.initial_balance || 0);
+    const cutoffDate = !isSavings && account.initial_balance_date ? account.initial_balance_date : null;
+    const initialBalanceNote = !isSavings ? (account.initial_balance_note || null) : null;
+
+    // 1. Direct Income Summary (respects cut-off date when set)
+    const directIncomeSql = `
       SELECT 
         COALESCE(SUM(
           CASE 
@@ -175,10 +441,12 @@ class BankAccount {
         AND t.type = 'income'
         AND t.status_deleted = false
         AND (t.is_draft = false OR t.is_draft IS NULL)
-    `, [id]);
+        ${cutoffDate ? 'AND DATE(t.transaction_date) >= ?' : ''}
+    `;
+    const [directIncome] = await query(directIncomeSql, cutoffDate ? [id, cutoffDate] : [id]);
 
-    // 2. Income Details Summary (Omzet kasir / apps)
-    const [incomeDetails] = await query(`
+    // 2. Income Details Summary (Omzet kasir / apps — respects cut-off date when set)
+    const incomeDetailsSql = `
       SELECT 
         COALESCE(SUM(COALESCE(tid.amount_cashier, tid.amount_app, 0)), 0) as total,
         COUNT(DISTINCT tid.transaction_id) as count
@@ -187,10 +455,12 @@ class BankAccount {
       WHERE tid.bank_account_id = ?
         AND t.status_deleted = false
         AND (t.is_draft = false OR t.is_draft IS NULL)
-    `, [id]);
+        ${cutoffDate ? 'AND DATE(t.transaction_date) >= ?' : ''}
+    `;
+    const [incomeDetails] = await query(incomeDetailsSql, cutoffDate ? [id, cutoffDate] : [id]);
 
-    // 3. Operational Expenses Summary
-    const [expenses] = await query(`
+    // 3. Operational Expenses Summary (respects cut-off date when set)
+    const expensesSql = `
       SELECT 
         COALESCE(SUM(t.amount), 0) as total,
         COUNT(t.id) as count
@@ -199,27 +469,63 @@ class BankAccount {
         AND t.type = 'expense'
         AND t.status_deleted = false
         AND (t.is_draft = false OR t.is_draft IS NULL)
-    `, [id]);
+        ${cutoffDate ? 'AND DATE(t.transaction_date) >= ?' : ''}
+    `;
+    const pettyCashExpensesSql = `
+      SELECT
+        COALESCE(SUM(pct.amount), 0) as total,
+        COUNT(pct.id) as count
+      FROM petty_cash_transactions pct
+      JOIN petty_cashes pc ON pct.petty_cash_id = pc.id
+      WHERE pct.bank_account_id = ?
+        AND pct.type = 'expense'
+        AND pct.status_deleted = 0
+        AND pc.status_deleted = 0
+        ${cutoffDate ? 'AND DATE(pct.transaction_date) >= ?' : ''}
+    `;
+    const [[expenses], [pettyCashExpenses]] = await Promise.all([
+      query(expensesSql, cutoffDate ? [id, cutoffDate] : [id]),
+      query(pettyCashExpensesSql, cutoffDate ? [id, cutoffDate] : [id])
+    ]);
 
-    // 4. Fund Transfers Incoming Summary (Transfer Masuk)
-    const [transfersIn] = await query(`
+    // 4. Fund Transfers & Linked Petty Cash Top-Ups Incoming Summary (respects cut-off date when set)
+    const transfersInSql = `
       SELECT 
         COALESCE(SUM(ft.amount), 0) as total,
         COUNT(ft.id) as count
       FROM fund_transfers ft
       WHERE ft.to_bank_account_id = ?
         AND ft.status_deleted = 0
-    `, [id]);
+        ${cutoffDate ? 'AND DATE(ft.transfer_date) >= ?' : ''}
+    `;
+    const pettyCashTopupsInSql = `
+      SELECT
+        COALESCE(SUM(pct.amount), 0) as total,
+        COUNT(pct.id) as count
+      FROM petty_cash_transactions pct
+      JOIN petty_cashes pc ON pct.petty_cash_id = pc.id
+      WHERE pc.bank_account_id = ?
+        AND pct.type = 'topup'
+        AND pct.status_deleted = 0
+        AND pc.status_deleted = 0
+        ${cutoffDate ? 'AND DATE(pct.transaction_date) >= ?' : ''}
+    `;
+    const [[transfersIn], [pettyCashTopupsIn]] = await Promise.all([
+      query(transfersInSql, cutoffDate ? [id, cutoffDate] : [id]),
+      query(pettyCashTopupsInSql, cutoffDate ? [id, cutoffDate] : [id])
+    ]);
 
-    // 5. Fund Transfers Outgoing Summary (Transfer Keluar)
-    const [transfersOut] = await query(`
+    // 5. Fund Transfers Outgoing Summary (respects cut-off date when set)
+    const transfersOutSql = `
       SELECT 
         COALESCE(SUM(ft.amount), 0) as total,
         COUNT(ft.id) as count
       FROM fund_transfers ft
       WHERE ft.from_bank_account_id = ?
         AND ft.status_deleted = 0
-    `, [id]);
+        ${cutoffDate ? 'AND DATE(ft.transfer_date) >= ?' : ''}
+    `;
+    const [transfersOut] = await query(transfersOutSql, cutoffDate ? [id, cutoffDate] : [id]);
 
     // 6. Savings Allocations (if savings)
     const allocations = await query(`
@@ -237,12 +543,16 @@ class BankAccount {
 
     const totalAllocations = allocations.reduce((sum, a) => sum + Number(a.allocated_amount || 0), 0);
     const totalIncome = Number(directIncome.total) + Number(incomeDetails.total);
-    const totalExpense = Number(expenses.total);
-    const totalTransferIn = Number(transfersIn.total);
+    const totalExpense = Number(expenses.total) + Number(pettyCashExpenses.total);
+    const totalExpenseCount = Number(expenses.count || 0) + Number(pettyCashExpenses.count || 0);
+    const totalTransferIn = Number(transfersIn.total) + Number(pettyCashTopupsIn.total);
+    const totalTransferInCount = Number(transfersIn.count || 0) + Number(pettyCashTopupsIn.count || 0);
     const totalTransferOut = Number(transfersOut.total);
-    const calculatedBalance = (totalIncome + totalTransferIn) - (totalExpense + totalTransferOut);
+    const calculatedBalance = isSavings
+      ? totalAllocations
+      : initialBalance + (totalIncome + totalTransferIn) - (totalExpense + totalTransferOut);
 
-    // 7. Fetch all 3 mutation streams safely (avoids collation mismatch on MySQL UNION across utf8mb4_unicode_ci and utf8mb4_general_ci)
+    // 7. Fetch all 3 mutation streams safely (historical records preserved, flagged if before cut-off)
     let txQuery = `
       SELECT 
         CONCAT('tx_', t.id) as unique_id,
@@ -270,11 +580,11 @@ class BankAccount {
     `;
     const txParams = [id];
     if (startDate) {
-      txQuery += ' AND t.transaction_date >= ?';
+      txQuery += ' AND DATE(t.transaction_date) >= ?';
       txParams.push(startDate);
     }
     if (endDate) {
-      txQuery += ' AND t.transaction_date <= ?';
+      txQuery += ' AND DATE(t.transaction_date) <= ?';
       txParams.push(endDate);
     }
 
@@ -304,11 +614,11 @@ class BankAccount {
     `;
     const tidParams = [id];
     if (startDate) {
-      tidQuery += ' AND t.transaction_date >= ?';
+      tidQuery += ' AND DATE(t.transaction_date) >= ?';
       tidParams.push(startDate);
     }
     if (endDate) {
-      tidQuery += ' AND t.transaction_date <= ?';
+      tidQuery += ' AND DATE(t.transaction_date) <= ?';
       tidParams.push(endDate);
     }
 
@@ -336,21 +646,92 @@ class BankAccount {
     `;
     const ftParams = [id, id, id, id, id];
     if (startDate) {
-      ftQuery += ' AND ft.transfer_date >= ?';
+      ftQuery += ' AND DATE(ft.transfer_date) >= ?';
       ftParams.push(startDate);
     }
     if (endDate) {
-      ftQuery += ' AND ft.transfer_date <= ?';
+      ftQuery += ' AND DATE(ft.transfer_date) <= ?';
       ftParams.push(endDate);
     }
 
-    const [txResults, tidResults, ftResults] = await Promise.all([
+    let pctQuery = `
+      SELECT
+        CONCAT('pct_', pct.id) as unique_id,
+        pct.petty_cash_id as reference_id,
+        'petty_cash' as source_type,
+        'expense' as mutation_type,
+        pct.amount as amount,
+        DATE_FORMAT(pct.transaction_date, '%Y-%m-%d') as date,
+        pct.created_at,
+        CONCAT('Kas Kecil: ', COALESCE(pc.name, '-')) as category_name,
+        pct.description as description,
+        COALESCE(u.name, u.email) as user_name,
+        pct.lampiran,
+        NULL as from_account_name,
+        NULL as to_account_name
+      FROM petty_cash_transactions pct
+      JOIN petty_cashes pc ON pct.petty_cash_id = pc.id
+      LEFT JOIN users u ON pct.created_by = u.id
+      WHERE pct.bank_account_id = ?
+        AND pct.type = 'expense'
+        AND pct.status_deleted = 0
+        AND pc.status_deleted = 0
+    `;
+    const pctParams = [id];
+    if (startDate) {
+      pctQuery += ' AND DATE(pct.transaction_date) >= ?';
+      pctParams.push(startDate);
+    }
+    if (endDate) {
+      pctQuery += ' AND DATE(pct.transaction_date) <= ?';
+      pctParams.push(endDate);
+    }
+
+    let pctTopupQuery = `
+      SELECT
+        CONCAT('pct_in_', pct.id) as unique_id,
+        pct.petty_cash_id as reference_id,
+        'petty_cash' as source_type,
+        'transfer_in' as mutation_type,
+        pct.amount as amount,
+        DATE_FORMAT(pct.transaction_date, '%Y-%m-%d') as date,
+        pct.created_at,
+        CONCAT('Top-Up Kas Kecil: ', COALESCE(pc.name, '-')) as category_name,
+        COALESCE(pct.description, t.note) as description,
+        COALESCE(u.name, u.email) as user_name,
+        COALESCE(pct.lampiran, t.lampiran) as lampiran,
+        src_ba.name as from_account_name,
+        ba.name as to_account_name
+      FROM petty_cash_transactions pct
+      JOIN petty_cashes pc ON pct.petty_cash_id = pc.id
+      JOIN bank_accounts ba ON pc.bank_account_id = ba.id
+      LEFT JOIN transactions t ON pct.source_transaction_id = t.id
+      LEFT JOIN bank_accounts src_ba ON t.bank_account_id = src_ba.id
+      LEFT JOIN users u ON pct.created_by = u.id
+      WHERE pc.bank_account_id = ?
+        AND pct.type = 'topup'
+        AND pct.status_deleted = 0
+        AND pc.status_deleted = 0
+    `;
+    const pctTopupParams = [id];
+    if (startDate) {
+      pctTopupQuery += ' AND DATE(pct.transaction_date) >= ?';
+      pctTopupParams.push(startDate);
+    }
+    if (endDate) {
+      pctTopupQuery += ' AND DATE(pct.transaction_date) <= ?';
+      pctTopupParams.push(endDate);
+    }
+
+    const [txResults, tidResults, ftResults, pctResults, pctTopupResults] = await Promise.all([
       query(txQuery, txParams),
       query(tidQuery, tidParams),
-      query(ftQuery, ftParams)
+      query(ftQuery, ftParams),
+      query(pctQuery, pctParams),
+      query(pctTopupQuery, pctTopupParams)
     ]);
 
-    let allMutations = [...txResults, ...tidResults, ...ftResults];
+    let allMutations = [...txResults, ...tidResults, ...ftResults, ...pctResults, ...pctTopupResults];
 
     // Filter by type
     if (type && type !== 'all') {
@@ -386,44 +767,68 @@ class BankAccount {
     const offset = (validPage - 1) * validLimit;
     const paginatedMutations = allMutations.slice(offset, offset + validLimit);
 
-    const formattedMutations = paginatedMutations.map(m => {
-      let parsedLampiran = [];
-      if (m.lampiran) {
-        if (typeof m.lampiran === 'string') {
-          try {
-            parsedLampiran = JSON.parse(m.lampiran);
-          } catch (e) {
-            parsedLampiran = [m.lampiran];
-          }
-        } else if (Array.isArray(m.lampiran)) {
-          parsedLampiran = m.lampiran;
+    const extractAttachmentUrls = (raw) => {
+      if (!raw) return [];
+      if (Array.isArray(raw)) {
+        return raw
+          .map((item) => {
+            if (typeof item === 'string') return item.trim();
+            if (item && typeof item === 'object') {
+              return String(item.url || item.path || item.filename || item.file_path || '').trim();
+            }
+            return '';
+          })
+          .filter(Boolean);
+      }
+      if (typeof raw === 'string') {
+        const trimmed = raw.trim();
+        if (!trimmed) return [];
+        try {
+          const parsed = JSON.parse(trimmed);
+          return extractAttachmentUrls(parsed);
+        } catch (e) {
+          return [trimmed];
         }
       }
-      return {
-        ...m,
-        amount: Number(m.amount),
-        lampiran: Array.isArray(parsedLampiran) ? parsedLampiran : [parsedLampiran].filter(Boolean)
-      };
-    });
+      if (typeof raw === 'object') {
+        const u = String(raw.url || raw.path || raw.filename || raw.file_path || '').trim();
+        return u ? [u] : [];
+      }
+      return [];
+    };
+
+    const formattedMutations = paginatedMutations.map(m => ({
+      ...m,
+      amount: Number(m.amount),
+      lampiran: extractAttachmentUrls(m.lampiran),
+      is_before_cutoff: Boolean(cutoffDate && m.date && m.date < cutoffDate)
+    }));
 
     return {
       account,
       breakdown: {
+        initial_balance: initialBalance,
+        initial_balance_date: cutoffDate,
+        initial_balance_note: initialBalanceNote,
         total_income_direct: Number(directIncome.total),
         direct_income_count: directIncome.count,
         total_income_details: Number(incomeDetails.total),
         income_details_count: incomeDetails.count,
         total_income: totalIncome,
         total_expense: totalExpense,
-        expense_count: expenses.count,
+        expense_count: totalExpenseCount,
         total_transfer_in: totalTransferIn,
-        transfer_in_count: transfersIn.count,
+        transfer_in_count: totalTransferInCount,
         total_transfer_out: totalTransferOut,
         transfer_out_count: transfersOut.count,
         net_transfer: totalTransferIn - totalTransferOut,
         calculated_balance: calculatedBalance,
+        current_balance: calculatedBalance,
         total_allocations: totalAllocations,
-        allocations
+        allocations: allocations.map(a => ({
+          ...a,
+          allocated_amount: Number(a.allocated_amount)
+        }))
       },
       mutations: formattedMutations,
       pagination: {
