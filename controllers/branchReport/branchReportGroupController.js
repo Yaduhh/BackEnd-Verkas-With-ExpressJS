@@ -25,6 +25,9 @@ const getConsolidatedReport = async (req, res, next) => {
     try {
         const month = parseInt(req.query.month) || new Date().getMonth() + 1;
         const year = parseInt(req.query.year) || new Date().getFullYear();
+        const customStart = typeof req.query.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate) ? req.query.startDate : null;
+        const customEnd = typeof req.query.endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.endDate) ? req.query.endDate : null;
+        const hasCustomRange = Boolean(customStart && customEnd);
         const { branchIds, group_name } = req.query;
 
         const startDate = hasCustomRange ? customStart : `${year}-${String(month).padStart(2, '0')}-01`;
