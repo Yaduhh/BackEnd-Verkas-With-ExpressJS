@@ -866,6 +866,7 @@ class CashierReport {
         submitted_by_role: null,
         status: 'submitted',
         is_legacy_transaction: true,
+        tx_count: txRows.length,
         total_customer: totalCustomer,
         apc,
         omzet_gross: omzetGross,
@@ -929,6 +930,44 @@ class CashierReport {
 
     if (!snapshot) {
       snapshot = await this.getLegacyOmzetSnapshot(branchId, dateStr);
+    } else {
+      const hasSavedOmzet = Boolean(
+        (snapshot.omzet_items && snapshot.omzet_items.length > 0) ||
+          toNum(snapshot.report?.omzet_gross) > 0 ||
+          toNum(snapshot.report?.omzet_net) > 0 ||
+          toNum(snapshot.report?.total_customer) > 0 ||
+          Boolean(snapshot.report?.omzet_transaction_id)
+      );
+      if (!hasSavedOmzet) {
+        const legacySnapshot = await this.getLegacyOmzetSnapshot(branchId, dateStr);
+        if (legacySnapshot) {
+          snapshot = {
+            ...snapshot,
+            report: {
+              ...snapshot.report,
+              created_by_names: snapshot.report.created_by_names || legacySnapshot.report.created_by_names,
+              submitted_by_name: snapshot.report.submitted_by_name || legacySnapshot.report.submitted_by_name,
+              status: snapshot.report.status === 'draft' ? 'submitted' : snapshot.report.status,
+              total_customer: legacySnapshot.report.total_customer,
+              apc: legacySnapshot.report.apc,
+              omzet_gross: legacySnapshot.report.omzet_gross,
+              pb1_amount: legacySnapshot.report.pb1_amount,
+              omzet_net: legacySnapshot.report.omzet_net,
+              omzet_sales_app: legacySnapshot.report.omzet_sales_app,
+              omzet_sales_cashier: legacySnapshot.report.omzet_sales_cashier,
+              omzet_sales_notes: snapshot.report.omzet_sales_notes || legacySnapshot.report.omzet_sales_notes,
+              cash_omzet: legacySnapshot.report.cash_omzet,
+              omzet_transaction_id: legacySnapshot.report.omzet_transaction_id,
+              merge_omzet_with_payment_methods: true
+            },
+            omzet_items: legacySnapshot.omzet_items || [],
+            sales_channel_items:
+              snapshot.sales_channel_items && snapshot.sales_channel_items.length > 0
+                ? snapshot.sales_channel_items
+                : (legacySnapshot.sales_channel_items || [])
+          };
+        }
+      }
     }
 
     const target = await this.getBranchTarget(branchId, month, year);
@@ -1061,11 +1100,35 @@ class CashierReport {
 
     for (const lr of legacyRows) {
       const dateKey = sanitizeDateOnly(lr.report_date);
-      if (!dateKey || reportedDateSet.has(dateKey)) continue;
+      if (!dateKey) continue;
       const gross = toNum(lr.omzet_gross);
       const pb1 = toNum(lr.pb1_amount);
       const net = Math.max(0, round2(gross - pb1));
       const tc = parseInt(lr.total_customer || 0, 10);
+      const apc = tc > 0 ? Math.round(net / tc) : 0;
+
+      if (reportedDateSet.has(dateKey)) {
+        const existingItem = reportList.find((r) => sanitizeDateOnly(r.report_date) === dateKey);
+        if (
+          existingItem &&
+          existingItem.omzet_gross === 0 &&
+          existingItem.omzet_net === 0 &&
+          existingItem.total_customer === 0 &&
+          !existingItem.omzet_transaction_id
+        ) {
+          existingItem.created_by_names = existingItem.created_by_names || lr.created_by_names || null;
+          existingItem.submitted_by_name = existingItem.submitted_by_name || lr.submitted_by_name || null;
+          existingItem.status = existingItem.status === 'draft' ? 'submitted' : existingItem.status;
+          existingItem.total_customer = tc;
+          existingItem.apc = apc;
+          existingItem.omzet_gross = gross;
+          existingItem.pb1_amount = pb1;
+          existingItem.omzet_net = net;
+          existingItem.omzet_transaction_id = Number(lr.omzet_transaction_id);
+        }
+        continue;
+      }
+
       reportList.push({
         id: 0,
         branch_id: Number(lr.branch_id),
@@ -1073,7 +1136,7 @@ class CashierReport {
         created_by_names: lr.created_by_names || null,
         status: 'submitted',
         total_customer: tc,
-        apc: tc > 0 ? Math.round(net / tc) : 0,
+        apc,
         omzet_gross: gross,
         pb1_amount: pb1,
         omzet_net: net,
@@ -1935,12 +1998,90 @@ class CashierReport {
           };
         }
 
-        const [ins] = await conn.execute(
-          `INSERT INTO cashier_daily_reports (branch_id, report_date, created_by_names, submitted_by, status, auto_sync_omzet)
-           VALUES (?, ?, ?, ?, 'draft', 1)`,
-          [branchId, dateStr, user?.name || 'Sync Pesan BosGil', user?.id || null]
-        );
-        reportId = ins.insertId;
+        const legacySnapshot = await this.getLegacyOmzetSnapshot(branchId, dateStr);
+        if (legacySnapshot && legacySnapshot.report?.tx_count === 1) {
+          const lr = legacySnapshot.report;
+          const [ins] = await conn.execute(
+            `INSERT INTO cashier_daily_reports (
+               branch_id, report_date, created_by_names, submitted_by, status,
+               total_customer, apc, omzet_gross, pb1_amount, omzet_net,
+               omzet_sales_app, omzet_sales_cashier, omzet_sales_notes,
+               cash_omzet, kasir_notes, omzet_transaction_id, auto_sync_omzet
+             ) VALUES (?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+            [
+              branchId,
+              dateStr,
+              lr.created_by_names || user?.name || 'Sync Pesan BosGil',
+              lr.submitted_by || user?.id || null,
+              lr.total_customer || 0,
+              lr.apc || 0,
+              lr.omzet_gross || 0,
+              lr.pb1_amount || 0,
+              lr.omzet_net || 0,
+              lr.omzet_sales_app ?? null,
+              lr.omzet_sales_cashier ?? null,
+              lr.omzet_sales_notes || null,
+              lr.cash_omzet || 0,
+              lr.kasir_notes || null,
+              lr.omzet_transaction_id || null
+            ]
+          );
+          reportId = ins.insertId;
+
+          for (const oi of legacySnapshot.omzet_items || []) {
+            await conn.execute(
+              `INSERT INTO cashier_report_omzet_items
+               (report_id, payment_method_id, channel_name, bank_account_id, amount_app, amount_cashier, is_taxable, pb1_amount, sort_order, notes, lampiran)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
+                reportId,
+                oi.payment_method_id || null,
+                oi.channel_name || 'Lainnya',
+                oi.bank_account_id || null,
+                toNum(oi.amount_app),
+                toNum(oi.amount_cashier),
+                oi.is_taxable ? 1 : 0,
+                toNum(oi.pb1_amount),
+                oi.sort_order || 0,
+                oi.notes || '',
+                JSON.stringify(Array.isArray(oi.lampiran) ? oi.lampiran : [])
+              ]
+            );
+          }
+
+          for (const sc of legacySnapshot.sales_channel_items || []) {
+            await conn.execute(
+              `INSERT INTO cashier_report_sales_channels
+               (report_id, sales_channel_id, sales_channel_name, payment_method_id, payment_method_name, omzet_item_index, amount, pb1_amount, sort_order)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
+                reportId,
+                sc.sales_channel_id || null,
+                sc.sales_channel_name || '',
+                sc.payment_method_id || null,
+                sc.payment_method_name || '',
+                sc.omzet_item_index ?? null,
+                toNum(sc.amount),
+                sc.pb1_amount !== null && sc.pb1_amount !== undefined ? toNum(sc.pb1_amount) : null,
+                sc.sort_order || 0
+              ]
+            );
+          }
+        } else {
+          const initialStatus = legacySnapshot ? 'submitted' : 'draft';
+          const [ins] = await conn.execute(
+            `INSERT INTO cashier_daily_reports (branch_id, report_date, created_by_names, submitted_by, status, auto_sync_omzet)
+             VALUES (?, ?, ?, ?, ?, 1)`,
+            [
+              branchId,
+              dateStr,
+              legacySnapshot?.report?.created_by_names || user?.name || 'Sync Pesan BosGil',
+              legacySnapshot?.report?.submitted_by || user?.id || null,
+              initialStatus
+            ]
+          );
+          reportId = ins.insertId;
+        }
         createdReport = true;
       }
 
