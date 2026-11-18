@@ -43,6 +43,7 @@ const getMitraPiutangReport = async (req, res, next) => {
         tr.bulk_repayment_id,
         mp.nama as mitra_nama,
         tr.amount as repayment_amount,
+        COALESCE(tr.is_writeoff, 0) as is_writeoff,
         DATE_FORMAT(tr.payment_date, '%Y-%m-%d') as payment_date,
         DATE_FORMAT(COALESCE(t.transaction_date, mp.initial_balance_date), '%Y-%m-%d') as transaction_date,
         tr.note,
@@ -78,6 +79,7 @@ const getMitraPiutangReport = async (req, res, next) => {
         bulk_repayment_id: row.bulk_repayment_id || null,
         mitra_nama: row.mitra_nama || '-',
         amount: parseFloat(row.repayment_amount) || 0,
+        is_writeoff: Boolean(row.is_writeoff),
         payment_date: row.payment_date,
         transaction_date: row.transaction_date,
         note: row.note || '',
@@ -189,33 +191,35 @@ const deleteMitraRepayment = async (req, res, next) => {
         );
       }
 
-      // 2. Revert cash income record (is_debt_payment = 1)
+      // 2. Revert cash income record ONLY for real cash repayments (NOT write-offs)
       let targetIncomeTx = null;
-      if (repayment.income_transaction_id) {
-        const [incRows] = await conn.execute(
-          `SELECT id, amount, paid_amount
-           FROM transactions
-           WHERE id = ? AND status_deleted = false
-           FOR UPDATE`,
-          [repayment.income_transaction_id]
-        );
-        targetIncomeTx = incRows[0] || null;
-      } else if (repayment.bulk_repayment_id) {
-        const [incRows] = await conn.execute(
-          `SELECT id, amount, paid_amount
-           FROM transactions
-           WHERE branch_id = ?
-             AND user_id = ?
-             AND is_debt_payment = 1
-             AND DATE(transaction_date) = DATE(?)
-             AND status_deleted = false
-             AND amount >= ?
-           ORDER BY id DESC
-           LIMIT 1
-           FOR UPDATE`,
-          [parsedBranchId, repayment.user_id, repayment.payment_date, amount]
-        );
-        targetIncomeTx = incRows[0] || null;
+      if (!repayment.is_writeoff) {
+        if (repayment.income_transaction_id) {
+          const [incRows] = await conn.execute(
+            `SELECT id, amount, paid_amount
+             FROM transactions
+             WHERE id = ? AND status_deleted = false
+             FOR UPDATE`,
+            [repayment.income_transaction_id]
+          );
+          targetIncomeTx = incRows[0] || null;
+        } else if (repayment.bulk_repayment_id) {
+          const [incRows] = await conn.execute(
+            `SELECT id, amount, paid_amount
+             FROM transactions
+             WHERE branch_id = ?
+               AND user_id = ?
+               AND is_debt_payment = 1
+               AND DATE(transaction_date) = DATE(?)
+               AND status_deleted = false
+               AND amount >= ?
+             ORDER BY id DESC
+             LIMIT 1
+             FOR UPDATE`,
+            [parsedBranchId, repayment.user_id, repayment.payment_date, amount]
+          );
+          targetIncomeTx = incRows[0] || null;
+        }
       }
 
       if (targetIncomeTx) {

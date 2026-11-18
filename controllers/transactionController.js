@@ -1785,12 +1785,20 @@ const createRepayment = async (req, res, next) => {
   const { transaction: dbTransaction, query } = require('../config/database');
   try {
     const { id } = req.params; // ID Transaksi Piutang Induk
-    const { mitra_piutang_id, transaction_mitra_detail_id, amount, date, note, lampiran, bank_account_id } = req.body;
+    const { mitra_piutang_id, transaction_mitra_detail_id, amount, date, note, lampiran, bank_account_id, is_writeoff } = req.body;
+    const isWriteoff = is_writeoff === true || is_writeoff === 'true' || is_writeoff === 1 || is_writeoff === '1';
 
     if (!mitra_piutang_id || !amount || !date) {
       return res.status(400).json({
         success: false,
         message: 'Mitra, nominal, dan tanggal wajib diisi'
+      });
+    }
+
+    if (isWriteoff && (!note || !String(note).trim())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Alasan / catatan pemutihan wajib diisi'
       });
     }
 
@@ -1872,24 +1880,23 @@ const createRepayment = async (req, res, next) => {
         [newTotalPaid, newTotalRemaining, id]
       );
 
-      // 3. Create automatic notification record in transactions (NO CATEGORY, NO BALANCE IMPACT)
-      // This is JUST for notification in the dashboard list
+      // 3. Create automatic notification record in transactions ONLY for cash repayment (NOT write-offs)
       let incomeTransactionId = null;
-      // Use the user's note for the notification if provided, otherwise generic
-      const repaymentNote = note || `Pelunasan Piutang: ${mitraDetail.mitra_nama} (Ref: #${id})`;
-
-      const [incomeResult] = await conn.execute(
-        `INSERT INTO transactions (user_id, branch_id, type, amount, note, transaction_date, lampiran, is_umum, is_debt_payment, paid_amount, remaining_debt, status_deleted, category_id, bank_account_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, false, NULL, ?)`,
-        [req.userId, transaction.branch_id, 'income', repaymentAmount, repaymentNote, date, lampiranValue, true, repaymentAmount, bank_account_id ? parseInt(bank_account_id) : null]
-      );
-      incomeTransactionId = incomeResult.insertId;
+      if (!isWriteoff) {
+        const repaymentNote = note || `Pelunasan Piutang: ${mitraDetail.mitra_nama} (Ref: #${id})`;
+        const [incomeResult] = await conn.execute(
+          `INSERT INTO transactions (user_id, branch_id, type, amount, note, transaction_date, lampiran, is_umum, is_debt_payment, paid_amount, remaining_debt, status_deleted, category_id, bank_account_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, false, NULL, ?)`,
+          [req.userId, transaction.branch_id, 'income', repaymentAmount, repaymentNote, date, lampiranValue, true, repaymentAmount, bank_account_id ? parseInt(bank_account_id) : null]
+        );
+        incomeTransactionId = incomeResult.insertId;
+      }
 
       // 4. Insert into transaction_repayments
       await conn.execute(
-        `INSERT INTO transaction_repayments (transaction_id, mitra_piutang_id, transaction_mitra_detail_id, user_id, amount, payment_date, note, lampiran, income_transaction_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, mitraId, transaction_mitra_detail_id ? parseInt(transaction_mitra_detail_id) : null, req.userId, repaymentAmount, date, note || null, lampiranValue, incomeTransactionId]
+        `INSERT INTO transaction_repayments (transaction_id, mitra_piutang_id, transaction_mitra_detail_id, user_id, amount, payment_date, note, lampiran, income_transaction_id, is_writeoff)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, mitraId, transaction_mitra_detail_id ? parseInt(transaction_mitra_detail_id) : null, req.userId, repaymentAmount, date, note || null, lampiranValue, incomeTransactionId, isWriteoff ? 1 : 0]
       );
     });
 
@@ -1897,17 +1904,20 @@ const createRepayment = async (req, res, next) => {
     await LogService.logActivity({
       userId: req.userId,
       branchId: transaction.branch_id,
-      action: 'Pelunasan Baru',
+      action: isWriteoff ? 'Pemutihan Piutang' : 'Pelunasan Baru',
       entityType: 'Transaction',
       entityId: id,
-      metadata: { description: `Mencatat pelunasan Rp ${repaymentAmount.toLocaleString('id-ID')} untuk mitra ${mitraDetail.mitra_nama}` }
+      metadata: {
+        description: `Mencatat ${isWriteoff ? 'pemutihan piutang' : 'pelunasan'} Rp ${repaymentAmount.toLocaleString('id-ID')} untuk mitra ${mitraDetail.mitra_nama}`,
+        is_writeoff: isWriteoff
+      }
     });
 
     // 6. Add to transaction history (Audit Trail)
     await TransactionEdit.create({
       transactionId: id,
       requesterId: req.userId,
-      reason: 'Pelunasan Baru',
+      reason: isWriteoff ? 'Pemutihan Piutang' : 'Pelunasan Baru',
       oldData: { paid_amount: transaction.paid_amount, remaining_debt: transaction.remaining_debt },
       newData: {
         paid_amount: newTotalPaid,

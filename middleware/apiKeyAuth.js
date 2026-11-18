@@ -31,12 +31,16 @@ const apiKeyAuth = (requiredScope = null) => {
         });
       }
 
-      // Check scope if required
+      // Check scope if required (supports single scope string or array of allowed scopes)
       if (requiredScope && Array.isArray(keyData.scopes)) {
-        if (!keyData.scopes.includes(requiredScope) && !keyData.scopes.includes('*')) {
+        const allowedScopes = Array.isArray(requiredScope) ? requiredScope : [requiredScope];
+        const hasPermission =
+          keyData.scopes.includes('*') ||
+          allowedScopes.some((scope) => keyData.scopes.includes(scope));
+        if (!hasPermission) {
           return res.status(403).json({
             success: false,
-            message: `API Key does not have the required permission: ${requiredScope}`
+            message: `API Key does not have the required permission: ${allowedScopes.join(' or ')}`
           });
         }
       }

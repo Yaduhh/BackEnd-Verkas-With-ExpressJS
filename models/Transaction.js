@@ -147,7 +147,10 @@ class Transaction {
        ORDER BY tr.payment_date DESC, tr.created_at DESC`,
       [id]
     );
-    transaction.repayments = repayments;
+    transaction.repayments = repayments.map((r) => ({
+      ...r,
+      is_writeoff: Boolean(r.is_writeoff)
+    }));
 
     // Fetch refunds
     const refunds = await query(

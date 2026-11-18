@@ -915,6 +915,191 @@ const getHutang = async (req, res, next) => {
   }
 };
 
+// Helper: parse readable PO number & summary from VerKas transaction note synced from Bosgil
+const parsePoHistoryMeta = (note, extRef) => {
+  const rawNote = String(note || '').trim();
+  const extStr = String(extRef || '').trim();
+  const poIdMatch = extStr.match(/^po_(\d+)/i);
+  const poId = poIdMatch ? parseInt(poIdMatch[1], 10) : null;
+
+  const poNumMatch = rawNote.match(/#?(PO-\d{6,}-\d+)/i);
+  const nomorPo = poNumMatch ? poNumMatch[1].toUpperCase() : (extStr ? extStr.toUpperCase() : '-');
+
+  const firstLine = rawNote.split('\n')[0] || '';
+  const cleanedLine = firstLine
+    .replace(/^\[PO-BSG\s*#?[^\]]+\]\s*/i, '')
+    .trim();
+
+  let bankInfo = '';
+  const bankLineMatch = rawNote.match(/^Bank\s*:\s*(.+)$/im);
+  if (bankLineMatch) {
+    bankInfo = bankLineMatch[1].trim();
+  }
+
+  let keteranganNote = '';
+  const ketMatch = rawNote.match(/^Keterangan\s*:\s*(.+)$/im);
+  if (ketMatch && ketMatch[1].trim() !== '-') {
+    keteranganNote = ketMatch[1].trim();
+  }
+
+  return {
+    po_id: poId,
+    nomor_po: nomorPo,
+    summary_text: cleanedLine || keteranganNote || firstLine || '-',
+    bank_target: bankInfo || null,
+    keterangan: keteranganNote || null,
+  };
+};
+
+// Get paid / synced Bosgil PO transaction history from VerKas transactions table
+const getHutangHistory = async (req, res, next) => {
+  try {
+    const branchId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(branchId) || branchId <= 0) {
+      return res.status(400).json({ success: false, message: 'ID cabang tidak valid' });
+    }
+
+    const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'No access to this branch' });
+    }
+
+    const { query } = require('../config/database');
+    const { start_date, end_date, category_id, search, limit = 2000 } = req.query;
+    const safeLimit = Math.min(5000, Math.max(1, parseInt(limit, 10) || 2000));
+
+    const whereClauses = [
+      't.branch_id = ?',
+      't.status_deleted = false',
+      '(t.is_draft = false OR t.is_draft IS NULL)',
+      "t.external_reference_id REGEXP '^po_[0-9]+'"
+    ];
+    const params = [branchId];
+
+    if (start_date) {
+      whereClauses.push('DATE(t.transaction_date) >= ?');
+      params.push(String(start_date).slice(0, 10));
+    }
+    if (end_date) {
+      whereClauses.push('DATE(t.transaction_date) <= ?');
+      params.push(String(end_date).slice(0, 10));
+    }
+    if (category_id && category_id !== 'all') {
+      const catIdNum = parseInt(category_id, 10);
+      if (Number.isFinite(catIdNum)) {
+        whereClauses.push('t.category_id = ?');
+        params.push(catIdNum);
+      }
+    }
+    if (search && String(search).trim()) {
+      const q = `%${String(search).trim()}%`;
+      whereClauses.push('(t.note LIKE ? OR t.external_reference_id LIKE ? OR c.name LIKE ? OR ba.name LIKE ?)');
+      params.push(q, q, q, q);
+    }
+
+    const sql = `
+      SELECT
+        t.id AS transaction_id,
+        t.branch_id,
+        t.type,
+        t.amount,
+        DATE_FORMAT(t.transaction_date, '%Y-%m-%d') AS transaction_date,
+        t.note,
+        t.lampiran,
+        t.external_reference_id,
+        t.is_umum,
+        t.is_savings,
+        t.category_id,
+        COALESCE(c.name, 'Tanpa Kategori') AS category_name,
+        t.bank_account_id,
+        COALESCE(ba.name, '-') AS bank_account_name,
+        t.created_at
+      FROM transactions t
+      LEFT JOIN categories c ON t.category_id = c.id
+      LEFT JOIN bank_accounts ba ON t.bank_account_id = ba.id
+      WHERE ${whereClauses.join(' AND ')}
+      ORDER BY t.transaction_date DESC, t.id DESC
+      LIMIT ${safeLimit}
+    `;
+
+    const rows = await query(sql, params);
+
+    let totalAmount = 0;
+    const categoryMap = new Map();
+
+    const formatted = rows.map((r) => {
+      const amt = Number(r.amount) || 0;
+      totalAmount += amt;
+
+      const catKey = r.category_name || 'Tanpa Kategori';
+      const existingCat = categoryMap.get(catKey);
+      if (existingCat) {
+        existingCat.count += 1;
+        existingCat.total_amount += amt;
+      } else {
+        categoryMap.set(catKey, {
+          category_id: r.category_id || null,
+          category_name: catKey,
+          count: 1,
+          total_amount: amt,
+        });
+      }
+
+      let lampiranCount = 0;
+      if (r.lampiran) {
+        try {
+          const parsed = typeof r.lampiran === 'string' ? JSON.parse(r.lampiran) : r.lampiran;
+          if (Array.isArray(parsed)) lampiranCount = parsed.length;
+          else if (parsed) lampiranCount = 1;
+        } catch (_) {
+          lampiranCount = 1;
+        }
+      }
+
+      const meta = parsePoHistoryMeta(r.note, r.external_reference_id);
+
+      return {
+        transaction_id: r.transaction_id,
+        branch_id: r.branch_id,
+        type: r.type,
+        amount: amt,
+        transaction_date: r.transaction_date,
+        external_reference_id: r.external_reference_id,
+        po_id: meta.po_id,
+        nomor_po: meta.nomor_po,
+        summary_text: meta.summary_text,
+        bank_target: meta.bank_target,
+        keterangan: meta.keterangan,
+        note: r.note || '',
+        is_umum: Boolean(r.is_umum),
+        is_savings: Boolean(r.is_savings),
+        category_id: r.category_id || null,
+        category_name: catKey,
+        bank_account_id: r.bank_account_id || null,
+        bank_account_name: r.bank_account_name || '-',
+        lampiran_count: lampiranCount,
+        created_at: r.created_at,
+      };
+    });
+
+    const categories = Array.from(categoryMap.values()).sort((a, b) =>
+      a.category_name.localeCompare(b.category_name, 'id')
+    );
+
+    return res.json({
+      success: true,
+      data: formatted,
+      categories,
+      summary: {
+        total_amount: totalAmount,
+        total_count: formatted.length,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // Export branch hutang (unpaid POs) to styled .xlsx Excel matching active UI filters
 const exportHutangExcel = async (req, res, next) => {
   try {
@@ -1583,6 +1768,7 @@ module.exports = {
   renameGroup,
   deleteGroup,
   getHutang,
+  getHutangHistory,
   exportHutangExcel,
   exportHutangPdf,
   proxyHutangFile

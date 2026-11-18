@@ -16,6 +16,7 @@ const {
   renameGroup,
   deleteGroup,
   getHutang,
+  getHutangHistory,
   exportHutangExcel,
   exportHutangPdf,
   proxyHutangFile
@@ -48,6 +49,9 @@ router.get('/:id', getById);
 
 // Get branch hutang (unpaid POs from Bosgil Group)
 router.get('/:id/hutang', getHutang);
+
+// Get paid / synced Bosgil PO history from VerKas transactions
+router.get('/:id/hutang/history', getHutangHistory);
 
 // Export branch hutang to styled Excel (.xlsx) matching active filters
 router.get('/:id/hutang/export-excel', exportHutangExcel);

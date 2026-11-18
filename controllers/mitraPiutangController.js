@@ -333,8 +333,9 @@ const bulkRepayment = async (req, res, next) => {
   const { transaction: dbTransaction } = require('../config/database');
   try {
     const { id } = req.params;
-    const { amount, date, bank_account_id, note, lampiran, manual_allocations } = req.body;
+    const { amount, date, bank_account_id, note, lampiran, manual_allocations, is_writeoff } = req.body;
     const branchId = req.branchId || req.headers['x-branch-id'];
+    const isWriteoff = is_writeoff === true || is_writeoff === 'true' || is_writeoff === 1 || is_writeoff === '1';
 
     if (!branchId) {
       return res.status(400).json({
@@ -347,7 +348,14 @@ const bulkRepayment = async (req, res, next) => {
     if (!repaymentAmount || repaymentAmount <= 0) {
       return res.status(400).json({
         success: false,
-        message: 'Nominal pelunasan harus lebih dari 0'
+        message: isWriteoff ? 'Nominal pemutihan harus lebih dari 0' : 'Nominal pelunasan harus lebih dari 0'
+      });
+    }
+
+    if (isWriteoff && (!note || !String(note).trim())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Alasan / catatan pemutihan wajib diisi'
       });
     }
 
@@ -462,9 +470,19 @@ const bulkRepayment = async (req, res, next) => {
           );
 
           await conn.execute(
-            `INSERT INTO transaction_repayments (transaction_id, mitra_piutang_id, user_id, amount, payment_date, note, lampiran, bulk_repayment_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [null, mitraId, req.userId, allocInit, paymentDate, note || `Pelunasan Saldo Awal: ${existingMitra.nama}`, lampiranValue, bulkRepaymentId]
+            `INSERT INTO transaction_repayments (transaction_id, mitra_piutang_id, user_id, amount, payment_date, note, lampiran, bulk_repayment_id, is_writeoff)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              null,
+              mitraId,
+              req.userId,
+              allocInit,
+              paymentDate,
+              note || `${isWriteoff ? 'Pemutihan' : 'Pelunasan'} Saldo Awal: ${existingMitra.nama}`,
+              lampiranValue,
+              bulkRepaymentId,
+              isWriteoff ? 1 : 0
+            ]
           );
 
           remainingToAllocate -= allocInit;
@@ -494,9 +512,20 @@ const bulkRepayment = async (req, res, next) => {
           );
 
           await conn.execute(
-            `INSERT INTO transaction_repayments (transaction_id, mitra_piutang_id, transaction_mitra_detail_id, user_id, amount, payment_date, note, lampiran, bulk_repayment_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [row.transaction_id, mitraId, row.tmd_id || null, req.userId, alloc, paymentDate, note || `Pelunasan Piutang: ${existingMitra.nama} (Ref: #${row.transaction_id})`, lampiranValue, bulkRepaymentId]
+            `INSERT INTO transaction_repayments (transaction_id, mitra_piutang_id, transaction_mitra_detail_id, user_id, amount, payment_date, note, lampiran, bulk_repayment_id, is_writeoff)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              row.transaction_id,
+              mitraId,
+              row.tmd_id || null,
+              req.userId,
+              alloc,
+              paymentDate,
+              note || `${isWriteoff ? 'Pemutihan' : 'Pelunasan'} Piutang: ${existingMitra.nama} (Ref: #${row.transaction_id})`,
+              lampiranValue,
+              bulkRepaymentId,
+              isWriteoff ? 1 : 0
+            ]
           );
 
           remainingToAllocate -= alloc;
@@ -508,19 +537,21 @@ const bulkRepayment = async (req, res, next) => {
         }
       }
 
-      // 3. Create notification / cash record in transactions (is_debt_payment = 1)
-      const repaymentNote = note || `Pelunasan Piutang Gelondongan: ${existingMitra.nama}`;
-      const [incResult] = await conn.execute(
-        `INSERT INTO transactions (user_id, branch_id, type, amount, note, transaction_date, lampiran, is_umum, is_debt_payment, paid_amount, remaining_debt, status_deleted, category_id, bank_account_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, false, NULL, ?)`,
-        [req.userId, parseInt(branchId), 'income', repaymentAmount, repaymentNote, paymentDate, lampiranValue, true, repaymentAmount, bank_account_id ? parseInt(bank_account_id) : null]
-      );
-
-      if (incResult?.insertId) {
-        await conn.execute(
-          `UPDATE transaction_repayments SET income_transaction_id = ? WHERE bulk_repayment_id = ?`,
-          [incResult.insertId, bulkRepaymentId]
+      // 3. Create notification / cash record in transactions ONLY for actual cash repayments (NOT write-offs)
+      if (!isWriteoff) {
+        const repaymentNote = note || `Pelunasan Piutang Gelondongan: ${existingMitra.nama}`;
+        const [incResult] = await conn.execute(
+          `INSERT INTO transactions (user_id, branch_id, type, amount, note, transaction_date, lampiran, is_umum, is_debt_payment, paid_amount, remaining_debt, status_deleted, category_id, bank_account_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, false, NULL, ?)`,
+          [req.userId, parseInt(branchId), 'income', repaymentAmount, repaymentNote, paymentDate, lampiranValue, true, repaymentAmount, bank_account_id ? parseInt(bank_account_id) : null]
         );
+
+        if (incResult?.insertId) {
+          await conn.execute(
+            `UPDATE transaction_repayments SET income_transaction_id = ? WHERE bulk_repayment_id = ?`,
+            [incResult.insertId, bulkRepaymentId]
+          );
+        }
       }
     });
 
@@ -528,12 +559,13 @@ const bulkRepayment = async (req, res, next) => {
     LogService.logActivity({
       userId: req.userId,
       branchId: parseInt(branchId),
-      action: 'Pelunasan Gelondongan',
+      action: isWriteoff ? 'Pemutihan Piutang Gelondongan' : 'Pelunasan Gelondongan',
       entityType: 'MitraPiutang',
       entityId: mitraId,
       metadata: {
-        description: `Mencatat pelunasan gelondongan Rp ${repaymentAmount.toLocaleString('id-ID')} untuk mitra ${existingMitra.nama}`,
+        description: `Mencatat ${isWriteoff ? 'pemutihan piutang' : 'pelunasan gelondongan'} Rp ${repaymentAmount.toLocaleString('id-ID')} untuk mitra ${existingMitra.nama}`,
         bulk_repayment_id: bulkRepaymentId,
+        is_writeoff: isWriteoff,
         allocations_count: allocations.length
       }
     });
@@ -542,10 +574,11 @@ const bulkRepayment = async (req, res, next) => {
 
     res.status(201).json({
       success: true,
-      message: `Pelunasan gelondongan sebesar Rp ${repaymentAmount.toLocaleString('id-ID')} berhasil dicatat`,
+      message: `${isWriteoff ? 'Pemutihan piutang' : 'Pelunasan gelondongan'} sebesar Rp ${repaymentAmount.toLocaleString('id-ID')} berhasil dicatat`,
       data: {
         mitra_piutang: updatedMitra,
         bulk_repayment_id: bulkRepaymentId,
+        is_writeoff: isWriteoff,
         allocations
       }
     });

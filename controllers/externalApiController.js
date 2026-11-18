@@ -5,6 +5,7 @@ const Transaction = require('../models/Transaction');
 const TransactionEdit = require('../models/TransactionEdit');
 const TransactionRefund = require('../models/TransactionRefund');
 const LockedPeriod = require('../models/LockedPeriod');
+const CashierReport = require('../models/CashierReport');
 const User = require('../models/User');
 const OwnerTeam = require('../models/OwnerTeam');
 const { query } = require('../config/database');
@@ -1783,6 +1784,218 @@ const externalApiController = {
       });
     } catch (error) {
       console.error('[ExternalAPI deleteRefund Error]:', error);
+      next(error);
+    }
+  },
+
+  /**
+   * POST /api/external/v1/cashier-reports/orders/sync
+   * Upsert/sync Pesan-BosGiL order entries into CashierReport (dp_deposit & admin_pesanan)
+   */
+  syncCashierReportOrders: async (req, res, next) => {
+    try {
+      const ownerId = req.userId;
+      const ownerRole = req.user?.role || 'owner';
+      const {
+        branch_id,
+        branch_code,
+        branch_key,
+        report_date,
+        external_source = 'pesan_bosgil',
+        orders = [],
+        delete_external_refs = [],
+        delete_external_refs_all = [],
+        reports = null
+      } = req.body || {};
+
+      // Resolve accessible branches for this API key
+      let accessibleBranches = [];
+      if (req.apiKey && req.apiKey.branch_id) {
+        const lockedBranch = await Branch.findById(req.apiKey.branch_id);
+        if (lockedBranch && !lockedBranch.status_deleted) accessibleBranches = [lockedBranch];
+      } else {
+        const allAccessible = await Branch.findByUserAccess(ownerId, ownerRole);
+        accessibleBranches = (allAccessible || []).filter((b) => !b.status_deleted);
+      }
+
+      const norm = (str) => String(str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const rawBranchId = branch_id || req.branchId || (req.headers['x-branch-id'] ? parseInt(req.headers['x-branch-id'], 10) : null);
+      const rawBranchLookup = branch_code || branch_key || req.headers['x-branch-key'] || '';
+
+      let targetBranch = null;
+      if (rawBranchId) {
+        targetBranch = accessibleBranches.find((b) => Number(b.id) === Number(rawBranchId)) || null;
+      } else if (rawBranchLookup) {
+        const lookupNorm = norm(rawBranchLookup);
+        targetBranch =
+          accessibleBranches.find((b) => b.code && norm(b.code) === lookupNorm) ||
+          accessibleBranches.find((b) => norm(b.name) === lookupNorm || norm(b.name) === `bosgil${lookupNorm}`) ||
+          accessibleBranches.find((b) => norm(b.name).includes(lookupNorm)) ||
+          null;
+      }
+
+      if (!targetBranch) {
+        return res.status(404).json({
+          success: false,
+          message: `Cabang VerKas tidak ditemukan atau tidak dapat diakses (${rawBranchId || rawBranchLookup || 'kosong'}).`
+        });
+      }
+
+      const reportBatches = Array.isArray(reports) && reports.length > 0
+        ? reports
+        : [{ report_date, orders, delete_external_refs }];
+
+      // First delete any global stale refs for this branch (e.g. order date changed or cancelled)
+      let globalDeleted = 0;
+      if (Array.isArray(delete_external_refs_all) && delete_external_refs_all.length > 0) {
+        const delRes = await CashierReport.deleteExternalOrdersByRef({
+          branchId: targetBranch.id,
+          externalSource: external_source,
+          externalReferenceIds: delete_external_refs_all
+        });
+        globalDeleted = delRes.deleted || 0;
+      }
+
+      const results = [];
+      const lockedDates = [];
+
+      for (const batch of reportBatches) {
+        const dateStr = batch?.report_date ? String(batch.report_date).trim().slice(0, 10) : '';
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+          if (reportBatches.length === 1 && (!Array.isArray(batch?.orders) || batch.orders.length === 0) && globalDeleted > 0) {
+            continue;
+          }
+          return res.status(400).json({
+            success: false,
+            message: `Format report_date tidak valid (${dateStr || 'kosong'}). Wajib YYYY-MM-DD.`
+          });
+        }
+
+        const [yStr, mStr] = dateStr.split('-');
+        const isLocked = await LockedPeriod.isLocked(targetBranch.id, parseInt(mStr, 10), parseInt(yStr, 10));
+        if (isLocked) {
+          lockedDates.push(dateStr);
+          continue;
+        }
+
+        const synced = await CashierReport.syncExternalOrders({
+          branchId: targetBranch.id,
+          reportDate: dateStr,
+          externalSource: external_source,
+          orders: Array.isArray(batch.orders) ? batch.orders : [],
+          deleteExternalRefs: Array.isArray(batch.delete_external_refs) ? batch.delete_external_refs : [],
+          user: {
+            id: ownerId,
+            name: 'Sync Pesan BosGil',
+            role: 'system'
+          }
+        });
+        results.push(synced);
+      }
+
+      if (results.length === 0 && lockedDates.length > 0 && globalDeleted === 0) {
+        return res.status(403).json({
+          success: false,
+          message: `Periode laporan tanggal ${lockedDates.join(', ')} sudah dikunci (Locked) di VerKas.`
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: 'Sinkronisasi data order ke Laporan Harian Kasir VerKas berhasil.',
+        data: {
+          branch_id: targetBranch.id,
+          branch_name: targetBranch.name,
+          global_deleted: globalDeleted,
+          locked_dates: lockedDates,
+          results
+        }
+      });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      console.error('[ExternalAPI syncCashierReportOrders Error]:', error);
+      next(error);
+    }
+  },
+
+  /**
+   * DELETE /api/external/v1/cashier-reports/orders
+   * Remove synced external order entries from CashierReport when deleted/cancelled in source system
+   */
+  deleteCashierReportOrders: async (req, res, next) => {
+    try {
+      const ownerId = req.userId;
+      const ownerRole = req.user?.role || 'owner';
+      const {
+        branch_id,
+        branch_code,
+        branch_key,
+        report_date = null,
+        external_source = 'pesan_bosgil',
+        external_reference_id,
+        external_reference_ids = []
+      } = req.body || {};
+
+      const refs = [
+        ...(external_reference_id ? [external_reference_id] : []),
+        ...(Array.isArray(external_reference_ids) ? external_reference_ids : [])
+      ].filter(Boolean);
+
+      if (refs.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'external_reference_id atau external_reference_ids wajib diisi.'
+        });
+      }
+
+      let accessibleBranches = [];
+      if (req.apiKey && req.apiKey.branch_id) {
+        const lockedBranch = await Branch.findById(req.apiKey.branch_id);
+        if (lockedBranch && !lockedBranch.status_deleted) accessibleBranches = [lockedBranch];
+      } else {
+        const allAccessible = await Branch.findByUserAccess(ownerId, ownerRole);
+        accessibleBranches = (allAccessible || []).filter((b) => !b.status_deleted);
+      }
+
+      const norm = (str) => String(str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const rawBranchId = branch_id || req.branchId || null;
+      const rawBranchLookup = branch_code || branch_key || '';
+      let targetBranch = null;
+
+      if (rawBranchId) {
+        targetBranch = accessibleBranches.find((b) => Number(b.id) === Number(rawBranchId)) || null;
+      } else if (rawBranchLookup) {
+        const lookupNorm = norm(rawBranchLookup);
+        targetBranch =
+          accessibleBranches.find((b) => b.code && norm(b.code) === lookupNorm) ||
+          accessibleBranches.find((b) => norm(b.name) === lookupNorm || norm(b.name) === `bosgil${lookupNorm}`) ||
+          accessibleBranches.find((b) => norm(b.name).includes(lookupNorm)) ||
+          null;
+      }
+
+      if ((rawBranchId || rawBranchLookup) && !targetBranch) {
+        return res.status(404).json({
+          success: false,
+          message: 'Cabang VerKas tidak ditemukan atau tidak dapat diakses.'
+        });
+      }
+
+      const result = await CashierReport.deleteExternalOrdersByRef({
+        branchId: targetBranch ? targetBranch.id : (req.apiKey?.branch_id || null),
+        reportDate: report_date,
+        externalSource: external_source,
+        externalReferenceIds: refs
+      });
+
+      return res.json({
+        success: true,
+        message: 'Data order eksternal berhasil dihapus dari Laporan Harian Kasir.',
+        data: result
+      });
+    } catch (error) {
+      console.error('[ExternalAPI deleteCashierReportOrders Error]:', error);
       next(error);
     }
   }

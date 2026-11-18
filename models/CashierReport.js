@@ -1220,6 +1220,8 @@ class CashierReport {
               total_amount: totalAmt,
               pickup_date: o.pickup_date ? String(o.pickup_date).trim() : null,
               notes: o.notes ? String(o.notes).trim() : null,
+              external_reference_id: o.external_reference_id ? String(o.external_reference_id).trim() : null,
+              external_source: o.external_source ? String(o.external_source).trim() : null,
               sort_order: idx
             };
           });
@@ -1560,14 +1562,14 @@ class CashierReport {
         await conn.execute(
           `INSERT INTO cashier_report_orders
            (report_id, order_section, customer_name, planned_pickup_date, product_total_amount, tf_bca_amount, tf_mandiri_amount, dp_amount, dp_transfer_date, dp_channel, bank_account_id,
-            settlement_amount, settlement_transfer_date, settlement_channel, settlement_bank_account_id, ongkir_bca_amount, ongkir_mandiri_amount, ongkir_amount, total_amount, pickup_date, notes, sort_order)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            settlement_amount, settlement_transfer_date, settlement_channel, settlement_bank_account_id, ongkir_bca_amount, ongkir_mandiri_amount, ongkir_amount, total_amount, pickup_date, notes, external_reference_id, external_source, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             reportId, o.order_section, o.customer_name, o.planned_pickup_date, o.product_total_amount,
             o.tf_bca_amount, o.tf_mandiri_amount,
             o.dp_amount, o.dp_transfer_date, o.dp_channel, o.bank_account_id, o.settlement_amount, o.settlement_transfer_date,
             o.settlement_channel, o.settlement_bank_account_id, o.ongkir_bca_amount, o.ongkir_mandiri_amount, o.ongkir_amount, o.total_amount,
-            o.pickup_date, o.notes, o.sort_order
+            o.pickup_date, o.notes, o.external_reference_id, o.external_source, o.sort_order
           ]
         );
       }
@@ -1852,6 +1854,312 @@ class CashierReport {
       );
 
       return true;
+    });
+  }
+
+  /**
+   * Upsert/delete external order rows (e.g. from Pesan-BosGiL) into cashier_report_orders
+   * idempotently by (report_id, order_section, external_source, external_reference_id)
+   * without disturbing manual rows or other cashier report sections.
+   */
+  static async syncExternalOrders({
+    branchId,
+    reportDate,
+    externalSource = 'pesan_bosgil',
+    orders = [],
+    deleteExternalRefs = [],
+    user = null
+  }) {
+    const dateStr = sanitizeDateOnly(reportDate);
+    if (!dateStr) {
+      const err = new Error('Format report_date tidak valid (wajib YYYY-MM-DD).');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    return await dbTransaction(async (conn) => {
+      const [existingRows] = await conn.execute(
+        `SELECT id, status FROM cashier_daily_reports WHERE branch_id = ? AND report_date = ? LIMIT 1`,
+        [branchId, dateStr]
+      );
+
+      let reportId;
+      let createdReport = false;
+
+      if (existingRows.length > 0) {
+        reportId = existingRows[0].id;
+      } else {
+        // Skip creating an empty draft report if there is nothing to upsert
+        if (!Array.isArray(orders) || orders.length === 0) {
+          return {
+            report_id: null,
+            branch_id: Number(branchId),
+            report_date: dateStr,
+            created_report: false,
+            upserted: 0,
+            deleted: 0,
+            admin_pesanan_total: 0
+          };
+        }
+
+        const [ins] = await conn.execute(
+          `INSERT INTO cashier_daily_reports (branch_id, report_date, created_by_names, submitted_by, status, auto_sync_omzet)
+           VALUES (?, ?, ?, ?, 'draft', 1)`,
+          [branchId, dateStr, user?.name || 'Sync Pesan BosGil', user?.id || null]
+        );
+        reportId = ins.insertId;
+        createdReport = true;
+      }
+
+      const [branchBankRows] = await conn.execute(
+        `SELECT id, name, type FROM bank_accounts WHERE branch_id = ? AND is_active = 1 AND type != 'savings' ORDER BY id ASC`,
+        [branchId]
+      );
+      const bankById = new Map(branchBankRows.map((b) => [Number(b.id), b]));
+      const bankByName = new Map(branchBankRows.map((b) => [String(b.name || '').trim().toLowerCase(), b]));
+
+      const resolveBank = (rawIdVal, rawTextVal) => {
+        const parsedId = rawIdVal ? parseInt(rawIdVal, 10) : null;
+        const text = rawTextVal ? String(rawTextVal).trim() : null;
+        let matched =
+          (parsedId ? bankById.get(parsedId) : null) ||
+          (text ? bankByName.get(text.toLowerCase()) : null) ||
+          null;
+
+        if (!matched && text) {
+          const lower = text.toLowerCase();
+          if (lower.includes('bca')) {
+            matched =
+              branchBankRows.find((b) => b.name.toLowerCase().includes('bca') && b.name.toLowerCase().includes('cv')) ||
+              branchBankRows.find((b) => b.name.toLowerCase().includes('bca')) ||
+              null;
+          } else if (lower.includes('mandiri')) {
+            matched =
+              branchBankRows.find((b) => b.name.toLowerCase().includes('mandiri') && b.name.toLowerCase().includes('cv')) ||
+              branchBankRows.find((b) => b.name.toLowerCase().includes('mandiri')) ||
+              null;
+          } else if (lower.includes('bri')) {
+            matched = branchBankRows.find((b) => b.name.toLowerCase().includes('bri')) || null;
+          } else if (lower.includes('cash') || lower.includes('tunai')) {
+            matched =
+              branchBankRows.find((b) => b.name.toLowerCase().includes('cash') || b.name.toLowerCase().includes('tunai')) ||
+              null;
+          }
+        }
+
+        return {
+          id: matched ? Number(matched.id) : null,
+          name: matched ? String(matched.name).trim() : text
+        };
+      };
+
+      let deletedCount = 0;
+      const cleanDeleteRefs = (Array.isArray(deleteExternalRefs) ? deleteExternalRefs : [])
+        .map((r) => String(r || '').trim())
+        .filter(Boolean);
+
+      if (cleanDeleteRefs.length > 0) {
+        const placeholders = cleanDeleteRefs.map(() => '?').join(',');
+        const [delRes] = await conn.execute(
+          `DELETE FROM cashier_report_orders
+           WHERE report_id = ? AND external_source = ? AND external_reference_id IN (${placeholders})`,
+          [reportId, externalSource, ...cleanDeleteRefs]
+        );
+        deletedCount = delRes.affectedRows || 0;
+      }
+
+      const [maxOrderRows] = await conn.execute(
+        `SELECT COALESCE(MAX(sort_order), -1) as max_sort FROM cashier_report_orders WHERE report_id = ?`,
+        [reportId]
+      );
+      let nextSortOrder = Number(maxOrderRows[0]?.max_sort ?? -1) + 1;
+
+      let upsertedCount = 0;
+      for (const raw of Array.isArray(orders) ? orders : []) {
+        const section = raw.order_section === 'dp_deposit' ? 'dp_deposit' : 'admin_pesanan';
+        const extRef = raw.external_reference_id ? String(raw.external_reference_id).trim() : null;
+        if (!extRef) continue;
+
+        const productTotal = round2(raw.product_total_amount);
+        const bca = round2(raw.tf_bca_amount);
+        const mandiri = round2(raw.tf_mandiri_amount);
+        const dpAmt = round2(raw.dp_amount);
+        const settlementAmt = round2(raw.settlement_amount);
+        const ongkirBca = round2(raw.ongkir_bca_amount);
+        const ongkirMandiri = round2(raw.ongkir_mandiri_amount);
+        const ongkirAmt = round2(
+          raw.ongkir_amount !== undefined && raw.ongkir_amount !== null
+            ? raw.ongkir_amount
+            : (ongkirBca + ongkirMandiri)
+        );
+        const computedTotal = section === 'dp_deposit'
+          ? (productTotal + ongkirAmt)
+          : (bca + mandiri + ongkirBca + ongkirMandiri);
+        const totalAmt = toNum(raw.total_amount) > 0 ? round2(raw.total_amount) : computedTotal;
+
+        const dpBank = resolveBank(raw.bank_account_id, raw.dp_channel);
+        const settlementBank = resolveBank(raw.settlement_bank_account_id, raw.settlement_channel);
+
+        const rowParams = [
+          String(raw.customer_name || '').trim(),
+          raw.planned_pickup_date ? String(raw.planned_pickup_date).trim() : null,
+          productTotal,
+          bca,
+          mandiri,
+          dpAmt,
+          raw.dp_transfer_date ? String(raw.dp_transfer_date).trim() : null,
+          dpBank.name,
+          dpBank.id,
+          settlementAmt,
+          raw.settlement_transfer_date ? String(raw.settlement_transfer_date).trim() : null,
+          settlementBank.name,
+          settlementBank.id,
+          ongkirBca,
+          ongkirMandiri,
+          ongkirAmt,
+          totalAmt,
+          raw.pickup_date ? String(raw.pickup_date).trim() : null,
+          raw.notes ? String(raw.notes).trim() : null
+        ];
+
+        const [existingOrder] = await conn.execute(
+          `SELECT id FROM cashier_report_orders
+           WHERE report_id = ? AND order_section = ? AND external_source = ? AND external_reference_id = ?
+           LIMIT 1`,
+          [reportId, section, externalSource, extRef]
+        );
+
+        if (existingOrder.length > 0) {
+          await conn.execute(
+            `UPDATE cashier_report_orders SET
+               customer_name = ?, planned_pickup_date = ?, product_total_amount = ?,
+               tf_bca_amount = ?, tf_mandiri_amount = ?, dp_amount = ?, dp_transfer_date = ?, dp_channel = ?, bank_account_id = ?,
+               settlement_amount = ?, settlement_transfer_date = ?, settlement_channel = ?, settlement_bank_account_id = ?,
+               ongkir_bca_amount = ?, ongkir_mandiri_amount = ?, ongkir_amount = ?, total_amount = ?, pickup_date = ?, notes = ?
+             WHERE id = ?`,
+            [...rowParams, existingOrder[0].id]
+          );
+        } else {
+          await conn.execute(
+            `INSERT INTO cashier_report_orders
+             (report_id, order_section, customer_name, planned_pickup_date, product_total_amount,
+              tf_bca_amount, tf_mandiri_amount, dp_amount, dp_transfer_date, dp_channel, bank_account_id,
+              settlement_amount, settlement_transfer_date, settlement_channel, settlement_bank_account_id,
+              ongkir_bca_amount, ongkir_mandiri_amount, ongkir_amount, total_amount, pickup_date, notes,
+              external_reference_id, external_source, sort_order)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [reportId, section, ...rowParams, extRef, externalSource, nextSortOrder++]
+          );
+        }
+        upsertedCount += 1;
+      }
+
+      // Recompute admin_pesanan_total from all admin_pesanan rows (synced + manual)
+      const [sumRows] = await conn.execute(
+        `SELECT COALESCE(SUM(tf_bca_amount + tf_mandiri_amount), 0) as total_admin
+         FROM cashier_report_orders
+         WHERE report_id = ? AND order_section = 'admin_pesanan'`,
+        [reportId]
+      );
+      const adminPesananTotal = round2(sumRows[0]?.total_admin || 0);
+
+      await conn.execute(
+        `UPDATE cashier_daily_reports SET admin_pesanan_total = ? WHERE id = ?`,
+        [adminPesananTotal, reportId]
+      );
+
+      if (upsertedCount > 0 || deletedCount > 0) {
+        await conn.execute(
+          `INSERT INTO cashier_report_logs (report_id, branch_id, report_date, user_id, user_name, user_role, action, summary, changes)
+           VALUES (?, ?, ?, ?, ?, ?, 'external_sync', ?, ?)`,
+          [
+            reportId,
+            branchId,
+            dateStr,
+            user?.id || null,
+            user?.name || 'Sync Pesan BosGil',
+            user?.role || 'system',
+            `Sinkronisasi otomatis ${externalSource}: ${upsertedCount} data diperbarui/ditambahkan, ${deletedCount} dihapus.`,
+            JSON.stringify([{ field: 'external_sync', label: 'Sync Pesan BosGil', oldValue: null, newValue: { upserted: upsertedCount, deleted: deletedCount } }])
+          ]
+        );
+      }
+
+      return {
+        report_id: reportId,
+        branch_id: Number(branchId),
+        report_date: dateStr,
+        created_report: createdReport,
+        upserted: upsertedCount,
+        deleted: deletedCount,
+        admin_pesanan_total: adminPesananTotal
+      };
+    });
+  }
+
+  /**
+   * Delete external synced order rows across reports (e.g., when an order is deleted or date changes).
+   */
+  static async deleteExternalOrdersByRef({
+    branchId = null,
+    reportDate = null,
+    externalSource = 'pesan_bosgil',
+    externalReferenceIds = []
+  }) {
+    const cleanRefs = (Array.isArray(externalReferenceIds) ? externalReferenceIds : [])
+      .map((r) => String(r || '').trim())
+      .filter(Boolean);
+    if (cleanRefs.length === 0) return { deleted: 0 };
+
+    return await dbTransaction(async (conn) => {
+      const placeholders = cleanRefs.map(() => '?').join(',');
+      let sql = `
+        SELECT cro.id, cro.report_id
+        FROM cashier_report_orders cro
+        JOIN cashier_daily_reports cdr ON cro.report_id = cdr.id
+        WHERE cro.external_source = ?
+          AND cro.external_reference_id IN (${placeholders})
+      `;
+      const params = [externalSource, ...cleanRefs];
+
+      if (branchId) {
+        sql += ` AND cdr.branch_id = ?`;
+        params.push(branchId);
+      }
+      if (reportDate) {
+        const dateStr = sanitizeDateOnly(reportDate);
+        if (dateStr) {
+          sql += ` AND cdr.report_date = ?`;
+          params.push(dateStr);
+        }
+      }
+
+      const [targetRows] = await conn.execute(sql, params);
+      if (targetRows.length === 0) return { deleted: 0 };
+
+      const rowIds = targetRows.map((r) => r.id);
+      const affectedReportIds = [...new Set(targetRows.map((r) => r.report_id))];
+      const idPlaceholders = rowIds.map(() => '?').join(',');
+
+      const [delRes] = await conn.execute(
+        `DELETE FROM cashier_report_orders WHERE id IN (${idPlaceholders})`,
+        rowIds
+      );
+
+      for (const rId of affectedReportIds) {
+        const [sumRows] = await conn.execute(
+          `SELECT COALESCE(SUM(tf_bca_amount + tf_mandiri_amount), 0) as total_admin
+           FROM cashier_report_orders
+           WHERE report_id = ? AND order_section = 'admin_pesanan'`,
+          [rId]
+        );
+        await conn.execute(
+          `UPDATE cashier_daily_reports SET admin_pesanan_total = ? WHERE id = ?`,
+          [round2(sumRows[0]?.total_admin || 0), rId]
+        );
+      }
+
+      return { deleted: delRes.affectedRows || 0 };
     });
   }
 }

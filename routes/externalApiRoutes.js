@@ -12,5 +12,17 @@ router.post('/refunds', apiKeyAuth('transactions:create'), externalApiController
 router.put('/refunds/:refundId', apiKeyAuth('transactions:create'), externalApiController.updateRefund);
 router.delete('/refunds/:refundId', apiKeyAuth('transactions:create'), externalApiController.deleteRefund);
 
+// Cashier report order sync (e.g. Pesan-BosGiL -> VerKas Laporan Harian Kasir)
+router.post(
+  '/cashier-reports/orders/sync',
+  apiKeyAuth(['transactions:create', 'cashier_reports:sync']),
+  externalApiController.syncCashierReportOrders
+);
+router.delete(
+  '/cashier-reports/orders',
+  apiKeyAuth(['transactions:create', 'cashier_reports:sync']),
+  externalApiController.deleteCashierReportOrders
+);
+
 module.exports = router;
 
