@@ -8,6 +8,8 @@ router.use(authenticate);
 router.get('/', paymentMethodController.getAll);
 router.post('/', paymentMethodController.create);
 router.put('/reorder', paymentMethodController.reorder);
+router.put('/:id/toggle-active', paymentMethodController.toggleActive);
+router.patch('/:id/toggle-active', paymentMethodController.toggleActive);
 router.put('/:id', paymentMethodController.update);
 router.delete('/:id', paymentMethodController.delete);
 

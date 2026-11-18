@@ -993,7 +993,8 @@ class CashierReport {
               cdr.omzet_transaction_id, cdr.last_synced_at, cdr.updated_at,
               COALESCE(u.name, u.email) as submitted_by_name,
               (SELECT COUNT(*) FROM cashier_report_notes crn WHERE crn.report_id = cdr.id) as notes_count,
-              (SELECT COUNT(*) FROM cashier_report_notes crn WHERE crn.report_id = cdr.id AND crn.is_resolved = 0) as unresolved_notes_count
+              (SELECT COUNT(*) FROM cashier_report_notes crn WHERE crn.report_id = cdr.id AND crn.is_resolved = 0) as unresolved_notes_count,
+              (SELECT COUNT(*) FROM cashier_report_notes crn WHERE crn.report_id = cdr.id AND crn.note_type = 'revisi' AND crn.is_resolved = 0) as unresolved_revisi_count
        FROM cashier_daily_reports cdr
        LEFT JOIN users u ON cdr.submitted_by = u.id
        WHERE cdr.branch_id = ? AND cdr.report_date BETWEEN ? AND ?
@@ -1016,6 +1017,8 @@ class CashierReport {
       admin_pesanan_total: toNum(r.admin_pesanan_total),
       notes_count: parseInt(r.notes_count || 0, 10),
       unresolved_notes_count: parseInt(r.unresolved_notes_count || 0, 10),
+      unresolved_revisi_count: parseInt(r.unresolved_revisi_count || 0, 10),
+      needs_revision: parseInt(r.unresolved_revisi_count || 0, 10) > 0,
       is_legacy_transaction: false
     }));
 
@@ -1083,6 +1086,8 @@ class CashierReport {
         submitted_by_name: lr.submitted_by_name || null,
         notes_count: 0,
         unresolved_notes_count: 0,
+        unresolved_revisi_count: 0,
+        needs_revision: false,
         is_legacy_transaction: true
       });
     }
@@ -1361,12 +1366,12 @@ class CashierReport {
         })
         .filter((sc) => sc.sales_channel_id);
 
-      // Mandatory 100% allocation validation when submitting/saving final report (non-draft)
-      if (nextStatus !== 'draft' && omzetGross > 0 && branchScRows.length > 0) {
+      // Sales Channel kini diisi oleh Admin/Owner; validasi hanya dijalankan jika ada alokasi sales_channel_items yang dikirim
+      if (salesChannelItems.length > 0 && nextStatus !== 'draft' && omzetGross > 0 && branchScRows.length > 0) {
         const totalAllocated = round2(salesChannelItems.reduce((s, r) => s + r.amount, 0));
         if (Math.abs(totalAllocated - omzetGross) > 1) {
           const err = new Error(
-            `Alokasi Rincian Sales Channel wajib diisi dan harus sama 100% dengan Total Omzet (${formatCurrencySimple(totalAllocated)} / ${formatCurrencySimple(omzetGross)}).`
+            `Alokasi Rincian Sales Channel wajib sama 100% dengan Total Omzet (${formatCurrencySimple(totalAllocated)} / ${formatCurrencySimple(omzetGross)}).`
           );
           err.statusCode = 400;
           throw err;
@@ -1525,18 +1530,20 @@ class CashierReport {
         );
       }
 
-      await conn.execute(`DELETE FROM cashier_report_sales_channels WHERE report_id = ?`, [reportId]);
-      for (const sc of salesChannelItems) {
-        await conn.execute(
-          `INSERT INTO cashier_report_sales_channels
-           (report_id, sales_channel_id, sales_channel_name, payment_method_id, payment_method_name, omzet_item_index, amount, pb1_amount, sort_order)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            reportId, sc.sales_channel_id, sc.sales_channel_name,
-            sc.payment_method_id, sc.payment_method_name, sc.omzet_item_index,
-            sc.amount, sc.pb1_amount, sc.sort_order
-          ]
-        );
+      if (salesChannelItems.length > 0) {
+        await conn.execute(`DELETE FROM cashier_report_sales_channels WHERE report_id = ?`, [reportId]);
+        for (const sc of salesChannelItems) {
+          await conn.execute(
+            `INSERT INTO cashier_report_sales_channels
+             (report_id, sales_channel_id, sales_channel_name, payment_method_id, payment_method_name, omzet_item_index, amount, pb1_amount, sort_order)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              reportId, sc.sales_channel_id, sc.sales_channel_name,
+              sc.payment_method_id, sc.payment_method_name, sc.omzet_item_index,
+              sc.amount, sc.pb1_amount, sc.sort_order
+            ]
+          );
+        }
       }
 
       await conn.execute(`DELETE FROM cashier_report_entertainments WHERE report_id = ?`, [reportId]);
@@ -1647,35 +1654,37 @@ class CashierReport {
               });
             }
 
-            await conn.execute(`DELETE FROM transaction_sales_channels WHERE transaction_id = ?`, [linkedTxId]);
-            for (const sc of salesChannelItems) {
-              const matchedTid =
-                (sc.omzet_item_index !== null
-                  ? createdIncomeDetails.find((cid) => cid.omzet_item_index === sc.omzet_item_index)
-                  : null) ||
-                (sc.payment_method_id
-                  ? createdIncomeDetails.find((cid) => Number(cid.payment_method_id) === Number(sc.payment_method_id))
-                  : null) ||
-                createdIncomeDetails.find(
-                  (cid) =>
-                    String(cid.channel_name || '').toLowerCase().trim() ===
-                    String(sc.payment_method_name || '').toLowerCase().trim()
-                ) ||
-                (createdIncomeDetails.length === 1 ? createdIncomeDetails[0] : null);
+            if (salesChannelItems.length > 0) {
+              await conn.execute(`DELETE FROM transaction_sales_channels WHERE transaction_id = ?`, [linkedTxId]);
+              for (const sc of salesChannelItems) {
+                const matchedTid =
+                  (sc.omzet_item_index !== null
+                    ? createdIncomeDetails.find((cid) => cid.omzet_item_index === sc.omzet_item_index)
+                    : null) ||
+                  (sc.payment_method_id
+                    ? createdIncomeDetails.find((cid) => Number(cid.payment_method_id) === Number(sc.payment_method_id))
+                    : null) ||
+                  createdIncomeDetails.find(
+                    (cid) =>
+                      String(cid.channel_name || '').toLowerCase().trim() ===
+                      String(sc.payment_method_name || '').toLowerCase().trim()
+                  ) ||
+                  (createdIncomeDetails.length === 1 ? createdIncomeDetails[0] : null);
 
-              await conn.execute(
-                `INSERT INTO transaction_sales_channels
-                 (transaction_id, sales_channel_id, payment_method_id, transaction_income_detail_id, amount, pb1_amount)
-                 VALUES (?, ?, ?, ?, ?, ?)`,
-                [
-                  linkedTxId,
-                  sc.sales_channel_id,
-                  matchedTid ? matchedTid.payment_method_id : sc.payment_method_id,
-                  matchedTid ? matchedTid.id : null,
-                  sc.amount,
-                  sc.pb1_amount
-                ]
-              );
+                await conn.execute(
+                  `INSERT INTO transaction_sales_channels
+                   (transaction_id, sales_channel_id, payment_method_id, transaction_income_detail_id, amount, pb1_amount)
+                   VALUES (?, ?, ?, ?, ?, ?)`,
+                  [
+                    linkedTxId,
+                    sc.sales_channel_id,
+                    matchedTid ? matchedTid.payment_method_id : sc.payment_method_id,
+                    matchedTid ? matchedTid.id : null,
+                    sc.amount,
+                    sc.pb1_amount
+                  ]
+                );
+              }
             }
 
             await conn.execute(
@@ -1707,11 +1716,25 @@ class CashierReport {
         changes.push({ field: 'omzet_transaction_id', label: 'Sinkronisasi Kas', oldValue: existingOmzetTxId || null, newValue: linkedTxId });
       }
 
+      // Jika laporan final disimpan/diperbaiki (non-draft), tandai catatan minta revisi sebelumnya sebagai selesai
+      let resolvedRevisionNote = '';
+      if (isUpdate && nextStatus !== 'draft') {
+        const [revRes] = await conn.execute(
+          `UPDATE cashier_report_notes SET is_resolved = 1
+           WHERE report_id = ? AND note_type = 'revisi' AND is_resolved = 0`,
+          [reportId]
+        );
+        if (revRes.affectedRows > 0) {
+          resolvedRevisionNote = `${revRes.affectedRows} catatan revisi ditandai selesai.`;
+        }
+      }
+
       const action = isUpdate ? 'update_report' : 'create_report';
       const baseSummary = isUpdate
         ? `Memperbarui laporan kasir tanggal ${dateStr} (${changes.length} perubahan)`
         : `Membuat laporan harian kasir tanggal ${dateStr} — Omzet ${formatCurrencySimple(omzetGross)}`;
-      const summary = syncLogNote ? `${baseSummary}. ${syncLogNote}` : baseSummary;
+      const extraNotes = [syncLogNote, resolvedRevisionNote].filter(Boolean).join(' ');
+      const summary = extraNotes ? `${baseSummary}. ${extraNotes}` : baseSummary;
 
       await conn.execute(
         `INSERT INTO cashier_report_logs (report_id, branch_id, report_date, user_id, user_name, user_role, action, summary, changes)
@@ -1755,9 +1778,19 @@ class CashierReport {
         [reportId, user?.id || null, user?.name || user?.email || 'Admin', user?.role || 'admin', safeType, content]
       );
 
-      if (safeType === 'terverifikasi') {
+      if (safeType === 'revisi' && rep.status === 'reviewed') {
+        await conn.execute(
+          `UPDATE cashier_daily_reports SET status = 'submitted' WHERE id = ?`,
+          [reportId]
+        );
+      } else if (safeType === 'terverifikasi') {
         await conn.execute(
           `UPDATE cashier_daily_reports SET status = 'reviewed' WHERE id = ?`,
+          [reportId]
+        );
+        await conn.execute(
+          `UPDATE cashier_report_notes SET is_resolved = 1
+           WHERE report_id = ? AND note_type = 'revisi' AND is_resolved = 0`,
           [reportId]
         );
       }
