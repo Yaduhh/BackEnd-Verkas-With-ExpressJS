@@ -45,6 +45,10 @@ app.use(helmet({
 // CORS configuration - Allow multiple origins for development
 const allowedOrigins = [
   config.corsOrigin,
+  'http://localhost:5175',
+  'http://127.0.0.1:5175',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
   'http://localhost:19006', // Expo web default
   'http://localhost:8081', // Metro bundler
   'http://127.0.0.1:8081', // iOS Simulator Metro
@@ -113,9 +117,9 @@ const sendAuthError = (res, req, status, title, message) => {
     return res.status(status).json({ success: false, message });
   }
 
-  let redirectUrl = config.corsOrigin || 'http://localhost:5173';
+  let redirectUrl = config.corsOrigin || 'http://localhost:5175';
   if (redirectUrl.includes(':8081') || redirectUrl.includes(':19006')) {
-    redirectUrl = 'http://localhost:5173';
+    redirectUrl = 'http://localhost:5175';
   }
 
   return res.status(status).send(`

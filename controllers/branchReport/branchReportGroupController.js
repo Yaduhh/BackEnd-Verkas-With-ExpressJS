@@ -5,6 +5,10 @@ const BranchReportLog = require('../../models/BranchReportLog');
 const GroupReport = require('../../models/GroupReport');
 const { query } = require('../../config/database');
 const { computeBranchSystemSalesChannels } = require('../../utils/salesChannelHelper');
+const {
+    getTransactionPb1SubquerySql,
+    getTransactionTaxableAmountSubquerySql
+} = require('../../utils/pb1Helper');
 const { 
     exportFinancialReportToPDF, 
     exportInvestorReportToPDF,
@@ -75,25 +79,10 @@ const getConsolidatedReport = async (req, res, next) => {
                         END
                     ) as total_gross,
                     SUM(
-                        COALESCE((
-                            SELECT SUM(tid.amount_app)
-                            FROM transaction_income_details tid
-                            JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                            WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
-                        ), 0)
+                        COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
                     ) as taxable_amount,
                     SUM(
-                        COALESCE((
-                            SELECT CASE
-                                WHEN COUNT(tid.pb1_amount) > 0 THEN
-                                    ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
-                                ELSE
-                                    ROUND(SUM(tid.amount_app) * 10 / 110)
-                            END
-                            FROM transaction_income_details tid
-                            JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                            WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
-                        ), t.pb1, 0)
+                        ${getTransactionPb1SubquerySql('t')}
                     ) as total_pb1
                  FROM transactions t
                  LEFT JOIN categories c ON t.category_id = c.id
@@ -385,25 +374,10 @@ const getGroupFinancialReport = async (req, res, next) => {
                         END
                     ) as total_gross,
                     SUM(
-                        COALESCE((
-                            SELECT SUM(tid.amount_app)
-                            FROM transaction_income_details tid
-                            JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                            WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
-                        ), 0)
+                        COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
                     ) as taxable_amount,
                     SUM(
-                        COALESCE((
-                            SELECT CASE
-                                WHEN COUNT(tid.pb1_amount) > 0 THEN
-                                    ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
-                                ELSE
-                                    ROUND(SUM(tid.amount_app) * 10 / 110)
-                            END
-                            FROM transaction_income_details tid
-                            JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                            WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
-                        ), t.pb1, 0)
+                        ${getTransactionPb1SubquerySql('t')}
                     ) as total_pb1
                  FROM transactions t
                  LEFT JOIN categories c ON t.category_id = c.id
@@ -568,25 +542,10 @@ const getGroupFinancialReport = async (req, res, next) => {
                     COALESCE(c.name, 'Lain-lain') as category_name,
                     SUM(t.amount + COALESCE(future_ref.amount, 0)) as total_gross,
                     SUM(
-                        COALESCE((
-                            SELECT SUM(tid.amount_app)
-                            FROM transaction_income_details tid
-                            JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                            WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
-                        ), 0)
+                        COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
                     ) as taxable_amount,
                     SUM(
-                        COALESCE((
-                            SELECT CASE
-                                WHEN COUNT(tid.pb1_amount) > 0 THEN
-                                    ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
-                                ELSE
-                                    ROUND(SUM(tid.amount_app) * 10 / 110)
-                            END
-                            FROM transaction_income_details tid
-                            JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                            WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
-                        ), t.pb1, 0)
+                        ${getTransactionPb1SubquerySql('t')}
                     ) as total_pb1
                  FROM transactions t
                  LEFT JOIN categories c ON t.category_id = c.id

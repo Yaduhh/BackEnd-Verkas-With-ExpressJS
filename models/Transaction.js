@@ -1,4 +1,10 @@
 const { query, transaction: dbTransaction } = require('../config/database');
+const {
+  getTidAggPb1SelectSql,
+  getOuterAggPb1SelectSql,
+  getTransactionPb1SubquerySql,
+  getTransactionTaxableAmountSubquerySql
+} = require('../utils/pb1Helper');
 
 class Transaction {
   // Find by ID
@@ -62,8 +68,10 @@ class Transaction {
     transaction.income_details = incomeDetails;
 
     if (transaction.type === 'income') {
-      const hasExactPb1 = incomeDetails.some(item => item.pb1_amount !== null && item.pb1_amount !== undefined);
-      if (hasExactPb1) {
+      const hasPositiveExactPb1 = incomeDetails.some(
+        item => item.pb1_amount !== null && item.pb1_amount !== undefined && parseFloat(item.pb1_amount) > 0
+      );
+      if (hasPositiveExactPb1) {
         transaction.pb1 = Math.round(incomeDetails.reduce((sum, item) => {
           if (item.pb1_amount !== null && item.pb1_amount !== undefined) {
             return sum + (parseFloat(item.pb1_amount) || 0);
@@ -74,16 +82,26 @@ class Transaction {
           }
           return sum;
         }, 0));
-      } else {
-        const taxableBase = incomeDetails.reduce((sum, item) => {
-          if (item.is_taxable === 1 || item.is_taxable === true) {
-            const rowBase = parseFloat(item.amount_app) > 0 ? parseFloat(item.amount_app) : parseFloat(item.amount_cashier || 0);
-            return sum + rowBase;
+      } else if (!(parseFloat(transaction.pb1) > 0)) {
+        const hasTaxableWithNullPb1 = incomeDetails.some(
+          item => (item.is_taxable === 1 || item.is_taxable === true) && (item.pb1_amount === null || item.pb1_amount === undefined)
+        );
+        const hasAnyExplicitPb1 = incomeDetails.some(
+          item => item.pb1_amount !== null && item.pb1_amount !== undefined
+        );
+        if (!hasAnyExplicitPb1 || hasTaxableWithNullPb1) {
+          const taxableBase = incomeDetails.reduce((sum, item) => {
+            if (item.is_taxable === 1 || item.is_taxable === true) {
+              const rowBase = parseFloat(item.amount_app) > 0 ? parseFloat(item.amount_app) : parseFloat(item.amount_cashier || 0);
+              return sum + rowBase;
+            }
+            return sum;
+          }, 0);
+          if (taxableBase > 0) {
+            transaction.pb1 = Math.round((taxableBase * 10) / 110);
           }
-          return sum;
-        }, 0);
-        if (taxableBase > 0) {
-          transaction.pb1 = Math.round((taxableBase * 10) / 110);
+        } else {
+          transaction.pb1 = 0;
         }
       }
       if (transaction.total_customer && Number(transaction.total_customer) > 0) {
@@ -229,12 +247,8 @@ class Transaction {
              COALESCE(t_future_ref.total_future_refund, 0) as future_refund,
              (ABS(t.amount) + COALESCE(t_ref.total_refund, 0)) as original_amount,
              (ABS(t.amount) + COALESCE(t_future_ref.total_future_refund, 0)) as net_amount,
-             /* Standardized dynamic PB1 calculation (exact pb1_amount if recorded, else 10/110) */
-             CASE 
-               WHEN t.type = 'income' THEN 
-                 COALESCE(tid_agg.calculated_pb1, t.pb1, 0)
-               ELSE 0 
-             END as pb1
+             /* Standardized dynamic PB1 calculation (exact pb1_amount > 0 if recorded, else t.pb1 > 0, else 10/110) */
+             ${getOuterAggPb1SelectSql('t', 'tid_agg')}
     `;
     let joinDetails = '';
     const joinDetailsParams = [];
@@ -343,13 +357,7 @@ class Transaction {
         SELECT tid.transaction_id,
                GROUP_CONCAT(DISTINCT ba_sub.name SEPARATOR ', ') as bank_account_names,
                MAX(ba_sub.type) as bank_account_type,
-               CASE
-                 WHEN COUNT(CASE WHEN pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL THEN 1 END) = 0 THEN NULL
-                 WHEN COUNT(tid.pb1_amount) > 0 THEN
-                   ROUND(SUM(CASE WHEN pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL THEN COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND((CASE WHEN tid.amount_app > 0 THEN tid.amount_app ELSE tid.amount_cashier END) * 10 / 110) ELSE 0 END) ELSE 0 END))
-                 ELSE
-                   ROUND(SUM(CASE WHEN pm.is_taxable = 1 THEN (CASE WHEN tid.amount_app > 0 THEN tid.amount_app ELSE tid.amount_cashier END) ELSE 0 END) * 10 / 110)
-               END as calculated_pb1
+               ${getTidAggPb1SelectSql('tid', 'pm')}
         FROM transaction_income_details tid
         JOIN transactions t_sub ON t_sub.id = tid.transaction_id
         LEFT JOIN bank_accounts ba_sub ON tid.bank_account_id = ba_sub.id
@@ -780,10 +788,7 @@ class Transaction {
              pct_agg.petty_cash_names,
              (ABS(t.amount) + COALESCE(t_ref.total_refund, 0)) as original_amount,
              (ABS(t.amount) + COALESCE(t_future_ref.total_future_refund, 0)) as net_amount,
-             CASE
-               WHEN t.type = 'income' THEN COALESCE(tid_agg.calculated_pb1, t.pb1, 0)
-               ELSE 0
-             END as pb1
+             ${getOuterAggPb1SelectSql('t', 'tid_agg')}
       FROM transactions t
       LEFT JOIN branches b ON t.branch_id = b.id
       LEFT JOIN categories c ON t.category_id = c.id
@@ -794,13 +799,7 @@ class Transaction {
         SELECT tid.transaction_id,
                GROUP_CONCAT(DISTINCT ba_sub.name SEPARATOR ', ') as bank_account_names,
                MAX(ba_sub.type) as bank_account_type,
-               CASE
-                 WHEN COUNT(CASE WHEN pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL THEN 1 END) = 0 THEN NULL
-                 WHEN COUNT(tid.pb1_amount) > 0 THEN
-                   ROUND(SUM(CASE WHEN pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL THEN COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND((CASE WHEN tid.amount_app > 0 THEN tid.amount_app ELSE tid.amount_cashier END) * 10 / 110) ELSE 0 END) ELSE 0 END))
-                 ELSE
-                   ROUND(SUM(CASE WHEN pm.is_taxable = 1 THEN (CASE WHEN tid.amount_app > 0 THEN tid.amount_app ELSE tid.amount_cashier END) ELSE 0 END) * 10 / 110)
-               END as calculated_pb1
+               ${getTidAggPb1SelectSql('tid', 'pm')}
         FROM transaction_income_details tid
         LEFT JOIN bank_accounts ba_sub ON tid.bank_account_id = ba_sub.id
         LEFT JOIN payment_methods pm ON tid.payment_method_id = pm.id
@@ -1786,10 +1785,7 @@ class Transaction {
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
             COALESCE(
-              (SELECT SUM(tid.amount_app)
-               FROM transaction_income_details tid
-               JOIN payment_methods pm ON tid.payment_method_id = pm.id
-               WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
+              ${getTransactionTaxableAmountSubquerySql('t')},
               0
             )
           ELSE 0 
@@ -1797,19 +1793,7 @@ class Transaction {
 
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-            COALESCE(
-              (SELECT CASE
-                 WHEN COUNT(tid.pb1_amount) > 0 THEN
-                   ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
-                 ELSE
-                   ROUND(SUM(tid.amount_app) * 10 / 110)
-               END
-               FROM transaction_income_details tid
-               JOIN payment_methods pm ON tid.payment_method_id = pm.id
-               WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)),
-              t.pb1,
-              0
-            )
+            ${getTransactionPb1SubquerySql('t')}
           ELSE 0 
         END), 0) as omzet_pb1,
 
@@ -1822,10 +1806,7 @@ class Transaction {
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
             COALESCE(
-              (SELECT SUM(tid.amount_app)
-               FROM transaction_income_details tid
-               JOIN payment_methods pm ON tid.payment_method_id = pm.id
-               WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
+              ${getTransactionTaxableAmountSubquerySql('t')},
               0
             )
           ELSE 0 
@@ -1833,19 +1814,7 @@ class Transaction {
 
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-            COALESCE(
-              (SELECT CASE
-                 WHEN COUNT(tid.pb1_amount) > 0 THEN
-                   ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
-                 ELSE
-                   ROUND(SUM(tid.amount_app) * 10 / 110)
-               END
-               FROM transaction_income_details tid
-               JOIN payment_methods pm ON tid.payment_method_id = pm.id
-               WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)),
-              t.pb1,
-              0
-            )
+            ${getTransactionPb1SubquerySql('t')}
           ELSE 0 
         END), 0) as lain_pb1,
 
@@ -1862,10 +1831,7 @@ class Transaction {
         COALESCE(SUM(CASE 
           WHEN t.type = 'income' AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
             COALESCE(
-              (SELECT SUM(tid.amount_app)
-               FROM transaction_income_details tid
-               JOIN payment_methods pm ON tid.payment_method_id = pm.id
-               WHERE tid.transaction_id = t.id AND pm.is_taxable = 1),
+              ${getTransactionTaxableAmountSubquerySql('t')},
               t.pb1 * 11,
               0
             )
@@ -2005,25 +1971,10 @@ class Transaction {
                 t.is_debt_payment,
                 SUM(t.amount + COALESCE(future_ref.amount, 0)) as total_gross,
                 SUM(
-                    COALESCE((
-                        SELECT SUM(tid.amount_app)
-                        FROM transaction_income_details tid
-                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                        WHERE tid.transaction_id = t.id AND pm.is_taxable = 1
-                    ), 0)
+                    COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
                 ) as taxable_amount,
                 SUM(
-                    COALESCE((
-                        SELECT CASE
-                            WHEN COUNT(tid.pb1_amount) > 0 THEN
-                                ROUND(SUM(COALESCE(tid.pb1_amount, CASE WHEN pm.is_taxable = 1 THEN ROUND(tid.amount_app * 10 / 110) ELSE 0 END)))
-                            ELSE
-                                ROUND(SUM(tid.amount_app) * 10 / 110)
-                        END
-                        FROM transaction_income_details tid
-                        JOIN payment_methods pm ON tid.payment_method_id = pm.id
-                        WHERE tid.transaction_id = t.id AND (pm.is_taxable = 1 OR tid.pb1_amount IS NOT NULL)
-                    ), t.pb1, 0)
+                    ${getTransactionPb1SubquerySql('t')}
                 ) as total_pb1,
                 (SELECT COUNT(*) FROM transactions t2 WHERE t2.category_id = t.category_id AND t2.type = 'expense' AND t2.status_deleted = false AND (t2.is_draft = false OR t2.is_draft IS NULL) AND t2.branch_id = t.branch_id) as has_expense
              FROM transactions t

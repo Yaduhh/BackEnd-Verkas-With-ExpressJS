@@ -12,6 +12,7 @@ router.put('/daily', cashierReportController.saveDaily);
 router.get('/monthly', cashierReportController.listMonthly);
 router.put('/targets', cashierReportController.upsertTarget);
 router.put('/:reportId/sales-channels', cashierReportController.updateSalesChannels);
+router.put('/orders/:orderId/verify', cashierReportController.toggleOrderVerification);
 
 router.get('/sold-items', cashierReportController.getSoldItemMasters);
 router.post('/sold-items', cashierReportController.createSoldItemMaster);

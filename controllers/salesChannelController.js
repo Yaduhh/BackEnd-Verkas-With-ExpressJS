@@ -379,21 +379,33 @@ const getSalesChannelCategoryReport = async (req, res, next) => {
         });
 
         // 2. Reconcile PB1 differences between channel groups and authoritative transaction PB1 (Single Source of Truth)
-        const hasExactIncomePb1 = (t.income_details || []).some(
-          (idRow) => idRow.pb1_amount !== null && idRow.pb1_amount !== undefined
+        const hasPositiveIncomePb1 = (t.income_details || []).some(
+          (idRow) => idRow.pb1_amount !== null && idRow.pb1_amount !== undefined && parseFloat(idRow.pb1_amount) > 0
         );
         const taxableIncomeRows = (t.income_details || []).filter(
           (idRow) => idRow.is_taxable == 1 || idRow.is_taxable === true
         );
         const taxableIncomeSum = taxableIncomeRows.reduce(
-          (s, idRow) => s + (parseFloat(idRow.amount_app) || 0),
+          (s, idRow) => s + ((parseFloat(idRow.amount_app) > 0 ? parseFloat(idRow.amount_app) : parseFloat(idRow.amount_cashier || 0)) || 0),
           0
         );
-        const effectiveTrxPb1 = hasExactIncomePb1
-          ? Math.round((t.income_details || []).reduce((s, idRow) => s + (parseFloat(idRow.pb1_amount) || 0), 0))
-          : (taxableIncomeRows.length > 0
-              ? Math.round((taxableIncomeSum * 10) / 110)
-              : parseFloat(t.pb1 || 0));
+        const txStoredPb1 = parseFloat(t.pb1 || 0);
+        const effectiveTrxPb1 = hasPositiveIncomePb1
+          ? Math.round((t.income_details || []).reduce((s, idRow) => {
+              if (idRow.pb1_amount !== null && idRow.pb1_amount !== undefined) {
+                return s + (parseFloat(idRow.pb1_amount) || 0);
+              }
+              if (idRow.is_taxable == 1 || idRow.is_taxable === true) {
+                const rowBase = parseFloat(idRow.amount_app) > 0 ? parseFloat(idRow.amount_app) : parseFloat(idRow.amount_cashier || 0);
+                return s + Math.round((rowBase * 10) / 110);
+              }
+              return s;
+            }, 0))
+          : (txStoredPb1 > 0
+              ? txStoredPb1
+              : (taxableIncomeRows.length > 0
+                  ? Math.round((taxableIncomeSum * 10) / 110)
+                  : 0));
 
         const scPb1Sum = groupedChannels.reduce((sum, g) => sum + g.pb1_amount, 0);
         const taxableGroups = groupedChannels.filter(g => g.taxable_gross > 0);

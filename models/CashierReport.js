@@ -790,7 +790,8 @@ class CashierReport {
 
     const reports = await exec(
       `SELECT cdr.*, COALESCE(u.name, u.email) as submitted_by_name, u.role as submitted_by_role,
-              t.amount as synced_transaction_amount, t.status_deleted as synced_transaction_deleted
+              t.amount as synced_transaction_amount, t.status_deleted as synced_transaction_deleted,
+              t.lampiran as synced_transaction_lampiran
        FROM cashier_daily_reports cdr
        LEFT JOIN users u ON cdr.submitted_by = u.id
        LEFT JOIN transactions t ON cdr.omzet_transaction_id = t.id
@@ -801,6 +802,8 @@ class CashierReport {
     if (!reports || reports.length === 0) return null;
 
     const r = reports[0];
+    const reportSalesLampiran = parseLampiranArray(r.omzet_sales_lampiran);
+    const syncedTxLampiran = parseLampiranArray(r.synced_transaction_lampiran);
     const numericHeader = {
       ...r,
       total_customer: parseInt(r.total_customer || 0, 10),
@@ -812,6 +815,7 @@ class CashierReport {
       omzet_sales_app: toNullableNum(r.omzet_sales_app),
       omzet_sales_cashier: toNullableNum(r.omzet_sales_cashier),
       omzet_sales_notes: r.omzet_sales_notes || '',
+      omzet_sales_lampiran: reportSalesLampiran.length > 0 ? reportSalesLampiran : syncedTxLampiran,
       cash_omzet: toNum(r.cash_omzet),
       cash_shift1: toNum(r.cash_shift1),
       cash_shift2: toNum(r.cash_shift2),
@@ -894,10 +898,12 @@ class CashierReport {
     );
 
     const orders = await exec(
-      `SELECT cro.*, ba.name as bank_account_name, ba_set.name as settlement_bank_account_name
+      `SELECT cro.*, ba.name as bank_account_name, ba_set.name as settlement_bank_account_name,
+              COALESCE(uv.name, uv.email) as verified_by_name
        FROM cashier_report_orders cro
        LEFT JOIN bank_accounts ba ON cro.bank_account_id = ba.id
        LEFT JOIN bank_accounts ba_set ON cro.settlement_bank_account_id = ba_set.id
+       LEFT JOIN users uv ON cro.verified_by = uv.id
        WHERE cro.report_id = ?
        ORDER BY cro.sort_order ASC, cro.id ASC`,
       [reportId]
@@ -917,7 +923,11 @@ class CashierReport {
       ongkir_bca_amount: toNum(o.ongkir_bca_amount),
       ongkir_mandiri_amount: toNum(o.ongkir_mandiri_amount),
       ongkir_amount: toNum(o.ongkir_amount),
-      total_amount: toNum(o.total_amount)
+      total_amount: toNum(o.total_amount),
+      is_verified: Boolean(o.is_verified),
+      verified_by: o.verified_by ? Number(o.verified_by) : null,
+      verified_by_name: o.verified_by_name || null,
+      verified_at: o.verified_at || null
     });
 
     const notes = await exec(
@@ -1010,7 +1020,7 @@ class CashierReport {
 
   static async getLegacyOmzetSnapshot(branchId, dateStr) {
     const txRows = await query(
-      `SELECT t.id, t.user_id, t.amount, t.total_customer, t.apc, t.pb1, t.note, t.created_at, t.updated_at,
+      `SELECT t.id, t.user_id, t.amount, t.total_customer, t.apc, t.pb1, t.note, t.lampiran, t.created_at, t.updated_at,
               COALESCE(u.name, u.email) as user_name
        FROM transactions t
        LEFT JOIN categories c ON t.category_id = c.id
@@ -1149,6 +1159,7 @@ class CashierReport {
         omzet_sales_app: totalAppSum > 0 ? totalAppSum : null,
         omzet_sales_cashier: omzetGross > 0 ? omzetGross : null,
         omzet_sales_notes: combinedNotes || '',
+        omzet_sales_lampiran: Array.from(new Set(txRows.flatMap((t) => parseLampiranArray(t.lampiran)))),
         cash_omzet: cashOmzet,
         cash_shift1: 0,
         cash_shift2: 0,
@@ -1229,6 +1240,10 @@ class CashierReport {
               omzet_sales_app: legacySnapshot.report.omzet_sales_app,
               omzet_sales_cashier: legacySnapshot.report.omzet_sales_cashier,
               omzet_sales_notes: snapshot.report.omzet_sales_notes || legacySnapshot.report.omzet_sales_notes,
+              omzet_sales_lampiran:
+                snapshot.report.omzet_sales_lampiran && snapshot.report.omzet_sales_lampiran.length > 0
+                  ? snapshot.report.omzet_sales_lampiran
+                  : (legacySnapshot.report.omzet_sales_lampiran || []),
               cash_omzet: legacySnapshot.report.cash_omzet,
               omzet_transaction_id: legacySnapshot.report.omzet_transaction_id,
               merge_omzet_with_payment_methods: true
@@ -1544,6 +1559,7 @@ class CashierReport {
             const settlementBank = resolveBankChannel(o.settlement_bank_account_id, o.settlement_channel);
 
             return {
+              id: o.id ? Number(o.id) : null,
               order_section: section,
               customer_name: String(o.customer_name || '').trim(),
               planned_pickup_date: o.planned_pickup_date ? String(o.planned_pickup_date).trim() : null,
@@ -1566,7 +1582,10 @@ class CashierReport {
               notes: o.notes ? String(o.notes).trim() : null,
               external_reference_id: o.external_reference_id ? String(o.external_reference_id).trim() : null,
               external_source: o.external_source ? String(o.external_source).trim() : null,
-              sort_order: idx
+              sort_order: idx,
+              is_verified: Boolean(o.is_verified),
+              verified_by: o.verified_by ? Number(o.verified_by) : null,
+              verified_at: o.verified_at || null
             };
           });
 
@@ -1735,6 +1754,12 @@ class CashierReport {
         return found ? round2(which === 1 ? found.qty1 : found.qty2) : 0;
       };
 
+      const hasOmzetSalesLampiranPayload = payload.omzet_sales_lampiran !== undefined;
+      const omzetSalesLampiranList = hasOmzetSalesLampiranPayload
+        ? parseLampiranArray(payload.omzet_sales_lampiran)
+        : parseLampiranArray(prevSnapshot?.report?.omzet_sales_lampiran);
+      const omzetSalesLampiranJson = omzetSalesLampiranList.length > 0 ? JSON.stringify(omzetSalesLampiranList) : null;
+
       const rawCreator = payload.created_by_names ? String(payload.created_by_names).trim() : '';
       const resolvedCreator = rawCreator && rawCreator !== 'Sync Pesan BosGil' ? rawCreator : (user?.name || null);
       const headerData = {
@@ -1750,6 +1775,7 @@ class CashierReport {
         omzet_sales_app: toNullableNum(payload.omzet_sales_app),
         omzet_sales_cashier: manualOmzetSalesCashier,
         omzet_sales_notes: payload.omzet_sales_notes ? String(payload.omzet_sales_notes).trim() : null,
+        omzet_sales_lampiran: omzetSalesLampiranJson,
         cash_omzet: round2(payload.cash_omzet),
         cash_shift1: round2(payload.cash_shift1),
         cash_shift2: round2(payload.cash_shift2),
@@ -1779,7 +1805,7 @@ class CashierReport {
           `UPDATE cashier_daily_reports SET
              created_by_names = ?, submitted_by = ?, status = ?,
              total_customer = ?, apc = ?, omzet_gross = ?, pb1_amount = ?, pb1_app_amount = ?, omzet_net = ?,
-             omzet_sales_app = ?, omzet_sales_cashier = ?, omzet_sales_notes = ?,
+             omzet_sales_app = ?, omzet_sales_cashier = ?, omzet_sales_notes = ?, omzet_sales_lampiran = ?,
              cash_omzet = ?, cash_shift1 = ?, cash_shift2 = ?,
              endorse_entertaint_total = ?, admin_pesanan_total = ?,
              hpp_daily_override = ?, operasional_daily_override = ?,
@@ -1794,7 +1820,7 @@ class CashierReport {
           [
             headerData.created_by_names, headerData.submitted_by, headerData.status,
             headerData.total_customer, headerData.apc, headerData.omzet_gross, headerData.pb1_amount, headerData.pb1_app_amount, headerData.omzet_net,
-            headerData.omzet_sales_app, headerData.omzet_sales_cashier, headerData.omzet_sales_notes,
+            headerData.omzet_sales_app, headerData.omzet_sales_cashier, headerData.omzet_sales_notes, headerData.omzet_sales_lampiran,
             headerData.cash_omzet, headerData.cash_shift1, headerData.cash_shift2,
             headerData.endorse_entertaint_total, headerData.admin_pesanan_total,
             headerData.hpp_daily_override, headerData.operasional_daily_override,
@@ -1813,7 +1839,7 @@ class CashierReport {
           `INSERT INTO cashier_daily_reports (
              branch_id, report_date, created_by_names, submitted_by, status,
              total_customer, apc, omzet_gross, pb1_amount, pb1_app_amount, omzet_net,
-             omzet_sales_app, omzet_sales_cashier, omzet_sales_notes,
+             omzet_sales_app, omzet_sales_cashier, omzet_sales_notes, omzet_sales_lampiran,
              cash_omzet, cash_shift1, cash_shift2,
              endorse_entertaint_total, admin_pesanan_total,
              hpp_daily_override, operasional_daily_override,
@@ -1824,11 +1850,11 @@ class CashierReport {
              kambing_dijual_ekor, kambing_dijual_potong,
              kambing_kecil_ekor, kambing_kecil_potong,
              kasir_notes, auto_sync_omzet
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             branchId, dateStr, headerData.created_by_names, headerData.submitted_by, headerData.status,
             headerData.total_customer, headerData.apc, headerData.omzet_gross, headerData.pb1_amount, headerData.pb1_app_amount, headerData.omzet_net,
-            headerData.omzet_sales_app, headerData.omzet_sales_cashier, headerData.omzet_sales_notes,
+            headerData.omzet_sales_app, headerData.omzet_sales_cashier, headerData.omzet_sales_notes, headerData.omzet_sales_lampiran,
             headerData.cash_omzet, headerData.cash_shift1, headerData.cash_shift2,
             headerData.endorse_entertaint_total, headerData.admin_pesanan_total,
             headerData.hpp_daily_override, headerData.operasional_daily_override,
@@ -1902,19 +1928,44 @@ class CashierReport {
         );
       }
 
+      const [existingOrderStates] = await conn.execute(
+        `SELECT id, order_section, external_source, external_reference_id, is_verified, verified_by, verified_at
+         FROM cashier_report_orders
+         WHERE report_id = ?`,
+        [reportId]
+      );
+      const verifyById = new Map();
+      const verifyByExt = new Map();
+      for (const eo of existingOrderStates || []) {
+        if (eo.id) verifyById.set(Number(eo.id), eo);
+        if (eo.external_source && eo.external_reference_id) {
+          verifyByExt.set(`${eo.order_section}|${eo.external_source}|${eo.external_reference_id}`, eo);
+        }
+      }
+
       await conn.execute(`DELETE FROM cashier_report_orders WHERE report_id = ?`, [reportId]);
       for (const o of [...dpOrders, ...adminOrders]) {
+        const matchedVerify =
+          (o.id ? verifyById.get(Number(o.id)) : null) ||
+          (o.external_source && o.external_reference_id
+            ? verifyByExt.get(`${o.order_section}|${o.external_source}|${o.external_reference_id}`)
+            : null);
+        const isVerifiedVal = matchedVerify ? (matchedVerify.is_verified ? 1 : 0) : (o.is_verified ? 1 : 0);
+        const verifiedByVal = matchedVerify ? matchedVerify.verified_by : o.verified_by;
+        const verifiedAtVal = matchedVerify ? matchedVerify.verified_at : o.verified_at;
+
         await conn.execute(
           `INSERT INTO cashier_report_orders
            (report_id, order_section, customer_name, planned_pickup_date, product_total_amount, tf_bca_amount, tf_mandiri_amount, dp_amount, dp_transfer_date, dp_channel, bank_account_id,
-            settlement_amount, settlement_transfer_date, settlement_channel, settlement_bank_account_id, ongkir_bca_amount, ongkir_mandiri_amount, ongkir_amount, total_amount, pickup_date, notes, external_reference_id, external_source, sort_order)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            settlement_amount, settlement_transfer_date, settlement_channel, settlement_bank_account_id, ongkir_bca_amount, ongkir_mandiri_amount, ongkir_amount, total_amount, pickup_date, notes, external_reference_id, external_source, sort_order, is_verified, verified_by, verified_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             reportId, o.order_section, o.customer_name, o.planned_pickup_date, o.product_total_amount,
             o.tf_bca_amount, o.tf_mandiri_amount,
             o.dp_amount, o.dp_transfer_date, o.dp_channel, o.bank_account_id, o.settlement_amount, o.settlement_transfer_date,
             o.settlement_channel, o.settlement_bank_account_id, o.ongkir_bca_amount, o.ongkir_mandiri_amount, o.ongkir_amount, o.total_amount,
-            o.pickup_date, o.notes, o.external_reference_id, o.external_source, o.sort_order
+            o.pickup_date, o.notes, o.external_reference_id, o.external_source, o.sort_order,
+            isVerifiedVal, verifiedByVal || null, verifiedAtVal || null
           ]
         );
       }
@@ -1946,21 +1997,30 @@ class CashierReport {
           const isTxDraft = nextStatus === 'draft' ? 1 : 0;
 
           if (existingTxValid && linkedTxId) {
-            await conn.execute(
-              `UPDATE transactions
-               SET amount = ?, total_customer = ?, apc = ?, pb1 = ?, note = ?, transaction_date = ?, is_draft = ?
-               WHERE id = ?`,
-              [omzetGross, totalCustomer || null, apc || null, pb1Amount, txNote, dateStr, isTxDraft, linkedTxId]
-            );
+            if (hasOmzetSalesLampiranPayload) {
+              await conn.execute(
+                `UPDATE transactions
+                 SET amount = ?, total_customer = ?, apc = ?, pb1 = ?, note = ?, lampiran = ?, transaction_date = ?, is_draft = ?
+                 WHERE id = ?`,
+                [omzetGross, totalCustomer || null, apc || null, pb1Amount, txNote, omzetSalesLampiranJson, dateStr, isTxDraft, linkedTxId]
+              );
+            } else {
+              await conn.execute(
+                `UPDATE transactions
+                 SET amount = ?, total_customer = ?, apc = ?, pb1 = ?, note = ?, transaction_date = ?, is_draft = ?
+                 WHERE id = ?`,
+                [omzetGross, totalCustomer || null, apc || null, pb1Amount, txNote, dateStr, isTxDraft, linkedTxId]
+              );
+            }
             await conn.execute(`DELETE FROM transaction_sales_channels WHERE transaction_id = ?`, [linkedTxId]);
             await conn.execute(`DELETE FROM transaction_income_details WHERE transaction_id = ?`, [linkedTxId]);
             syncLogNote = `Transaksi Omzet #${linkedTxId} diperbarui otomatis (${formatCurrencySimple(omzetGross)})`;
           } else if (omzetGross > 0 && nextStatus !== 'draft') {
             const extRef = `cashier_report_${branchId}_${dateStr}`;
             const [insTx] = await conn.execute(
-              `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, total_customer, apc, pb1, note, transaction_date, is_umum, is_draft, external_reference_id, status_deleted)
-               VALUES (?, ?, 'income', ?, ?, ?, ?, ?, ?, ?, true, ?, ?, false)`,
-              [user?.id || null, branchId, omzetCategoryId, omzetGross, totalCustomer || null, apc || null, pb1Amount, txNote, dateStr, isTxDraft, extRef]
+              `INSERT INTO transactions (user_id, branch_id, type, category_id, amount, total_customer, apc, pb1, note, lampiran, transaction_date, is_umum, is_draft, external_reference_id, status_deleted)
+               VALUES (?, ?, 'income', ?, ?, ?, ?, ?, ?, ?, ?, true, ?, ?, false)`,
+              [user?.id || null, branchId, omzetCategoryId, omzetGross, totalCustomer || null, apc || null, pb1Amount, txNote, omzetSalesLampiranJson, dateStr, isTxDraft, extRef]
             );
             linkedTxId = insTx.insertId;
             syncLogNote = `Transaksi Omzet #${linkedTxId} dibuat otomatis (${formatCurrencySimple(omzetGross)})`;
@@ -1968,6 +2028,7 @@ class CashierReport {
 
           if (linkedTxId) {
             const createdIncomeDetails = [];
+            const useChannelPb1 = channelPb1Sum > 0 && pb1Amount === channelPb1Sum;
             for (let itemIdx = 0; itemIdx < omzetItems.length; itemIdx++) {
               const item = omzetItems[itemIdx];
               const effectiveAmt = getEffectiveOmzetRowAmount(item);
@@ -1978,11 +2039,13 @@ class CashierReport {
               const bankId = item.bank_account_id || pm.default_bank_account_id || null;
               // Ensure BankAccount balance helper COALESCE(tid.amount_cashier, tid.amount_app, 0) receives positive nominal
               const persistedCashier = item.amount_cashier > 0 ? item.amount_cashier : item.amount_app;
+              // Avoid storing 0.00 across all rows when PB1 is set at summary level (pb1Amount > 0), so t.pb1 isn't shadowed
+              const tidPb1 = useChannelPb1 ? item.pb1_amount : (pb1Amount > 0 ? null : 0);
 
               const [insTid] = await conn.execute(
                 `INSERT INTO transaction_income_details (transaction_id, payment_method_id, bank_account_id, amount_app, amount_cashier, pb1_amount, lampiran)
                  VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [linkedTxId, pm.id, bankId, item.amount_app, persistedCashier, item.pb1_amount, item.lampiranJson]
+                [linkedTxId, pm.id, bankId, item.amount_app, persistedCashier, tidPb1, item.lampiranJson]
               );
               createdIncomeDetails.push({
                 id: insTid.insertId,
@@ -2501,9 +2564,9 @@ class CashierReport {
             `INSERT INTO cashier_daily_reports (
                branch_id, report_date, created_by_names, submitted_by, status,
                total_customer, apc, omzet_gross, pb1_amount, omzet_net,
-               omzet_sales_app, omzet_sales_cashier, omzet_sales_notes,
+               omzet_sales_app, omzet_sales_cashier, omzet_sales_notes, omzet_sales_lampiran,
                cash_omzet, kasir_notes, omzet_transaction_id, auto_sync_omzet
-             ) VALUES (?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+             ) VALUES (?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
             [
               branchId,
               dateStr,
@@ -2517,6 +2580,9 @@ class CashierReport {
               lr.omzet_sales_app ?? null,
               lr.omzet_sales_cashier ?? null,
               lr.omzet_sales_notes || null,
+              Array.isArray(lr.omzet_sales_lampiran) && lr.omzet_sales_lampiran.length > 0
+                ? JSON.stringify(lr.omzet_sales_lampiran)
+                : null,
               lr.cash_omzet || 0,
               lr.kasir_notes || null,
               lr.omzet_transaction_id || null
@@ -2831,6 +2897,60 @@ class CashierReport {
 
       return { deleted: delRes.affectedRows || 0 };
     });
+  }
+
+  /**
+   * Lookup order row + owning branch_id for permission checks.
+   */
+  static async getOrderById(orderId) {
+    const rows = await query(
+      `SELECT cro.id, cro.report_id, cro.order_section, cro.is_verified, cro.verified_by, cro.verified_at,
+              cdr.branch_id, cdr.report_date
+       FROM cashier_report_orders cro
+       INNER JOIN cashier_daily_reports cdr ON cro.report_id = cdr.id
+       WHERE cro.id = ?
+       LIMIT 1`,
+      [orderId]
+    );
+    return rows[0] || null;
+  }
+
+  /**
+   * Toggle AR/Admin verification checklist status on a cashier_report_orders row.
+   */
+  static async toggleOrderVerification({ orderId, isVerified, user }) {
+    const nextVerified = isVerified ? 1 : 0;
+    const verifiedBy = nextVerified ? (user?.id || null) : null;
+    const verifiedAt = nextVerified ? new Date() : null;
+
+    await query(
+      `UPDATE cashier_report_orders
+       SET is_verified = ?, verified_by = ?, verified_at = ?
+       WHERE id = ?`,
+      [nextVerified, verifiedBy, verifiedAt, orderId]
+    );
+
+    const updatedRows = await query(
+      `SELECT cro.id, cro.report_id, cro.order_section, cro.is_verified, cro.verified_by, cro.verified_at,
+              COALESCE(uv.name, uv.email) as verified_by_name
+       FROM cashier_report_orders cro
+       LEFT JOIN users uv ON cro.verified_by = uv.id
+       WHERE cro.id = ?
+       LIMIT 1`,
+      [orderId]
+    );
+
+    const row = updatedRows[0];
+    if (!row) return null;
+    return {
+      id: Number(row.id),
+      report_id: Number(row.report_id),
+      order_section: row.order_section,
+      is_verified: Boolean(row.is_verified),
+      verified_by: row.verified_by ? Number(row.verified_by) : null,
+      verified_by_name: row.verified_by_name || null,
+      verified_at: row.verified_at || null
+    };
   }
 }
 

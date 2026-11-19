@@ -20,9 +20,9 @@ const sendAuthError = (res, req, status, title, message) => {
     return res.status(status).json({ success: false, message });
   }
   
-  let redirectUrl = config.corsOrigin || 'http://localhost:5173';
+  let redirectUrl = config.corsOrigin || 'http://localhost:5175';
   if (redirectUrl.includes(':8081') || redirectUrl.includes(':19006')) {
-    redirectUrl = 'http://localhost:5173';
+    redirectUrl = 'http://localhost:5175';
   }
 
   return res.status(status).send(`
