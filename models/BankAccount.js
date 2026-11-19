@@ -171,6 +171,7 @@ class BankAccount {
         ba.account_number,
         ba.branch_id,
         ba.type,
+        COALESCE(ba.account_category, 'real') AS account_category,
         CAST(COALESCE(ba.initial_balance, 0) AS DECIMAL(15, 2)) AS initial_balance,
         DATE_FORMAT(ba.initial_balance_date, '%Y-%m-%d') AS initial_balance_date,
         ba.initial_balance_note,
@@ -218,6 +219,7 @@ class BankAccount {
         ba.account_number,
         ba.branch_id,
         ba.type,
+        COALESCE(ba.account_category, 'real') AS account_category,
         CAST(COALESCE(ba.initial_balance, 0) AS DECIMAL(15, 2)) AS initial_balance,
         DATE_FORMAT(ba.initial_balance_date, '%Y-%m-%d') AS initial_balance_date,
         ba.initial_balance_note,
@@ -246,6 +248,7 @@ class BankAccount {
     accountNumber = null,
     branchId,
     type = 'savings',
+    accountCategory = 'real',
     initialBalance = 0,
     initialBalanceDate = null,
     initialBalanceNote = null
@@ -254,6 +257,8 @@ class BankAccount {
 
     const validTypes = ['savings', 'operational', 'income', 'both'];
     const selectedType = validTypes.includes(type) ? type : 'savings';
+    const validCategories = ['real', 'penampung'];
+    const selectedCategory = validCategories.includes(accountCategory) ? accountCategory : 'real';
     const isSavings = selectedType === 'savings';
 
     const parsedInitialBalance = isSavings ? 0 : (Number.isFinite(Number(initialBalance)) ? Number(initialBalance) : 0);
@@ -263,16 +268,16 @@ class BankAccount {
       : (initialBalanceNote && String(initialBalanceNote).trim() ? String(initialBalanceNote).trim() : null);
 
     const result = await query(
-      `INSERT INTO bank_accounts (name, account_number, branch_id, type, initial_balance, initial_balance_date, initial_balance_note)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [name, accountNumber, branchId, selectedType, parsedInitialBalance, parsedInitialDate, parsedInitialNote]
+      `INSERT INTO bank_accounts (name, account_number, branch_id, type, account_category, initial_balance, initial_balance_date, initial_balance_note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [name, accountNumber, branchId, selectedType, selectedCategory, parsedInitialBalance, parsedInitialDate, parsedInitialNote]
     );
     return await this.findById(result.insertId);
   }
 
   static async update(
     id,
-    { name, accountNumber, type, initialBalance, initialBalanceDate, initialBalanceNote, linkedPettyCashId, linkedPettyCashLockBank }
+    { name, accountNumber, type, accountCategory, initialBalance, initialBalanceDate, initialBalanceNote, linkedPettyCashId, linkedPettyCashLockBank }
   ) {
     await ensureInitialBalanceColumns();
     await ensurePettyCashLockColumn();
@@ -281,6 +286,7 @@ class BankAccount {
     if (!existing) return null;
 
     const validTypes = ['savings', 'operational', 'income', 'both'];
+    const validCategories = ['real', 'penampung'];
     const effectiveType = type !== undefined && validTypes.includes(type) ? type : existing.type;
     const isSavings = effectiveType === 'savings';
 
@@ -300,6 +306,11 @@ class BankAccount {
     if (type !== undefined && validTypes.includes(type)) {
       updates.push('type = ?');
       params.push(type);
+    }
+
+    if (accountCategory !== undefined && validCategories.includes(accountCategory)) {
+      updates.push('account_category = ?');
+      params.push(accountCategory);
     }
 
     if (isSavings) {

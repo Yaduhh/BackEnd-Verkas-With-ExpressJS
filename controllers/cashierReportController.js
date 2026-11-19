@@ -362,6 +362,170 @@ const cashierReportController = {
       }
       next(error);
     }
+  },
+
+  // GET /api/cashier-reports/sold-items
+  getSoldItemMasters: async (req, res, next) => {
+    try {
+      const branchId = resolveBranchId(req);
+      if (!branchId) {
+        return res.status(400).json({ success: false, message: 'Branch ID wajib dipilih.' });
+      }
+      const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+      }
+      const includeInactive = req.query.include_inactive !== '0';
+      const items = await CashierReport.getSoldItemMasters(branchId, { includeInactive });
+      return res.json({ success: true, data: items });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  // POST /api/cashier-reports/sold-items
+  createSoldItemMaster: async (req, res, next) => {
+    try {
+      const branchId = resolveBranchId(req);
+      if (!branchId) {
+        return res.status(400).json({ success: false, message: 'Branch ID wajib dipilih.' });
+      }
+      if (!REVIEWER_ROLES.has(req.user.role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Hanya Admin, Co-Owner, atau Owner yang dapat menambah item terjual.'
+        });
+      }
+      if (req.user.role === 'admin' && req.user.can_edit === false) {
+        return res.status(403).json({ success: false, message: 'Akses Ditolak: Akun Admin tidak memiliki izin edit.' });
+      }
+      const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+      }
+
+      const created = await CashierReport.createSoldItemMaster({
+        branchId,
+        name: req.body.name,
+        unit1_label: req.body.unit1_label,
+        unit2_label: req.body.unit2_label
+      });
+      return res.status(201).json({
+        success: true,
+        message: 'Item laporan terjual berhasil ditambahkan.',
+        data: created
+      });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
+  // PUT /api/cashier-reports/sold-items/reorder
+  reorderSoldItemMasters: async (req, res, next) => {
+    try {
+      const branchId = resolveBranchId(req);
+      if (!branchId) {
+        return res.status(400).json({ success: false, message: 'Branch ID wajib dipilih.' });
+      }
+      if (!REVIEWER_ROLES.has(req.user.role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Hanya Admin, Co-Owner, atau Owner yang dapat mengubah urutan item.'
+        });
+      }
+      if (req.user.role === 'admin' && req.user.can_edit === false) {
+        return res.status(403).json({ success: false, message: 'Akses Ditolak: Akun Admin tidak memiliki izin edit.' });
+      }
+      const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+      }
+
+      const items = await CashierReport.reorderSoldItemMasters({
+        branchId,
+        orderedIds: req.body.ordered_ids
+      });
+      return res.json({ success: true, message: 'Urutan item berhasil diperbarui.', data: items });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
+  // PUT /api/cashier-reports/sold-items/:itemId
+  updateSoldItemMaster: async (req, res, next) => {
+    try {
+      const branchId = resolveBranchId(req);
+      if (!branchId) {
+        return res.status(400).json({ success: false, message: 'Branch ID wajib dipilih.' });
+      }
+      if (!REVIEWER_ROLES.has(req.user.role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Hanya Admin, Co-Owner, atau Owner yang dapat mengubah item terjual.'
+        });
+      }
+      if (req.user.role === 'admin' && req.user.can_edit === false) {
+        return res.status(403).json({ success: false, message: 'Akses Ditolak: Akun Admin tidak memiliki izin edit.' });
+      }
+      const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+      }
+
+      const itemId = parseInt(req.params.itemId, 10);
+      const updated = await CashierReport.updateSoldItemMaster({
+        branchId,
+        itemId,
+        name: req.body.name,
+        unit1_label: req.body.unit1_label,
+        unit2_label: req.body.unit2_label,
+        is_active: req.body.is_active
+      });
+      return res.json({ success: true, message: 'Item laporan terjual berhasil diperbarui.', data: updated });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
+  // DELETE /api/cashier-reports/sold-items/:itemId
+  deleteSoldItemMaster: async (req, res, next) => {
+    try {
+      const branchId = resolveBranchId(req);
+      if (!branchId) {
+        return res.status(400).json({ success: false, message: 'Branch ID wajib dipilih.' });
+      }
+      if (!REVIEWER_ROLES.has(req.user.role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Hanya Admin, Co-Owner, atau Owner yang dapat menghapus item terjual.'
+        });
+      }
+      if (req.user.role === 'admin' && req.user.can_edit === false) {
+        return res.status(403).json({ success: false, message: 'Akses Ditolak: Akun Admin tidak memiliki izin edit.' });
+      }
+      const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+      }
+
+      const itemId = parseInt(req.params.itemId, 10);
+      await CashierReport.deleteSoldItemMaster({ branchId, itemId });
+      return res.json({ success: true, message: 'Item laporan terjual berhasil dihapus.' });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
   }
 };
 

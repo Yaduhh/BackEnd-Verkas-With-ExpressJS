@@ -29,6 +29,8 @@ const create = async (req, res, next) => {
       accountNumber,
       account_number,
       type,
+      accountCategory,
+      account_category,
       initialBalance,
       initial_balance,
       initialBalanceDate,
@@ -64,6 +66,7 @@ const create = async (req, res, next) => {
       accountNumber: accountNumber || account_number || null,
       branchId: parseInt(branchId),
       type: type || 'savings',
+      accountCategory: accountCategory !== undefined ? accountCategory : (account_category !== undefined ? account_category : 'real'),
       initialBalance: resolvedInitialBalance,
       initialBalanceDate: resolvedInitialDate,
       initialBalanceNote: resolvedInitialNote
@@ -87,6 +90,8 @@ const updateAccount = async (req, res, next) => {
       accountNumber,
       account_number,
       type,
+      accountCategory,
+      account_category,
       initialBalance,
       initial_balance,
       initialBalanceDate,
@@ -108,6 +113,7 @@ const updateAccount = async (req, res, next) => {
     }
 
     const resolvedAccountNumber = accountNumber !== undefined ? accountNumber : account_number;
+    const resolvedAccountCategory = accountCategory !== undefined ? accountCategory : account_category;
     const resolvedInitialBalance = initialBalance !== undefined ? initialBalance : initial_balance;
     const resolvedInitialDate = initialBalanceDate !== undefined ? initialBalanceDate : initial_balance_date;
     const resolvedInitialNote = initialBalanceNote !== undefined ? initialBalanceNote : initial_balance_note;
@@ -118,6 +124,7 @@ const updateAccount = async (req, res, next) => {
       name,
       accountNumber: resolvedAccountNumber,
       type,
+      accountCategory: resolvedAccountCategory,
       initialBalance: resolvedInitialBalance,
       initialBalanceDate: resolvedInitialDate,
       initialBalanceNote: resolvedInitialNote,

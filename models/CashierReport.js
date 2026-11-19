@@ -82,6 +82,15 @@ const formatCurrencySimple = (num) => {
   return `Rp ${Math.round(toNum(num)).toLocaleString('id-ID')}`;
 };
 
+const DEFAULT_SOLD_ITEMS = [
+  { name: 'Potong 4 Ayam Dioven', unit1_label: 'Ekor', unit2_label: 'Potong', legacy_key: 'ayam_dioven', sort_order: 1 },
+  { name: 'Potong 4 Ayam Dijual', unit1_label: 'Ekor', unit2_label: 'Potong', legacy_key: 'ayam_dijual', sort_order: 2 },
+  { name: 'Potong 4 Ayam Reject', unit1_label: 'Ekor', unit2_label: 'Potong', legacy_key: 'ayam_reject', sort_order: 3 },
+  { name: 'Kambing Presto 1 Kg', unit1_label: 'Ekor', unit2_label: 'Potong', legacy_key: 'kambing_presto', sort_order: 4 },
+  { name: 'Kambing Dijual', unit1_label: 'Ekor', unit2_label: 'Potong', legacy_key: 'kambing_dijual', sort_order: 5 },
+  { name: 'Tambahan Kambing Kecil', unit1_label: 'Ekor', unit2_label: 'Potong', legacy_key: 'kambing_kecil', sort_order: 6 }
+];
+
 const FIELD_LABELS = {
   status: 'Status Laporan',
   created_by_names: 'Dibuat Oleh (Kasir)',
@@ -177,6 +186,7 @@ function computeReportDiff(prevSnapshot, nextSnapshot) {
   // Compare counts of detail sections
   const sectionPairs = [
     ['sales_channel_items', 'Rincian Sales Channel'],
+    ['sold_items', 'Laporan Item Terjual'],
     ['entertainments', 'Rincian Entertaint'],
     ['goods_receipts', 'Penerimaan Barang'],
     ['dp_orders', 'Laporan DP / Deposit'],
@@ -504,6 +514,42 @@ class CashierReport {
     mergeChannelRows(txChannelMtdRows, true);
     const mergedChannelMtd = Array.from(channelMap.values());
 
+    // 2b. Per-item sold MTD totals (cashier_report_sold_items day 1..reportDate)
+    const soldMtdRows = await query(
+      `SELECT
+         COALESCE(crsi.sold_item_id, 0) as sold_item_id,
+         COALESCE(csi.name, crsi.item_name) as item_name,
+         COALESCE(csi.unit1_label, crsi.unit1_label, 'Ekor') as unit1_label,
+         COALESCE(csi.unit2_label, crsi.unit2_label) as unit2_label,
+         csi.legacy_key as legacy_key,
+         COALESCE(SUM(crsi.qty1), 0) as mtd_qty1,
+         COALESCE(SUM(crsi.qty2), 0) as mtd_qty2,
+         COALESCE(SUM(CASE WHEN cdr.report_date < ? THEN crsi.qty1 ELSE 0 END), 0) as prior_mtd_qty1,
+         COALESCE(SUM(CASE WHEN cdr.report_date < ? THEN crsi.qty2 ELSE 0 END), 0) as prior_mtd_qty2
+       FROM cashier_report_sold_items crsi
+       JOIN cashier_daily_reports cdr ON crsi.report_id = cdr.id
+       LEFT JOIN cashier_sold_items csi ON crsi.sold_item_id = csi.id
+       WHERE cdr.branch_id = ?
+         AND cdr.report_date BETWEEN ? AND ?
+       GROUP BY COALESCE(crsi.sold_item_id, 0), COALESCE(csi.name, crsi.item_name),
+                COALESCE(csi.unit1_label, crsi.unit1_label, 'Ekor'),
+                COALESCE(csi.unit2_label, crsi.unit2_label),
+                csi.legacy_key`,
+      [dateStr, dateStr, branchId, monthStart, dateStr]
+    );
+
+    const soldItemsMtd = soldMtdRows.map((r) => ({
+      sold_item_id: Number(r.sold_item_id) || null,
+      item_name: r.item_name || '',
+      unit1_label: r.unit1_label || 'Ekor',
+      unit2_label: r.unit2_label ?? null,
+      legacy_key: r.legacy_key || null,
+      mtd_qty1: toNum(r.mtd_qty1),
+      mtd_qty2: toNum(r.mtd_qty2),
+      prior_mtd_qty1: toNum(r.prior_mtd_qty1),
+      prior_mtd_qty2: toNum(r.prior_mtd_qty2)
+    }));
+
     // 3. HPP / Bahan Baku & Operasional dihitung dari akumulasi inputan harian kasir (cashier_daily_reports)
 
     const mtdTc = parseInt(mtdRow?.mtd_tc || 0, 10) + parseInt(txMtdRow?.tx_mtd_tc || 0, 10);
@@ -542,6 +588,7 @@ class CashierReport {
       monthulized_tc: monthulizedTc,
       monthulized_apc: monthulizedApc,
       channel_mtd: mergedChannelMtd,
+      sold_items_mtd: soldItemsMtd,
       expenses: {
         hpp_daily: toNum(mtdRow?.daily_hpp_kasir),
         operasional_daily: toNum(mtdRow?.daily_operasional_kasir),
@@ -565,6 +612,177 @@ class CashierReport {
         kambing_kecil_potong: toNum(mtdRow?.mtd_kambing_kecil_potong)
       }
     };
+  }
+
+  static async ensureBranchSoldItems(branchId, conn = null) {
+    const exec = conn ? (sql, p) => conn.execute(sql, p).then(([r]) => r) : query;
+    let rows = await exec(
+      `SELECT id, branch_id, name, unit1_label, unit2_label, legacy_key, sort_order, is_active
+       FROM cashier_sold_items
+       WHERE branch_id = ?
+       ORDER BY sort_order ASC, id ASC`,
+      [branchId]
+    );
+    if (rows.length === 0) {
+      for (const def of DEFAULT_SOLD_ITEMS) {
+        await exec(
+          `INSERT INTO cashier_sold_items (branch_id, name, unit1_label, unit2_label, legacy_key, sort_order, is_active)
+           VALUES (?, ?, ?, ?, ?, ?, 1)`,
+          [branchId, def.name, def.unit1_label, def.unit2_label, def.legacy_key, def.sort_order]
+        );
+      }
+      rows = await exec(
+        `SELECT id, branch_id, name, unit1_label, unit2_label, legacy_key, sort_order, is_active
+         FROM cashier_sold_items
+         WHERE branch_id = ?
+         ORDER BY sort_order ASC, id ASC`,
+        [branchId]
+      );
+    }
+    return rows.map((r) => ({
+      id: Number(r.id),
+      branch_id: Number(r.branch_id),
+      name: r.name,
+      unit1_label: r.unit1_label || 'Ekor',
+      unit2_label: r.unit2_label ?? null,
+      legacy_key: r.legacy_key || null,
+      sort_order: Number(r.sort_order || 0),
+      is_active: Boolean(r.is_active)
+    }));
+  }
+
+  static async getSoldItemMasters(branchId, { includeInactive = true } = {}) {
+    const items = await this.ensureBranchSoldItems(branchId);
+    return includeInactive ? items : items.filter((i) => i.is_active);
+  }
+
+  static async createSoldItemMaster({ branchId, name, unit1_label, unit2_label }) {
+    const trimmedName = String(name || '').trim();
+    if (!trimmedName) {
+      const err = new Error('Nama item wajib diisi.');
+      err.statusCode = 400;
+      throw err;
+    }
+    const u1 = String(unit1_label || '').trim() || 'Ekor';
+    const u2Raw = unit2_label !== undefined && unit2_label !== null ? String(unit2_label).trim() : '';
+    const u2 = u2Raw ? u2Raw : null;
+
+    await this.ensureBranchSoldItems(branchId);
+    const [maxRow] = await query(
+      `SELECT COALESCE(MAX(sort_order), 0) as max_order FROM cashier_sold_items WHERE branch_id = ?`,
+      [branchId]
+    );
+    const nextOrder = Number(maxRow?.max_order || 0) + 1;
+
+    const res = await query(
+      `INSERT INTO cashier_sold_items (branch_id, name, unit1_label, unit2_label, sort_order, is_active)
+       VALUES (?, ?, ?, ?, ?, 1)`,
+      [branchId, trimmedName, u1, u2, nextOrder]
+    );
+    const [created] = await query(
+      `SELECT id, branch_id, name, unit1_label, unit2_label, legacy_key, sort_order, is_active
+       FROM cashier_sold_items WHERE id = ? LIMIT 1`,
+      [res.insertId]
+    );
+    return {
+      ...created,
+      id: Number(created.id),
+      branch_id: Number(created.branch_id),
+      sort_order: Number(created.sort_order || 0),
+      is_active: Boolean(created.is_active)
+    };
+  }
+
+  static async updateSoldItemMaster({ branchId, itemId, name, unit1_label, unit2_label, is_active }) {
+    const existingRows = await query(
+      `SELECT * FROM cashier_sold_items WHERE id = ? AND branch_id = ? LIMIT 1`,
+      [itemId, branchId]
+    );
+    if (!existingRows || existingRows.length === 0) {
+      const err = new Error('Item terjual tidak ditemukan.');
+      err.statusCode = 404;
+      throw err;
+    }
+    const existing = existingRows[0];
+    const nextName = name !== undefined ? String(name).trim() : existing.name;
+    if (!nextName) {
+      const err = new Error('Nama item wajib diisi.');
+      err.statusCode = 400;
+      throw err;
+    }
+    const nextU1 =
+      unit1_label !== undefined ? (String(unit1_label).trim() || 'Qty') : existing.unit1_label;
+    const nextU2 =
+      unit2_label !== undefined
+        ? (unit2_label !== null && String(unit2_label).trim() ? String(unit2_label).trim() : null)
+        : existing.unit2_label;
+    const nextActive = is_active !== undefined ? (is_active ? 1 : 0) : existing.is_active;
+
+    await query(
+      `UPDATE cashier_sold_items
+       SET name = ?, unit1_label = ?, unit2_label = ?, is_active = ?
+       WHERE id = ? AND branch_id = ?`,
+      [nextName, nextU1, nextU2, nextActive, itemId, branchId]
+    );
+    const [updated] = await query(
+      `SELECT id, branch_id, name, unit1_label, unit2_label, legacy_key, sort_order, is_active
+       FROM cashier_sold_items WHERE id = ? LIMIT 1`,
+      [itemId]
+    );
+    return {
+      ...updated,
+      id: Number(updated.id),
+      branch_id: Number(updated.branch_id),
+      sort_order: Number(updated.sort_order || 0),
+      is_active: Boolean(updated.is_active)
+    };
+  }
+
+  static async reorderSoldItemMasters({ branchId, orderedIds }) {
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+      const err = new Error('Daftar urutan item tidak valid.');
+      err.statusCode = 400;
+      throw err;
+    }
+    await dbTransaction(async (conn) => {
+      for (let idx = 0; idx < orderedIds.length; idx++) {
+        const id = parseInt(orderedIds[idx], 10);
+        if (!Number.isFinite(id)) continue;
+        await conn.execute(
+          `UPDATE cashier_sold_items SET sort_order = ? WHERE id = ? AND branch_id = ?`,
+          [idx + 1, id, branchId]
+        );
+      }
+    });
+    return this.getSoldItemMasters(branchId, { includeInactive: true });
+  }
+
+  static async deleteSoldItemMaster({ branchId, itemId }) {
+    const existingRows = await query(
+      `SELECT id, name FROM cashier_sold_items WHERE id = ? AND branch_id = ? LIMIT 1`,
+      [itemId, branchId]
+    );
+    if (!existingRows || existingRows.length === 0) {
+      const err = new Error('Item terjual tidak ditemukan.');
+      err.statusCode = 404;
+      throw err;
+    }
+    const [usageRow] = await query(
+      `SELECT COUNT(*) as cnt
+       FROM cashier_report_sold_items
+       WHERE sold_item_id = ? AND (qty1 > 0 OR qty2 > 0)`,
+      [itemId]
+    );
+    if (Number(usageRow?.cnt || 0) > 0) {
+      const err = new Error(
+        `Item "${existingRows[0].name}" sudah pernah tercatat pada laporan harian kasir. Nonaktifkan saja agar data historis & MTD tetap terjaga.`
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+    await query(`DELETE FROM cashier_report_sold_items WHERE sold_item_id = ?`, [itemId]);
+    await query(`DELETE FROM cashier_sold_items WHERE id = ? AND branch_id = ?`, [itemId, branchId]);
+    return { deleted: true };
   }
 
   static async getReportSnapshotById(reportId, conn = null) {
@@ -712,6 +930,33 @@ class CashierReport {
       [reportId]
     );
 
+    const soldItemsRows = await exec(
+      `SELECT crsi.*,
+              COALESCE(csi.name, crsi.item_name) as resolved_name,
+              COALESCE(csi.unit1_label, crsi.unit1_label, 'Ekor') as resolved_unit1,
+              COALESCE(csi.unit2_label, crsi.unit2_label) as resolved_unit2,
+              csi.legacy_key as legacy_key,
+              COALESCE(csi.sort_order, crsi.sort_order, 0) as resolved_sort_order
+       FROM cashier_report_sold_items crsi
+       LEFT JOIN cashier_sold_items csi ON crsi.sold_item_id = csi.id
+       WHERE crsi.report_id = ?
+       ORDER BY COALESCE(csi.sort_order, crsi.sort_order, 999999) ASC, crsi.id ASC`,
+      [reportId]
+    );
+
+    const formattedSoldItems = soldItemsRows.map((s) => ({
+      id: s.id,
+      report_id: s.report_id,
+      sold_item_id: s.sold_item_id ? Number(s.sold_item_id) : null,
+      item_name: s.resolved_name || s.item_name || '',
+      unit1_label: s.resolved_unit1 || s.unit1_label || 'Ekor',
+      unit2_label: s.resolved_unit2 ?? s.unit2_label ?? null,
+      legacy_key: s.legacy_key || null,
+      qty1: toNum(s.qty1),
+      qty2: toNum(s.qty2),
+      sort_order: Number(s.resolved_sort_order || s.sort_order || 0)
+    }));
+
     return {
       report: numericHeader,
       omzet_items: omzetItems.map((i) => ({
@@ -737,6 +982,7 @@ class CashierReport {
         pb1_amount: sc.pb1_amount !== null && sc.pb1_amount !== undefined ? toNum(sc.pb1_amount) : null,
         sort_order: sc.sort_order
       })),
+      sold_items: formattedSoldItems,
       entertainments: entertainments.map((e) => ({
         ...e,
         total_price: toNum(e.total_price)
@@ -998,7 +1244,7 @@ class CashierReport {
     }
 
     const target = await this.getBranchTarget(branchId, month, year);
-    const [liveMetrics, paymentMethods, bankAccounts, salesChannels] = await Promise.all([
+    const [liveMetrics, paymentMethods, bankAccounts, salesChannels, allSoldMasters] = await Promise.all([
       this.getLiveMetrics({ branchId, reportDate: dateStr, targetSales: target.target_sales }),
       query(
         `SELECT pm.*, ba.name as default_bank_account_name
@@ -1021,7 +1267,8 @@ class CashierReport {
          WHERE branch_id = ? AND status_deleted = 0 AND is_active = 1
          ORDER BY name ASC, id ASC`,
         [branchId]
-      )
+      ),
+      this.ensureBranchSoldItems(branchId)
     ]);
 
     return {
@@ -1030,6 +1277,8 @@ class CashierReport {
       report: snapshot ? snapshot.report : null,
       omzet_items: snapshot ? snapshot.omzet_items : [],
       sales_channel_items: snapshot ? (snapshot.sales_channel_items || []) : [],
+      sold_items: snapshot ? (snapshot.sold_items || []) : [],
+      sold_item_masters: allSoldMasters.filter((m) => m.is_active),
       entertainments: snapshot ? snapshot.entertainments : [],
       goods_receipts: snapshot ? snapshot.goods_receipts : [],
       dp_orders: snapshot ? snapshot.dp_orders : [],
@@ -1424,6 +1673,68 @@ class CashierReport {
         validateWhenPresentOnly: nextStatus !== 'draft'
       });
 
+      const branchSoldMasters = await this.ensureBranchSoldItems(branchId, conn);
+      const soldMasterById = new Map(branchSoldMasters.map((m) => [Number(m.id), m]));
+      const soldMasterByLegacy = new Map(
+        branchSoldMasters.filter((m) => m.legacy_key).map((m) => [m.legacy_key, m])
+      );
+
+      let soldItems = [];
+      if (Array.isArray(payload.sold_items)) {
+        soldItems = payload.sold_items.map((s, idx) => {
+          const masterId = s?.sold_item_id ? parseInt(s.sold_item_id, 10) : null;
+          const m = masterId ? soldMasterById.get(masterId) : null;
+          const u1 = m ? m.unit1_label : (String(s?.unit1_label || '').trim() || 'Ekor');
+          const u2 = m
+            ? m.unit2_label
+            : (s?.unit2_label !== undefined && s?.unit2_label !== null && String(s.unit2_label).trim()
+                ? String(s.unit2_label).trim()
+                : null);
+          return {
+            sold_item_id: m ? m.id : (Number.isFinite(masterId) ? masterId : null),
+            item_name: m ? m.name : (String(s?.item_name || '').trim() || `Item ${idx + 1}`),
+            unit1_label: u1,
+            unit2_label: u2,
+            legacy_key: m?.legacy_key || s?.legacy_key || null,
+            qty1: round2(s?.qty1),
+            qty2: u2 ? round2(s?.qty2) : 0,
+            sort_order: m ? m.sort_order : idx + 1
+          };
+        });
+      } else {
+        const legacyFieldMap = [
+          { key: 'ayam_dioven', q1: payload.ayam_dioven_ekor, q2: payload.ayam_dioven_potong },
+          { key: 'ayam_dijual', q1: payload.ayam_dijual_ekor, q2: payload.ayam_dijual_potong },
+          { key: 'ayam_reject', q1: payload.ayam_reject_ekor, q2: payload.ayam_reject_potong },
+          { key: 'kambing_presto', q1: payload.kambing_presto_ekor, q2: payload.kambing_presto_potong },
+          { key: 'kambing_dijual', q1: payload.kambing_dijual_ekor, q2: payload.kambing_dijual_potong },
+          { key: 'kambing_kecil', q1: payload.kambing_kecil_ekor, q2: payload.kambing_kecil_potong }
+        ];
+        soldItems = legacyFieldMap.map((lf, idx) => {
+          const m = soldMasterByLegacy.get(lf.key);
+          const def = DEFAULT_SOLD_ITEMS[idx];
+          return {
+            sold_item_id: m ? m.id : null,
+            item_name: m ? m.name : def.name,
+            unit1_label: m ? m.unit1_label : def.unit1_label,
+            unit2_label: m ? m.unit2_label : def.unit2_label,
+            legacy_key: lf.key,
+            qty1: round2(lf.q1),
+            qty2: round2(lf.q2),
+            sort_order: m ? m.sort_order : idx + 1
+          };
+        });
+      }
+
+      const soldByLegacy = new Map(
+        soldItems.filter((s) => s.legacy_key).map((s) => [s.legacy_key, s])
+      );
+      const getLegacyQty = (key, which, fallbackVal) => {
+        if (!Array.isArray(payload.sold_items)) return round2(fallbackVal);
+        const found = soldByLegacy.get(key);
+        return found ? round2(which === 1 ? found.qty1 : found.qty2) : 0;
+      };
+
       const rawCreator = payload.created_by_names ? String(payload.created_by_names).trim() : '';
       const resolvedCreator = rawCreator && rawCreator !== 'Sync Pesan BosGil' ? rawCreator : (user?.name || null);
       const headerData = {
@@ -1446,18 +1757,18 @@ class CashierReport {
         admin_pesanan_total: round2(adminPesananTotal),
         hpp_daily_override: toNullableNum(payload.hpp_daily_override),
         operasional_daily_override: toNullableNum(payload.operasional_daily_override),
-        ayam_dioven_ekor: round2(payload.ayam_dioven_ekor),
-        ayam_dioven_potong: round2(payload.ayam_dioven_potong),
-        ayam_dijual_ekor: round2(payload.ayam_dijual_ekor),
-        ayam_dijual_potong: round2(payload.ayam_dijual_potong),
-        ayam_reject_ekor: round2(payload.ayam_reject_ekor),
-        ayam_reject_potong: round2(payload.ayam_reject_potong),
-        kambing_presto_ekor: round2(payload.kambing_presto_ekor),
-        kambing_presto_potong: round2(payload.kambing_presto_potong),
-        kambing_dijual_ekor: round2(payload.kambing_dijual_ekor),
-        kambing_dijual_potong: round2(payload.kambing_dijual_potong),
-        kambing_kecil_ekor: round2(payload.kambing_kecil_ekor),
-        kambing_kecil_potong: round2(payload.kambing_kecil_potong),
+        ayam_dioven_ekor: getLegacyQty('ayam_dioven', 1, payload.ayam_dioven_ekor),
+        ayam_dioven_potong: getLegacyQty('ayam_dioven', 2, payload.ayam_dioven_potong),
+        ayam_dijual_ekor: getLegacyQty('ayam_dijual', 1, payload.ayam_dijual_ekor),
+        ayam_dijual_potong: getLegacyQty('ayam_dijual', 2, payload.ayam_dijual_potong),
+        ayam_reject_ekor: getLegacyQty('ayam_reject', 1, payload.ayam_reject_ekor),
+        ayam_reject_potong: getLegacyQty('ayam_reject', 2, payload.ayam_reject_potong),
+        kambing_presto_ekor: getLegacyQty('kambing_presto', 1, payload.kambing_presto_ekor),
+        kambing_presto_potong: getLegacyQty('kambing_presto', 2, payload.kambing_presto_potong),
+        kambing_dijual_ekor: getLegacyQty('kambing_dijual', 1, payload.kambing_dijual_ekor),
+        kambing_dijual_potong: getLegacyQty('kambing_dijual', 2, payload.kambing_dijual_potong),
+        kambing_kecil_ekor: getLegacyQty('kambing_kecil', 1, payload.kambing_kecil_ekor),
+        kambing_kecil_potong: getLegacyQty('kambing_kecil', 2, payload.kambing_kecil_potong),
         kasir_notes: payload.kasir_notes ? String(payload.kasir_notes).trim() : null,
         auto_sync_omzet: autoSyncOmzet ? 1 : 0
       };
@@ -1581,6 +1892,16 @@ class CashierReport {
         );
       }
 
+      await conn.execute(`DELETE FROM cashier_report_sold_items WHERE report_id = ?`, [reportId]);
+      for (const s of soldItems) {
+        await conn.execute(
+          `INSERT INTO cashier_report_sold_items
+           (report_id, sold_item_id, item_name, unit1_label, unit2_label, qty1, qty2, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [reportId, s.sold_item_id, s.item_name, s.unit1_label, s.unit2_label, s.qty1, s.qty2, s.sort_order]
+        );
+      }
+
       await conn.execute(`DELETE FROM cashier_report_orders WHERE report_id = ?`, [reportId]);
       for (const o of [...dpOrders, ...adminOrders]) {
         await conn.execute(
@@ -1692,6 +2013,7 @@ class CashierReport {
         report: headerData,
         omzet_items: omzetItems,
         sales_channel_items: salesChannelItems,
+        sold_items: soldItems,
         entertainments,
         goods_receipts: goodsReceipts,
         dp_orders: dpOrders,
