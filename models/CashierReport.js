@@ -2222,7 +2222,7 @@ class CashierReport {
 
     await dbTransaction(async (conn) => {
       const [pmRows] = await conn.execute(
-        `SELECT id, name, parent_id, default_bank_account_id, is_taxable FROM payment_methods WHERE branch_id = ? AND status_deleted = false`,
+        `SELECT id, name, parent_id, default_bank_account_id, is_taxable FROM payment_methods WHERE branch_id = ? OR branch_id IS NULL`,
         [branchId]
       );
       const pmMap = new Map(pmRows.map((p) => [Number(p.id), p]));
