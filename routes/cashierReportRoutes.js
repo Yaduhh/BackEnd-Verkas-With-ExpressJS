@@ -11,6 +11,7 @@ router.get('/daily', cashierReportController.getDaily);
 router.put('/daily', cashierReportController.saveDaily);
 router.get('/monthly', cashierReportController.listMonthly);
 router.put('/targets', cashierReportController.upsertTarget);
+router.put('/:reportId/sales-channels', cashierReportController.updateSalesChannels);
 
 router.post('/:reportId/notes', cashierReportController.addNote);
 router.put('/notes/:noteId/resolve', cashierReportController.toggleNoteResolved);

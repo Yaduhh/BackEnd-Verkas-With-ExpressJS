@@ -175,6 +175,79 @@ const cashierReportController = {
     }
   },
 
+  // PUT /api/cashier-reports/:reportId/sales-channels
+  updateSalesChannels: async (req, res, next) => {
+    try {
+      const branchId = resolveBranchId(req);
+      if (!branchId) {
+        return res.status(400).json({ success: false, message: 'Branch ID wajib dipilih.' });
+      }
+
+      if (!REVIEWER_ROLES.has(req.user.role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Hanya Admin, Co-Owner, atau Owner yang dapat mengisi/mengedit Rincian Sales Channel.'
+        });
+      }
+
+      if (req.user.role === 'admin' && req.user.can_edit === false) {
+        return res.status(403).json({
+          success: false,
+          message: 'Akses Ditolak: Akun Admin Anda tidak memiliki izin edit.'
+        });
+      }
+
+      const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+      }
+
+      const reportId = parseInt(req.params.reportId, 10);
+      if (!Number.isFinite(reportId) || reportId <= 0) {
+        return res.status(400).json({ success: false, message: 'ID laporan tidak valid.' });
+      }
+
+      const existing = await CashierReport.getReportSnapshotById(reportId);
+      if (!existing || Number(existing.report.branch_id) !== Number(branchId)) {
+        return res.status(404).json({ success: false, message: 'Laporan kasir tidak ditemukan.' });
+      }
+
+      const dateOnly = String(existing.report.report_date).slice(0, 10);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) {
+        const [yStr, mStr] = dateOnly.split('-');
+        const isLocked = await LockedPeriod.isLocked(branchId, parseInt(mStr, 10), parseInt(yStr, 10));
+        if (isLocked) {
+          return res.status(403).json({
+            success: false,
+            message: 'Pembukuan untuk periode tanggal ini sudah dikunci.'
+          });
+        }
+      }
+
+      await CashierReport.updateReportSalesChannels({
+        reportId,
+        branchId,
+        salesChannelItems: req.body.sales_channel_items,
+        user: req.user
+      });
+
+      const fullData = await CashierReport.getDailyReport(branchId, dateOnly);
+
+      return res.json({
+        success: true,
+        message: existing.report.omzet_transaction_id
+          ? 'Rincian Sales Channel berhasil disimpan & disinkronkan ke Transaksi Omzet.'
+          : 'Rincian Sales Channel berhasil disimpan.',
+        data: fullData
+      });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
   // POST /api/cashier-reports/:reportId/notes
   addNote: async (req, res, next) => {
     try {

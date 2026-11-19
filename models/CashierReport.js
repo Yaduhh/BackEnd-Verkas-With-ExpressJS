@@ -628,7 +628,7 @@ class CashierReport {
       [reportId]
     );
 
-    const salesChannelItems = await exec(
+    let salesChannelItems = await exec(
       `SELECT crsc.*, sc.name as master_sales_channel_name, pm.name as master_payment_method_name
        FROM cashier_report_sales_channels crsc
        LEFT JOIN sales_channels sc ON crsc.sales_channel_id = sc.id
@@ -637,6 +637,33 @@ class CashierReport {
        ORDER BY crsc.sort_order ASC, crsc.id ASC`,
       [reportId]
     );
+
+    if (salesChannelItems.length === 0 && r.omzet_transaction_id) {
+      const txScRows = await exec(
+        `SELECT tsc.id, tsc.sales_channel_id, tsc.payment_method_id, tsc.amount, tsc.pb1_amount,
+                sc.name as master_sales_channel_name, pm.name as master_payment_method_name
+         FROM transaction_sales_channels tsc
+         LEFT JOIN sales_channels sc ON tsc.sales_channel_id = sc.id
+         LEFT JOIN payment_methods pm ON tsc.payment_method_id = pm.id
+         WHERE tsc.transaction_id = ?
+         ORDER BY tsc.id ASC`,
+        [r.omzet_transaction_id]
+      );
+      salesChannelItems = txScRows.map((row, idx) => ({
+        id: row.id,
+        report_id: r.id,
+        sales_channel_id: row.sales_channel_id,
+        sales_channel_name: row.master_sales_channel_name || '',
+        master_sales_channel_name: row.master_sales_channel_name || '',
+        payment_method_id: row.payment_method_id,
+        payment_method_name: row.master_payment_method_name || '',
+        master_payment_method_name: row.master_payment_method_name || '',
+        omzet_item_index: null,
+        amount: row.amount,
+        pb1_amount: row.pb1_amount,
+        sort_order: idx
+      }));
+    }
 
     const entertainments = await exec(
       `SELECT * FROM cashier_report_entertainments WHERE report_id = ? ORDER BY sort_order ASC, id ASC`,
@@ -1387,93 +1414,20 @@ class CashierReport {
       const nextStatus = validStatuses.includes(payload.status) ? payload.status : (existingRows[0]?.status || 'submitted');
       const autoSyncOmzet = payload.auto_sync_omzet !== undefined ? Boolean(payload.auto_sync_omzet) : true;
 
-      // Load active branch sales channels and normalize payload.sales_channel_items
-      const [branchScRows] = await conn.execute(
-        `SELECT id, name FROM sales_channels WHERE branch_id = ? AND status_deleted = 0 AND is_active = 1`,
-        [branchId]
-      );
-      const scMap = new Map(branchScRows.map((s) => [Number(s.id), s]));
+      const { salesChannelItems } = await this._normalizeAndValidateSalesChannels(conn, {
+        branchId,
+        rawItems: payload.sales_channel_items,
+        omzetItems,
+        omzetGross,
+        channelGross,
+        pmMap,
+        validateWhenPresentOnly: nextStatus !== 'draft'
+      });
 
-      const rawSalesChannelItems = Array.isArray(payload.sales_channel_items) ? payload.sales_channel_items : [];
-      const salesChannelItems = rawSalesChannelItems
-        .filter((sc) => sc && sc.sales_channel_id && toNum(sc.amount) > 0)
-        .map((sc, idx) => {
-          const scId = parseInt(sc.sales_channel_id, 10);
-          const dbSc = scMap.get(scId);
-          const omzetIdx =
-            sc.omzet_item_index !== undefined && sc.omzet_item_index !== null && sc.omzet_item_index !== ''
-              ? parseInt(sc.omzet_item_index, 10)
-              : null;
-          const srcItem = Number.isFinite(omzetIdx) && omzetItems[omzetIdx] ? omzetItems[omzetIdx] : null;
-          const pmId = srcItem
-            ? srcItem.payment_method_id
-            : (sc.payment_method_id ? parseInt(sc.payment_method_id, 10) : null);
-          const pmName = srcItem
-            ? srcItem.channel_name
-            : (sc.payment_method_name ? String(sc.payment_method_name).trim() : (pmId && pmMap.get(pmId)?.name) || '');
-          const scPb1 =
-            sc.pb1_amount !== undefined && sc.pb1_amount !== null && sc.pb1_amount !== ''
-              ? round2(sc.pb1_amount)
-              : null;
-
-          return {
-            sales_channel_id: Number.isFinite(scId) ? scId : null,
-            sales_channel_name: dbSc ? dbSc.name : String(sc.sales_channel_name || '').trim(),
-            payment_method_id: pmId,
-            payment_method_name: pmName,
-            omzet_item_index: Number.isFinite(omzetIdx) ? omzetIdx : null,
-            amount: round2(sc.amount),
-            pb1_amount: scPb1,
-            sort_order: idx
-          };
-        })
-        .filter((sc) => sc.sales_channel_id);
-
-      // Sales Channel kini diisi oleh Admin/Owner; validasi hanya dijalankan jika ada alokasi sales_channel_items yang dikirim
-      if (salesChannelItems.length > 0 && nextStatus !== 'draft' && omzetGross > 0 && branchScRows.length > 0) {
-        const totalAllocated = round2(salesChannelItems.reduce((s, r) => s + r.amount, 0));
-        if (Math.abs(totalAllocated - omzetGross) > 1) {
-          const err = new Error(
-            `Alokasi Rincian Sales Channel wajib sama 100% dengan Total Omzet (${formatCurrencySimple(totalAllocated)} / ${formatCurrencySimple(omzetGross)}).`
-          );
-          err.statusCode = 400;
-          throw err;
-        }
-
-        if (channelGross > 0) {
-          for (let i = 0; i < omzetItems.length; i++) {
-            const oi = omzetItems[i];
-            const targetAmt = getEffectiveOmzetRowAmount(oi);
-            if (targetAmt <= 0) continue;
-
-            const srcAllocated = round2(
-              salesChannelItems
-                .filter((sc) => {
-                  if (sc.omzet_item_index !== null) return sc.omzet_item_index === i;
-                  if (sc.payment_method_id && oi.payment_method_id) {
-                    return Number(sc.payment_method_id) === Number(oi.payment_method_id);
-                  }
-                  return (
-                    sc.payment_method_name.toLowerCase().trim() ===
-                    String(oi.channel_name || '').toLowerCase().trim()
-                  );
-                })
-                .reduce((s, r) => s + r.amount, 0)
-            );
-
-            if (Math.abs(srcAllocated - targetAmt) > 1) {
-              const err = new Error(
-                `Alokasi Sales Channel untuk "${oi.channel_name}" belum sesuai (${formatCurrencySimple(srcAllocated)} / ${formatCurrencySimple(targetAmt)}).`
-              );
-              err.statusCode = 400;
-              throw err;
-            }
-          }
-        }
-      }
-
+      const rawCreator = payload.created_by_names ? String(payload.created_by_names).trim() : '';
+      const resolvedCreator = rawCreator && rawCreator !== 'Sync Pesan BosGil' ? rawCreator : (user?.name || null);
       const headerData = {
-        created_by_names: payload.created_by_names ? String(payload.created_by_names).trim() : (user?.name || null),
+        created_by_names: resolvedCreator,
         submitted_by: user?.id || null,
         status: nextStatus,
         total_customer: totalCustomer,
@@ -1718,36 +1672,11 @@ class CashierReport {
             }
 
             if (salesChannelItems.length > 0) {
-              await conn.execute(`DELETE FROM transaction_sales_channels WHERE transaction_id = ?`, [linkedTxId]);
-              for (const sc of salesChannelItems) {
-                const matchedTid =
-                  (sc.omzet_item_index !== null
-                    ? createdIncomeDetails.find((cid) => cid.omzet_item_index === sc.omzet_item_index)
-                    : null) ||
-                  (sc.payment_method_id
-                    ? createdIncomeDetails.find((cid) => Number(cid.payment_method_id) === Number(sc.payment_method_id))
-                    : null) ||
-                  createdIncomeDetails.find(
-                    (cid) =>
-                      String(cid.channel_name || '').toLowerCase().trim() ===
-                      String(sc.payment_method_name || '').toLowerCase().trim()
-                  ) ||
-                  (createdIncomeDetails.length === 1 ? createdIncomeDetails[0] : null);
-
-                await conn.execute(
-                  `INSERT INTO transaction_sales_channels
-                   (transaction_id, sales_channel_id, payment_method_id, transaction_income_detail_id, amount, pb1_amount)
-                   VALUES (?, ?, ?, ?, ?, ?)`,
-                  [
-                    linkedTxId,
-                    sc.sales_channel_id,
-                    matchedTid ? matchedTid.payment_method_id : sc.payment_method_id,
-                    matchedTid ? matchedTid.id : null,
-                    sc.amount,
-                    sc.pb1_amount
-                  ]
-                );
-              }
+              await this._syncTransactionSalesChannels(conn, {
+                linkedTxId,
+                salesChannelItems,
+                createdIncomeDetails
+              });
             }
 
             await conn.execute(
@@ -1819,6 +1748,251 @@ class CashierReport {
     });
 
     return this.getReportSnapshotById(resultId);
+  }
+
+  static async _normalizeAndValidateSalesChannels(
+    conn,
+    { branchId, rawItems, omzetItems, omzetGross, channelGross = null, pmMap = new Map(), validateWhenPresentOnly = true, requireFullWhenOmzetPositive = false }
+  ) {
+    const [branchScRows] = await conn.execute(
+      `SELECT id, name FROM sales_channels WHERE branch_id = ? AND status_deleted = 0 AND is_active = 1`,
+      [branchId]
+    );
+    const scMap = new Map(branchScRows.map((s) => [Number(s.id), s]));
+
+    const rawSalesChannelItems = Array.isArray(rawItems) ? rawItems : [];
+    const salesChannelItems = rawSalesChannelItems
+      .filter((sc) => sc && sc.sales_channel_id && toNum(sc.amount) > 0)
+      .map((sc, idx) => {
+        const scId = parseInt(sc.sales_channel_id, 10);
+        const dbSc = scMap.get(scId);
+        const omzetIdx =
+          sc.omzet_item_index !== undefined && sc.omzet_item_index !== null && sc.omzet_item_index !== ''
+            ? parseInt(sc.omzet_item_index, 10)
+            : null;
+        const srcItem = Number.isFinite(omzetIdx) && omzetItems[omzetIdx] ? omzetItems[omzetIdx] : null;
+        const pmId = srcItem
+          ? srcItem.payment_method_id
+          : (sc.payment_method_id ? parseInt(sc.payment_method_id, 10) : null);
+        const pmName = srcItem
+          ? srcItem.channel_name
+          : (sc.payment_method_name ? String(sc.payment_method_name).trim() : (pmId && pmMap.get(pmId)?.name) || '');
+        const scPb1 =
+          sc.pb1_amount !== undefined && sc.pb1_amount !== null && sc.pb1_amount !== ''
+            ? round2(sc.pb1_amount)
+            : null;
+
+        return {
+          sales_channel_id: Number.isFinite(scId) ? scId : null,
+          sales_channel_name: dbSc ? dbSc.name : String(sc.sales_channel_name || '').trim(),
+          payment_method_id: pmId,
+          payment_method_name: pmName,
+          omzet_item_index: Number.isFinite(omzetIdx) ? omzetIdx : null,
+          amount: round2(sc.amount),
+          pb1_amount: scPb1,
+          sort_order: idx
+        };
+      })
+      .filter((sc) => sc.sales_channel_id);
+
+    const effectiveChannelGross =
+      channelGross !== null
+        ? channelGross
+        : round2(omzetItems.reduce((s, i) => s + getEffectiveOmzetRowAmount(i), 0));
+
+    const shouldValidate =
+      branchScRows.length > 0 &&
+      omzetGross > 0 &&
+      ((validateWhenPresentOnly && salesChannelItems.length > 0) || requireFullWhenOmzetPositive);
+
+    if (shouldValidate) {
+      const totalAllocated = round2(salesChannelItems.reduce((s, r) => s + r.amount, 0));
+      if (Math.abs(totalAllocated - omzetGross) > 1) {
+        const err = new Error(
+          `Alokasi Rincian Sales Channel wajib sama 100% dengan Total Omzet (${formatCurrencySimple(totalAllocated)} / ${formatCurrencySimple(omzetGross)}).`
+        );
+        err.statusCode = 400;
+        throw err;
+      }
+
+      if (effectiveChannelGross > 0) {
+        for (let i = 0; i < omzetItems.length; i++) {
+          const oi = omzetItems[i];
+          const targetAmt = getEffectiveOmzetRowAmount(oi);
+          if (targetAmt <= 0) continue;
+
+          const srcAllocated = round2(
+            salesChannelItems
+              .filter((sc) => {
+                if (sc.omzet_item_index !== null) return sc.omzet_item_index === i;
+                if (sc.payment_method_id && oi.payment_method_id) {
+                  return Number(sc.payment_method_id) === Number(oi.payment_method_id);
+                }
+                return (
+                  sc.payment_method_name.toLowerCase().trim() ===
+                  String(oi.channel_name || '').toLowerCase().trim()
+                );
+              })
+              .reduce((s, r) => s + r.amount, 0)
+          );
+
+          if (Math.abs(srcAllocated - targetAmt) > 1) {
+            const err = new Error(
+              `Alokasi Sales Channel untuk "${oi.channel_name}" belum sesuai (${formatCurrencySimple(srcAllocated)} / ${formatCurrencySimple(targetAmt)}).`
+            );
+            err.statusCode = 400;
+            throw err;
+          }
+        }
+      }
+    }
+
+    return { salesChannelItems, branchScRows };
+  }
+
+  static async _syncTransactionSalesChannels(conn, { linkedTxId, salesChannelItems, createdIncomeDetails }) {
+    await conn.execute(`DELETE FROM transaction_sales_channels WHERE transaction_id = ?`, [linkedTxId]);
+    for (const sc of salesChannelItems) {
+      const matchedTid =
+        (sc.omzet_item_index !== null
+          ? createdIncomeDetails.find((cid) => cid.omzet_item_index === sc.omzet_item_index)
+          : null) ||
+        (sc.payment_method_id
+          ? createdIncomeDetails.find((cid) => Number(cid.payment_method_id) === Number(sc.payment_method_id))
+          : null) ||
+        createdIncomeDetails.find(
+          (cid) =>
+            String(cid.channel_name || '').toLowerCase().trim() ===
+            String(sc.payment_method_name || '').toLowerCase().trim()
+        ) ||
+        (createdIncomeDetails.length === 1 ? createdIncomeDetails[0] : null);
+
+      await conn.execute(
+        `INSERT INTO transaction_sales_channels
+         (transaction_id, sales_channel_id, payment_method_id, transaction_income_detail_id, amount, pb1_amount)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          linkedTxId,
+          sc.sales_channel_id,
+          matchedTid ? matchedTid.payment_method_id : sc.payment_method_id,
+          matchedTid ? matchedTid.id : null,
+          sc.amount,
+          sc.pb1_amount
+        ]
+      );
+    }
+  }
+
+  /**
+   * Update Rincian Sales Channel oleh Admin/Owner/Master langsung dari Rekap Laporan Kasir.
+   * Menyimpan ke cashier_report_sales_channels sekaligus menyinkronkan transaction_sales_channels jika omzet_transaction_id tersedia.
+   */
+  static async updateReportSalesChannels({ reportId, branchId, salesChannelItems: rawItems, user }) {
+    const prevSnapshot = await this.getReportSnapshotById(reportId);
+    if (!prevSnapshot || Number(prevSnapshot.report.branch_id) !== Number(branchId)) {
+      const err = new Error('Laporan kasir tidak ditemukan.');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const rep = prevSnapshot.report;
+    const dateStr = sanitizeDateOnly(rep.report_date);
+
+    await dbTransaction(async (conn) => {
+      const [pmRows] = await conn.execute(
+        `SELECT id, name, parent_id, default_bank_account_id, is_taxable FROM payment_methods WHERE branch_id = ? AND status_deleted = false`,
+        [branchId]
+      );
+      const pmMap = new Map(pmRows.map((p) => [Number(p.id), p]));
+
+      const omzetItems = (prevSnapshot.omzet_items || []).map((i) => ({
+        payment_method_id: i.payment_method_id ? Number(i.payment_method_id) : null,
+        channel_name: i.channel_name || 'Lainnya',
+        amount_app: toNum(i.amount_app),
+        amount_cashier: toNum(i.amount_cashier)
+      }));
+
+      const { salesChannelItems } = await this._normalizeAndValidateSalesChannels(conn, {
+        branchId,
+        rawItems,
+        omzetItems,
+        omzetGross: toNum(rep.omzet_gross),
+        pmMap,
+        validateWhenPresentOnly: false,
+        requireFullWhenOmzetPositive: true
+      });
+
+      await conn.execute(`DELETE FROM cashier_report_sales_channels WHERE report_id = ?`, [reportId]);
+      for (const sc of salesChannelItems) {
+        await conn.execute(
+          `INSERT INTO cashier_report_sales_channels
+           (report_id, sales_channel_id, sales_channel_name, payment_method_id, payment_method_name, omzet_item_index, amount, pb1_amount, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            reportId,
+            sc.sales_channel_id,
+            sc.sales_channel_name,
+            sc.payment_method_id,
+            sc.payment_method_name,
+            sc.omzet_item_index,
+            sc.amount,
+            sc.pb1_amount,
+            sc.sort_order
+          ]
+        );
+      }
+
+      if (rep.omzet_transaction_id) {
+        const [tidRows] = await conn.execute(
+          `SELECT tid.id, tid.payment_method_id, pm.name as channel_name
+           FROM transaction_income_details tid
+           LEFT JOIN payment_methods pm ON tid.payment_method_id = pm.id
+           WHERE tid.transaction_id = ?
+           ORDER BY tid.id ASC`,
+          [rep.omzet_transaction_id]
+        );
+        const createdIncomeDetails = tidRows.map((row) => ({
+          id: row.id,
+          payment_method_id: row.payment_method_id ? Number(row.payment_method_id) : null,
+          channel_name: row.channel_name || '',
+          omzet_item_index: null
+        }));
+
+        await this._syncTransactionSalesChannels(conn, {
+          linkedTxId: rep.omzet_transaction_id,
+          salesChannelItems,
+          createdIncomeDetails
+        });
+      }
+
+      const oldCount = (prevSnapshot.sales_channel_items || []).length;
+      const summary = `Memperbarui Rincian Sales Channel tanggal ${dateStr} (${salesChannelItems.length} alokasi, total ${formatCurrencySimple(salesChannelItems.reduce((s, r) => s + r.amount, 0))})`;
+      const changes = [
+        {
+          field: 'sales_channel_items',
+          label: 'Rincian Sales Channel',
+          oldValue: `${oldCount} baris`,
+          newValue: `${salesChannelItems.length} baris`
+        }
+      ];
+
+      await conn.execute(
+        `INSERT INTO cashier_report_logs (report_id, branch_id, report_date, user_id, user_name, user_role, action, summary, changes)
+         VALUES (?, ?, ?, ?, ?, ?, 'update_sales_channels', ?, ?)`,
+        [
+          reportId,
+          branchId,
+          dateStr,
+          user?.id || null,
+          user?.name || user?.email || 'Sistem',
+          user?.role || '',
+          summary.slice(0, 500),
+          JSON.stringify(changes)
+        ]
+      );
+    });
+
+    return this.getReportSnapshotById(reportId);
   }
 
   static async addNote({ reportId, branchId, noteType, content, user }) {
@@ -2011,7 +2185,7 @@ class CashierReport {
             [
               branchId,
               dateStr,
-              lr.created_by_names || user?.name || 'Sync Pesan BosGil',
+              lr.created_by_names || null,
               lr.submitted_by || user?.id || null,
               lr.total_customer || 0,
               lr.apc || 0,
@@ -2075,7 +2249,7 @@ class CashierReport {
             [
               branchId,
               dateStr,
-              legacySnapshot?.report?.created_by_names || user?.name || 'Sync Pesan BosGil',
+              legacySnapshot?.report?.created_by_names || null,
               legacySnapshot?.report?.submitted_by || user?.id || null,
               initialStatus
             ]
