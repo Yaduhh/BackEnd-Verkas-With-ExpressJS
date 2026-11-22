@@ -534,7 +534,10 @@ const getSalesChannels = async (req, res, next) => {
     const channels = await SalesChannel.findAll({
       branchId: parseInt(branchId),
       categoryId: category_id,
-      includeInactive: include_inactive === 'true' || include_inactive === '1' || req.user.role === 'owner' || req.user.role === 'master',
+      includeInactive:
+        include_inactive === 'true' ||
+        include_inactive === '1' ||
+        ['owner', 'co-owner', 'admin', 'master'].includes(req.user.role),
       onlyDeleted: only_deleted === 'true' || only_deleted === '1'
     });
 

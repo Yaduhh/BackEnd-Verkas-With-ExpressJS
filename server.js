@@ -55,8 +55,8 @@ const allowedOrigins = [
   'http://127.0.0.1:19006', // iOS Simulator Expo web
   'http://localhost:3000', // Backend (for testing)
   'http://127.0.0.1:3000', // Backend (for iOS simulator)
-  'http://172.20.10.22:8081', // Physical device Metro
-  'http://172.20.10.20:19006', // Physical device Expo web
+  'http://192.168.1.172:8081', // Physical device Metro
+  'http://192.168.1.170:19006', // Physical device Expo web
   'http://10.127.31.2383000', // Physical device Backend
   /^http:\/\/192\.168\.\d+\.\d+:8081$/, // Physical device Metro
   /^http:\/\/192\.168\.\d+\.\d+:19006$/, // Physical device Expo web

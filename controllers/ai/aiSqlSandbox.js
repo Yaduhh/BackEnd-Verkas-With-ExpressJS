@@ -59,11 +59,11 @@ function sanitizeAndSandboxSQL(sql, branchId) {
   );
 
   cleanSql = replaceTableWithSandbox(cleanSql, 'bank_accounts',
-    `(SELECT * FROM bank_accounts WHERE branch_id = ${branchId} AND is_active = 1)`
+    `(SELECT ba.* FROM bank_accounts ba WHERE ba.is_active = 1 AND (ba.branch_id = ${branchId} OR EXISTS (SELECT 1 FROM bank_account_branches bab WHERE bab.bank_account_id = ba.id AND bab.branch_id = ${branchId})))`
   );
 
   cleanSql = replaceTableWithSandbox(cleanSql, 'savings_account_allocations',
-    `(SELECT saa.* FROM savings_account_allocations saa JOIN bank_accounts ba ON saa.bank_account_id = ba.id WHERE ba.branch_id = ${branchId})`
+    `(SELECT saa.* FROM savings_account_allocations saa JOIN categories c ON saa.category_id = c.id WHERE c.branch_id = ${branchId} AND c.status_deleted = 0)`
   );
 
   cleanSql = replaceTableWithSandbox(cleanSql, 'branch_reports',

@@ -190,7 +190,8 @@ function computeReportDiff(prevSnapshot, nextSnapshot) {
     ['entertainments', 'Rincian Entertaint'],
     ['goods_receipts', 'Penerimaan Barang'],
     ['dp_orders', 'Laporan DP / Deposit'],
-    ['admin_orders', 'Laporan Admin Pesanan']
+    ['admin_orders', 'Laporan Admin Pesanan'],
+    ['offline_orders', 'Laporan Penjualan Offline']
   ];
   for (const [key, label] of sectionPairs) {
     const oldArr = prevSnapshot[key] || [];
@@ -614,6 +615,83 @@ class CashierReport {
     };
   }
 
+  static async getBranchConfig(branchId, conn = null) {
+    const exec = conn ? (sql, p) => conn.execute(sql, p).then(([r]) => r) : query;
+    const rows = await exec(
+      `SELECT id, name, cashier_order_template, cashier_show_sold_items, cashier_show_pesan_bosgil, cashier_show_offline_sales, cashier_show_hpp, cashier_show_entertain_goods, cashier_show_tc_apc, cashier_show_pb1
+       FROM branches WHERE id = ? LIMIT 1`,
+      [branchId]
+    );
+    const b = rows[0];
+    const validTemplates = new Set(['outlet', 'toko_online']);
+    const template = b?.cashier_order_template && validTemplates.has(b.cashier_order_template)
+      ? b.cashier_order_template
+      : 'outlet';
+    return {
+      branch_id: Number(branchId),
+      branch_name: b?.name || '',
+      order_template: template,
+      show_sold_items: b?.cashier_show_sold_items !== undefined ? Boolean(b.cashier_show_sold_items) : true,
+      show_pesan_bosgil: b?.cashier_show_pesan_bosgil !== undefined ? Boolean(b.cashier_show_pesan_bosgil) : true,
+      show_offline_sales: b?.cashier_show_offline_sales !== undefined ? Boolean(b.cashier_show_offline_sales) : false,
+      show_hpp: b?.cashier_show_hpp !== undefined ? Boolean(b.cashier_show_hpp) : true,
+      show_entertain_goods: b?.cashier_show_entertain_goods !== undefined ? Boolean(b.cashier_show_entertain_goods) : true,
+      show_tc_apc: b?.cashier_show_tc_apc !== undefined ? Boolean(b.cashier_show_tc_apc) : true,
+      show_pb1: b?.cashier_show_pb1 !== undefined ? Boolean(b.cashier_show_pb1) : true
+    };
+  }
+
+  static async updateBranchConfig(branchId, { order_template, show_sold_items, show_pesan_bosgil, show_offline_sales, show_hpp, show_entertain_goods, show_tc_apc, show_pb1 }) {
+    const validTemplates = ['outlet', 'toko_online'];
+    const updates = [];
+    const params = [];
+
+    if (order_template !== undefined) {
+      if (!validTemplates.includes(order_template)) {
+        const err = new Error('Template laporan tidak valid');
+        err.statusCode = 400;
+        throw err;
+      }
+      updates.push('cashier_order_template = ?');
+      params.push(order_template);
+    }
+    if (show_sold_items !== undefined) {
+      updates.push('cashier_show_sold_items = ?');
+      params.push(show_sold_items ? 1 : 0);
+    }
+    if (show_pesan_bosgil !== undefined) {
+      updates.push('cashier_show_pesan_bosgil = ?');
+      params.push(show_pesan_bosgil ? 1 : 0);
+    }
+    if (show_offline_sales !== undefined) {
+      updates.push('cashier_show_offline_sales = ?');
+      params.push(show_offline_sales ? 1 : 0);
+    }
+    if (show_hpp !== undefined) {
+      updates.push('cashier_show_hpp = ?');
+      params.push(show_hpp ? 1 : 0);
+    }
+    if (show_entertain_goods !== undefined) {
+      updates.push('cashier_show_entertain_goods = ?');
+      params.push(show_entertain_goods ? 1 : 0);
+    }
+    if (show_tc_apc !== undefined) {
+      updates.push('cashier_show_tc_apc = ?');
+      params.push(show_tc_apc ? 1 : 0);
+    }
+    if (show_pb1 !== undefined) {
+      updates.push('cashier_show_pb1 = ?');
+      params.push(show_pb1 ? 1 : 0);
+    }
+
+    if (updates.length > 0) {
+      params.push(branchId);
+      await query(`UPDATE branches SET ${updates.join(', ')} WHERE id = ?`, params);
+    }
+
+    return await this.getBranchConfig(branchId);
+  }
+
   static async ensureBranchSoldItems(branchId, conn = null) {
     const exec = conn ? (sql, p) => conn.execute(sql, p).then(([r]) => r) : query;
     let rows = await exec(
@@ -909,29 +987,72 @@ class CashierReport {
       [reportId]
     );
 
-    const formatOrderRow = (o) => ({
-      ...o,
-      bank_account_id: o.bank_account_id ? Number(o.bank_account_id) : null,
-      bank_account_name: o.bank_account_name || o.dp_channel || null,
-      settlement_bank_account_id: o.settlement_bank_account_id ? Number(o.settlement_bank_account_id) : null,
-      settlement_bank_account_name: o.settlement_bank_account_name || o.settlement_channel || null,
-      product_total_amount: toNum(o.product_total_amount),
-      tf_bca_amount: toNum(o.tf_bca_amount),
-      tf_mandiri_amount: toNum(o.tf_mandiri_amount),
-      dp_amount: toNum(o.dp_amount),
-      settlement_amount: toNum(o.settlement_amount),
-      ongkir_bca_amount: toNum(o.ongkir_bca_amount),
-      ongkir_mandiri_amount: toNum(o.ongkir_mandiri_amount),
-      ongkir_amount: toNum(o.ongkir_amount),
-      total_amount: toNum(o.total_amount),
-      is_verified: Boolean(o.is_verified),
-      verified_by: o.verified_by ? Number(o.verified_by) : null,
-      verified_by_name: o.verified_by_name || null,
-      verified_at: o.verified_at || null
-    });
+    const parseExtraData = (raw) => {
+      if (!raw) return null;
+      if (typeof raw === 'object') return raw;
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const formatOrderRow = (o) => {
+      const extra = parseExtraData(o.extra_data) || {};
+      const accountHolderName = extra.account_holder_name ? String(extra.account_holder_name).trim() : '';
+      return {
+        ...o,
+        bank_account_id: o.bank_account_id ? Number(o.bank_account_id) : null,
+        bank_account_name: o.bank_account_name || o.dp_channel || null,
+        settlement_bank_account_id: o.settlement_bank_account_id ? Number(o.settlement_bank_account_id) : null,
+        settlement_bank_account_name: o.settlement_bank_account_name || o.settlement_channel || null,
+        product_total_amount: toNum(o.product_total_amount),
+        tf_bca_amount: toNum(o.tf_bca_amount),
+        tf_mandiri_amount: toNum(o.tf_mandiri_amount),
+        dp_amount: toNum(o.dp_amount),
+        settlement_amount: toNum(o.settlement_amount),
+        ongkir_bca_amount: toNum(o.ongkir_bca_amount),
+        ongkir_mandiri_amount: toNum(o.ongkir_mandiri_amount),
+        ongkir_amount: toNum(o.ongkir_amount),
+        total_amount: toNum(o.total_amount),
+        account_holder_name: accountHolderName,
+        extra_data: {
+          ...extra,
+          tf_bca_c1_amount: toNum(extra.tf_bca_c1_amount),
+          item_name: extra.item_name ? String(extra.item_name) : '',
+          order_channel: extra.order_channel ? String(extra.order_channel) : '',
+          account_holder_name: accountHolderName
+        },
+        is_verified: Boolean(o.is_verified),
+        verified_by: o.verified_by ? Number(o.verified_by) : null,
+        verified_by_name: o.verified_by_name || null,
+        verified_at: o.verified_at || null
+      };
+    };
 
     const notes = await exec(
       `SELECT * FROM cashier_report_notes WHERE report_id = ? ORDER BY created_at DESC, id DESC`,
+      [reportId]
+    );
+
+    const piutangRows = await exec(
+      `SELECT crpi.*,
+              mp.nama as mitra_nama,
+              c.name as category_name,
+              ba.name as bank_account_name,
+              COALESCE(uv.name, uv.email) as verified_by_name,
+              t.id as live_tx_id,
+              t.paid_amount as live_paid_amount,
+              t.remaining_debt as live_remaining_debt
+       FROM cashier_report_piutang_items crpi
+       LEFT JOIN mitra_piutang mp ON crpi.mitra_piutang_id = mp.id
+       LEFT JOIN categories c ON crpi.category_id = c.id
+       LEFT JOIN bank_accounts ba ON crpi.bank_account_id = ba.id
+       LEFT JOIN users uv ON crpi.verified_by = uv.id
+       LEFT JOIN transactions t ON crpi.transaction_id = t.id AND t.status_deleted = false
+       WHERE crpi.report_id = ?
+       ORDER BY crpi.id ASC`,
       [reportId]
     );
 
@@ -1007,6 +1128,39 @@ class CashierReport {
       admin_orders: orders
         .filter((o) => o.order_section === 'admin_pesanan')
         .map(formatOrderRow),
+      offline_orders: orders
+        .filter((o) => o.order_section === 'offline_sales')
+        .map(formatOrderRow),
+      piutang_items: piutangRows.map((p) => {
+        const amt = toNum(p.amount);
+        const paid = p.live_tx_id && p.live_paid_amount !== null && p.live_paid_amount !== undefined
+          ? toNum(p.live_paid_amount)
+          : toNum(p.paid_amount);
+        const remaining = p.live_tx_id && p.live_remaining_debt !== null && p.live_remaining_debt !== undefined
+          ? toNum(p.live_remaining_debt)
+          : Math.max(0, round2(amt - paid));
+        return {
+          id: Number(p.id),
+          report_id: Number(p.report_id),
+          branch_id: Number(p.branch_id),
+          mitra_piutang_id: Number(p.mitra_piutang_id),
+          mitra_nama: p.mitra_nama || '-',
+          category_id: p.category_id ? Number(p.category_id) : null,
+          category_name: p.category_name || 'Pendapatan Lainnya',
+          bank_account_id: p.bank_account_id ? Number(p.bank_account_id) : null,
+          bank_account_name: p.bank_account_name || null,
+          transaction_id: p.live_tx_id ? Number(p.live_tx_id) : (p.transaction_id ? Number(p.transaction_id) : null),
+          amount: amt,
+          paid_amount: paid,
+          remaining_debt: remaining,
+          notes: p.notes || '',
+          is_verified: Boolean(p.is_verified),
+          verified_by: p.verified_by ? Number(p.verified_by) : null,
+          verified_by_name: p.verified_by_name || null,
+          verified_at: p.verified_at || null,
+          created_at: p.created_at || null
+        };
+      }),
       notes: notes.map((n) => ({
         ...n,
         is_resolved: Boolean(n.is_resolved)
@@ -1192,6 +1346,8 @@ class CashierReport {
       goods_receipts: [],
       dp_orders: [],
       admin_orders: [],
+      offline_orders: [],
+      piutang_items: [],
       notes: [],
       logs: []
     };
@@ -1258,8 +1414,11 @@ class CashierReport {
       }
     }
 
-    const target = await this.getBranchTarget(branchId, month, year);
-    const [liveMetrics, paymentMethods, bankAccounts, salesChannels, allSoldMasters] = await Promise.all([
+    const [target, branchConfig] = await Promise.all([
+      this.getBranchTarget(branchId, month, year),
+      this.getBranchConfig(branchId)
+    ]);
+    const [liveMetrics, paymentMethods, bankAccounts, salesChannels, allSoldMasters, mitraPiutangOptions, incomeCategories] = await Promise.all([
       this.getLiveMetrics({ branchId, reportDate: dateStr, targetSales: target.target_sales }),
       query(
         `SELECT pm.*, ba.name as default_bank_account_name
@@ -1270,11 +1429,18 @@ class CashierReport {
         [branchId]
       ),
       query(
-        `SELECT id, name, account_number, type
-         FROM bank_accounts
-         WHERE branch_id = ? AND is_active = 1 AND type != 'savings'
-         ORDER BY name ASC`,
-        [branchId]
+        `SELECT ba.id, ba.name, ba.account_number, ba.type
+         FROM bank_accounts ba
+         WHERE ba.is_active = 1 AND ba.type != 'savings'
+           AND (
+             ba.branch_id = ?
+             OR EXISTS (
+               SELECT 1 FROM bank_account_branches bab
+               WHERE bab.bank_account_id = ba.id AND bab.branch_id = ?
+             )
+           )
+         ORDER BY ba.name ASC`,
+        [branchId, branchId]
       ),
       query(
         `SELECT id, name, description, category_id
@@ -1283,12 +1449,29 @@ class CashierReport {
          ORDER BY name ASC, id ASC`,
         [branchId]
       ),
-      this.ensureBranchSoldItems(branchId)
+      branchConfig.show_sold_items ? this.ensureBranchSoldItems(branchId) : Promise.resolve([]),
+      query(
+        `SELECT id, nama
+         FROM mitra_piutang
+         WHERE branch_id = ? AND deleted_at IS NULL
+         ORDER BY nama ASC, id ASC`,
+        [branchId]
+      ),
+      query(
+        `SELECT id, name, parent_id
+         FROM categories
+         WHERE branch_id = ? AND type IN ('income', 'both') AND status_deleted = false
+           AND LOWER(name) NOT LIKE '%kas simpanan%'
+           AND LOWER(name) != 'pajak pb1'
+         ORDER BY name ASC`,
+        [branchId]
+      )
     ]);
 
     return {
       report_date: dateStr,
       branch_id: Number(branchId),
+      branch_config: branchConfig,
       report: snapshot ? snapshot.report : null,
       omzet_items: snapshot ? snapshot.omzet_items : [],
       sales_channel_items: snapshot ? (snapshot.sales_channel_items || []) : [],
@@ -1298,6 +1481,8 @@ class CashierReport {
       goods_receipts: snapshot ? snapshot.goods_receipts : [],
       dp_orders: snapshot ? snapshot.dp_orders : [],
       admin_orders: snapshot ? snapshot.admin_orders : [],
+      offline_orders: snapshot ? (snapshot.offline_orders || []) : [],
+      piutang_items: snapshot ? (snapshot.piutang_items || []) : [],
       notes: snapshot ? snapshot.notes : [],
       logs: snapshot ? snapshot.logs : [],
       target,
@@ -1307,7 +1492,9 @@ class CashierReport {
         is_taxable: Boolean(pm.is_taxable)
       })),
       bank_accounts: bankAccounts,
-      sales_channels: salesChannels
+      sales_channels: salesChannels,
+      mitra_piutang_options: mitraPiutangOptions.map((m) => ({ id: Number(m.id), nama: m.nama })),
+      income_categories: incomeCategories.map((c) => ({ id: Number(c.id), name: c.name, parent_id: c.parent_id ? Number(c.parent_id) : null }))
     };
   }
 
@@ -1489,8 +1676,20 @@ class CashierReport {
         }));
 
       const [branchBankRows] = await conn.execute(
-        `SELECT id, name FROM bank_accounts WHERE branch_id = ? AND is_active = 1`,
-        [branchId]
+        `SELECT ba.id, ba.name
+         FROM bank_accounts ba
+         WHERE ba.is_active = 1
+           AND (
+             ba.branch_id = ?
+             OR (
+               ba.type != 'savings'
+               AND EXISTS (
+                 SELECT 1 FROM bank_account_branches bab
+                 WHERE bab.bank_account_id = ba.id AND bab.branch_id = ?
+               )
+             )
+           )`,
+        [branchId, branchId]
       );
       const bankById = new Map(branchBankRows.map((b) => [Number(b.id), b]));
       const bankByName = new Map(branchBankRows.map((b) => [String(b.name || '').trim().toLowerCase(), b]));
@@ -1508,28 +1707,62 @@ class CashierReport {
         };
       };
 
+      const branchConfig = await this.getBranchConfig(branchId, conn);
+
       const normalizeOrders = (arr, section) =>
         (Array.isArray(arr) ? arr : [])
-          .filter((o) =>
-            o.customer_name ||
-            o.planned_pickup_date ||
-            toNum(o.product_total_amount) > 0 ||
-            toNum(o.tf_bca_amount) > 0 ||
-            toNum(o.tf_mandiri_amount) > 0 ||
-            toNum(o.dp_amount) > 0 ||
-            o.dp_transfer_date ||
-            o.dp_channel ||
-            o.bank_account_id ||
-            o.settlement_transfer_date ||
-            o.settlement_channel ||
-            o.settlement_bank_account_id ||
-            toNum(o.settlement_amount) > 0 ||
-            toNum(o.ongkir_amount) > 0 ||
-            toNum(o.total_amount) > 0 ||
-            o.pickup_date ||
-            o.notes
-          )
+          .filter((o) => {
+            const extra = o.extra_data && typeof o.extra_data === 'object' ? o.extra_data : {};
+            const bcaC1 = toNum(extra.tf_bca_c1_amount !== undefined ? extra.tf_bca_c1_amount : o.tf_bca_c1_amount);
+            const itemName = extra.item_name !== undefined ? extra.item_name : o.item_name;
+            const orderChannel = extra.order_channel !== undefined ? extra.order_channel : o.order_channel;
+            const accountHolderName =
+              extra.account_holder_name !== undefined ? extra.account_holder_name : o.account_holder_name;
+            return (
+              o.customer_name ||
+              accountHolderName ||
+              o.planned_pickup_date ||
+              toNum(o.product_total_amount) > 0 ||
+              toNum(o.tf_bca_amount) > 0 ||
+              bcaC1 > 0 ||
+              toNum(o.tf_mandiri_amount) > 0 ||
+              toNum(o.dp_amount) > 0 ||
+              o.dp_transfer_date ||
+              o.dp_channel ||
+              o.bank_account_id ||
+              o.settlement_transfer_date ||
+              o.settlement_channel ||
+              o.settlement_bank_account_id ||
+              toNum(o.settlement_amount) > 0 ||
+              toNum(o.ongkir_amount) > 0 ||
+              toNum(o.total_amount) > 0 ||
+              o.pickup_date ||
+              o.notes ||
+              itemName ||
+              orderChannel
+            );
+          })
           .map((o, idx) => {
+            const rawExtra = o.extra_data && typeof o.extra_data === 'object' ? o.extra_data : {};
+            const tfBcaC1 = round2(
+              rawExtra.tf_bca_c1_amount !== undefined ? rawExtra.tf_bca_c1_amount : o.tf_bca_c1_amount
+            );
+            const itemName = String(
+              rawExtra.item_name !== undefined ? rawExtra.item_name : (o.item_name || '')
+            ).trim();
+            const orderChannel = String(
+              rawExtra.order_channel !== undefined ? rawExtra.order_channel : (o.order_channel || '')
+            ).trim();
+            const accountHolderName = String(
+              rawExtra.account_holder_name !== undefined ? rawExtra.account_holder_name : (o.account_holder_name || '')
+            ).trim();
+            const cleanExtra = {};
+            if (tfBcaC1 > 0) cleanExtra.tf_bca_c1_amount = tfBcaC1;
+            if (itemName) cleanExtra.item_name = itemName;
+            if (orderChannel) cleanExtra.order_channel = orderChannel;
+            if (accountHolderName) cleanExtra.account_holder_name = accountHolderName;
+            const extraDataJson = Object.keys(cleanExtra).length > 0 ? JSON.stringify(cleanExtra) : null;
+
             const productTotal = round2(o.product_total_amount);
             const bca = round2(o.tf_bca_amount);
             const mandiri = round2(o.tf_mandiri_amount);
@@ -1542,7 +1775,11 @@ class CashierReport {
             );
             const computedTotal = section === 'dp_deposit'
               ? (productTotal + ongkirAmt)
-              : (bca + mandiri + ongkirBca + ongkirMandiri);
+              : section === 'offline_sales'
+                ? round2(o.total_amount)
+                : branchConfig.order_template === 'toko_online'
+                  ? round2(bca + tfBcaC1 + mandiri + ongkirAmt)
+                  : round2(bca + mandiri + ongkirBca + ongkirMandiri);
             const totalAmt = toNum(o.total_amount) > 0 ? round2(o.total_amount) : computedTotal;
 
             const dpAmt = round2(o.dp_amount);
@@ -1565,6 +1802,7 @@ class CashierReport {
               planned_pickup_date: o.planned_pickup_date ? String(o.planned_pickup_date).trim() : null,
               product_total_amount: productTotal,
               tf_bca_amount: bca,
+              tf_bca_c1_amount: tfBcaC1,
               tf_mandiri_amount: mandiri,
               dp_amount: dpAmt,
               dp_transfer_date: o.dp_transfer_date ? String(o.dp_transfer_date).trim() : null,
@@ -1580,6 +1818,7 @@ class CashierReport {
               total_amount: totalAmt,
               pickup_date: o.pickup_date ? String(o.pickup_date).trim() : null,
               notes: o.notes ? String(o.notes).trim() : null,
+              extra_data: extraDataJson,
               external_reference_id: o.external_reference_id ? String(o.external_reference_id).trim() : null,
               external_source: o.external_source ? String(o.external_source).trim() : null,
               sort_order: idx,
@@ -1591,12 +1830,13 @@ class CashierReport {
 
       const dpOrders = normalizeOrders(payload.dp_orders, 'dp_deposit');
       const adminOrders = normalizeOrders(payload.admin_orders, 'admin_pesanan');
+      const offlineOrders = normalizeOrders(payload.offline_orders, 'offline_sales');
 
       const entertainTotalFromRows = round2(
         entertainments.reduce((sum, e) => sum + e.total_price, 0)
       );
       const adminPesananFromRows = round2(
-        adminOrders.reduce((sum, o) => sum + o.tf_bca_amount + o.tf_mandiri_amount, 0)
+        adminOrders.reduce((sum, o) => sum + o.tf_bca_amount + (o.tf_bca_c1_amount || 0) + o.tf_mandiri_amount, 0)
       );
 
       // Load branch payment methods to enforce authoritative PB1, default bank account & parent grouping
@@ -1610,6 +1850,7 @@ class CashierReport {
       );
 
       // Compute omzet items authoritatively
+      const showPb1 = branchConfig.show_pb1 !== false;
       const rawOmzetItems = Array.isArray(payload.omzet_items) ? payload.omzet_items : [];
       const omzetItems = rawOmzetItems.map((item, idx) => {
         const pmId = item.payment_method_id ? parseInt(item.payment_method_id, 10) : null;
@@ -1617,15 +1858,16 @@ class CashierReport {
         const channelName = String(item.channel_name || dbPm?.name || '').trim();
         const lowerName = channelName.toLowerCase();
         const isAdminPesananRow = lowerName.includes('admin pesanan');
-        const isTaxable = dbPm
-          ? Boolean(dbPm.is_taxable)
-          : (item.is_taxable !== undefined ? Boolean(item.is_taxable) : !isAdminPesananRow);
+        const isTaxable = showPb1
+          ? (dbPm
+              ? Boolean(dbPm.is_taxable)
+              : (item.is_taxable !== undefined ? Boolean(item.is_taxable) : !isAdminPesananRow))
+          : false;
         const appAmt = round2(item.amount_app);
         const cashierAmt = round2(item.amount_cashier);
-        const pb1Amt =
-          item.pb1_amount !== undefined && item.pb1_amount !== null
-            ? round2(item.pb1_amount)
-            : 0;
+        const pb1Amt = showPb1 && item.pb1_amount !== undefined && item.pb1_amount !== null
+          ? round2(item.pb1_amount)
+          : 0;
         const resolvedBankId = dbPm?.default_bank_account_id || (item.bank_account_id ? parseInt(item.bank_account_id, 10) : null);
         const lampiranList = parseLampiranArray(item.lampiran);
         const lampiranJson = lampiranList.length > 0 ? JSON.stringify(lampiranList) : null;
@@ -1650,13 +1892,13 @@ class CashierReport {
       );
       const manualOmzetSalesCashier = toNullableNum(payload.omzet_sales_cashier);
       const omzetGross = channelGross > 0 ? channelGross : Math.max(0, manualOmzetSalesCashier || 0);
-      const channelPb1Sum = round2(
-        omzetItems.reduce((sum, i) => sum + i.pb1_amount, 0)
-      );
+      const channelPb1Sum = showPb1
+        ? round2(omzetItems.reduce((sum, i) => sum + i.pb1_amount, 0))
+        : 0;
       const manualPb1 = payload.pb1_amount !== undefined && payload.pb1_amount !== null
         ? round2(payload.pb1_amount)
         : null;
-      const pb1Amount = manualPb1 !== null && manualPb1 >= 0 ? manualPb1 : channelPb1Sum;
+      const pb1Amount = !showPb1 ? 0 : (manualPb1 !== null && manualPb1 >= 0 ? manualPb1 : channelPb1Sum);
       const omzetNet = Math.max(0, round2(omzetGross - pb1Amount));
       const totalCustomer = Math.max(0, parseInt(payload.total_customer || 0, 10) || 0);
       const computedApc = totalCustomer > 0 ? Math.round(omzetNet / totalCustomer) : 0;
@@ -1692,7 +1934,9 @@ class CashierReport {
         validateWhenPresentOnly: nextStatus !== 'draft'
       });
 
-      const branchSoldMasters = await this.ensureBranchSoldItems(branchId, conn);
+      const branchSoldMasters = branchConfig.show_sold_items
+        ? await this.ensureBranchSoldItems(branchId, conn)
+        : [];
       const soldMasterById = new Map(branchSoldMasters.map((m) => [Number(m.id), m]));
       const soldMasterByLegacy = new Map(
         branchSoldMasters.filter((m) => m.legacy_key).map((m) => [m.legacy_key, m])
@@ -1770,7 +2014,7 @@ class CashierReport {
         apc,
         omzet_gross: omzetGross,
         pb1_amount: pb1Amount,
-        pb1_app_amount: toNullableNum(payload.pb1_app_amount),
+        pb1_app_amount: showPb1 ? toNullableNum(payload.pb1_app_amount) : null,
         omzet_net: omzetNet,
         omzet_sales_app: toNullableNum(payload.omzet_sales_app),
         omzet_sales_cashier: manualOmzetSalesCashier,
@@ -1944,7 +2188,7 @@ class CashierReport {
       }
 
       await conn.execute(`DELETE FROM cashier_report_orders WHERE report_id = ?`, [reportId]);
-      for (const o of [...dpOrders, ...adminOrders]) {
+      for (const o of [...dpOrders, ...adminOrders, ...offlineOrders]) {
         const matchedVerify =
           (o.id ? verifyById.get(Number(o.id)) : null) ||
           (o.external_source && o.external_reference_id
@@ -1957,14 +2201,14 @@ class CashierReport {
         await conn.execute(
           `INSERT INTO cashier_report_orders
            (report_id, order_section, customer_name, planned_pickup_date, product_total_amount, tf_bca_amount, tf_mandiri_amount, dp_amount, dp_transfer_date, dp_channel, bank_account_id,
-            settlement_amount, settlement_transfer_date, settlement_channel, settlement_bank_account_id, ongkir_bca_amount, ongkir_mandiri_amount, ongkir_amount, total_amount, pickup_date, notes, external_reference_id, external_source, sort_order, is_verified, verified_by, verified_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            settlement_amount, settlement_transfer_date, settlement_channel, settlement_bank_account_id, ongkir_bca_amount, ongkir_mandiri_amount, ongkir_amount, total_amount, pickup_date, notes, extra_data, external_reference_id, external_source, sort_order, is_verified, verified_by, verified_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             reportId, o.order_section, o.customer_name, o.planned_pickup_date, o.product_total_amount,
             o.tf_bca_amount, o.tf_mandiri_amount,
             o.dp_amount, o.dp_transfer_date, o.dp_channel, o.bank_account_id, o.settlement_amount, o.settlement_transfer_date,
             o.settlement_channel, o.settlement_bank_account_id, o.ongkir_bca_amount, o.ongkir_mandiri_amount, o.ongkir_amount, o.total_amount,
-            o.pickup_date, o.notes, o.external_reference_id, o.external_source, o.sort_order,
+            o.pickup_date, o.notes, o.extra_data, o.external_reference_id, o.external_source, o.sort_order,
             isVerifiedVal, verifiedByVal || null, verifiedAtVal || null
           ]
         );
@@ -2080,7 +2324,8 @@ class CashierReport {
         entertainments,
         goods_receipts: goodsReceipts,
         dp_orders: dpOrders,
-        admin_orders: adminOrders
+        admin_orders: adminOrders,
+        offline_orders: offlineOrders
       };
 
       const changes = isUpdate ? computeReportDiff(prevSnapshot, nextSnapshot) : [
@@ -2648,8 +2893,18 @@ class CashierReport {
       }
 
       const [branchBankRows] = await conn.execute(
-        `SELECT id, name, type FROM bank_accounts WHERE branch_id = ? AND is_active = 1 AND type != 'savings' ORDER BY id ASC`,
-        [branchId]
+        `SELECT ba.id, ba.name, ba.type
+         FROM bank_accounts ba
+         WHERE ba.is_active = 1 AND ba.type != 'savings'
+           AND (
+             ba.branch_id = ?
+             OR EXISTS (
+               SELECT 1 FROM bank_account_branches bab
+               WHERE bab.bank_account_id = ba.id AND bab.branch_id = ?
+             )
+           )
+         ORDER BY ba.id ASC`,
+        [branchId, branchId]
       );
       const bankById = new Map(branchBankRows.map((b) => [Number(b.id), b]));
       const bankByName = new Map(branchBankRows.map((b) => [String(b.name || '').trim().toLowerCase(), b]));
@@ -2736,6 +2991,20 @@ class CashierReport {
         const dpBank = resolveBank(raw.bank_account_id, raw.dp_channel);
         const settlementBank = resolveBank(raw.settlement_bank_account_id, raw.settlement_channel);
 
+        const rawExtra = raw.extra_data && typeof raw.extra_data === 'object' ? raw.extra_data : {};
+        const accountHolderName = String(
+          raw.account_holder_name !== undefined
+            ? raw.account_holder_name
+            : (rawExtra.account_holder_name || '')
+        ).trim();
+        const cleanExtra = { ...rawExtra };
+        if (accountHolderName) {
+          cleanExtra.account_holder_name = accountHolderName;
+        } else {
+          delete cleanExtra.account_holder_name;
+        }
+        const extraDataJson = Object.keys(cleanExtra).length > 0 ? JSON.stringify(cleanExtra) : null;
+
         const rowParams = [
           String(raw.customer_name || '').trim(),
           raw.planned_pickup_date ? String(raw.planned_pickup_date).trim() : null,
@@ -2755,7 +3024,8 @@ class CashierReport {
           ongkirAmt,
           totalAmt,
           raw.pickup_date ? String(raw.pickup_date).trim() : null,
-          raw.notes ? String(raw.notes).trim() : null
+          raw.notes ? String(raw.notes).trim() : null,
+          extraDataJson
         ];
 
         const [existingOrder] = await conn.execute(
@@ -2771,7 +3041,8 @@ class CashierReport {
                customer_name = ?, planned_pickup_date = ?, product_total_amount = ?,
                tf_bca_amount = ?, tf_mandiri_amount = ?, dp_amount = ?, dp_transfer_date = ?, dp_channel = ?, bank_account_id = ?,
                settlement_amount = ?, settlement_transfer_date = ?, settlement_channel = ?, settlement_bank_account_id = ?,
-               ongkir_bca_amount = ?, ongkir_mandiri_amount = ?, ongkir_amount = ?, total_amount = ?, pickup_date = ?, notes = ?
+               ongkir_bca_amount = ?, ongkir_mandiri_amount = ?, ongkir_amount = ?, total_amount = ?, pickup_date = ?, notes = ?,
+               extra_data = ?
              WHERE id = ?`,
             [...rowParams, existingOrder[0].id]
           );
@@ -2781,9 +3052,9 @@ class CashierReport {
              (report_id, order_section, customer_name, planned_pickup_date, product_total_amount,
               tf_bca_amount, tf_mandiri_amount, dp_amount, dp_transfer_date, dp_channel, bank_account_id,
               settlement_amount, settlement_transfer_date, settlement_channel, settlement_bank_account_id,
-              ongkir_bca_amount, ongkir_mandiri_amount, ongkir_amount, total_amount, pickup_date, notes,
+              ongkir_bca_amount, ongkir_mandiri_amount, ongkir_amount, total_amount, pickup_date, notes, extra_data,
               external_reference_id, external_source, sort_order)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [reportId, section, ...rowParams, extRef, externalSource, nextSortOrder++]
           );
         }
@@ -2946,6 +3217,504 @@ class CashierReport {
       id: Number(row.id),
       report_id: Number(row.report_id),
       order_section: row.order_section,
+      is_verified: Boolean(row.is_verified),
+      verified_by: row.verified_by ? Number(row.verified_by) : null,
+      verified_by_name: row.verified_by_name || null,
+      verified_at: row.verified_at || null
+    };
+  }
+
+  static async getPiutangItemById(itemId) {
+    const rows = await query(
+      `SELECT crpi.*, cdr.branch_id as report_branch_id, cdr.report_date
+       FROM cashier_report_piutang_items crpi
+       INNER JOIN cashier_daily_reports cdr ON crpi.report_id = cdr.id
+       WHERE crpi.id = ?
+       LIMIT 1`,
+      [itemId]
+    );
+    return rows[0] || null;
+  }
+
+  static async _resolvePiutangCategory(conn, branchId, requestedCategoryId) {
+    if (requestedCategoryId) {
+      const [rows] = await conn.execute(
+        `SELECT id, name FROM categories WHERE id = ? AND branch_id = ? AND status_deleted = false LIMIT 1`,
+        [requestedCategoryId, branchId]
+      );
+      if (rows[0]) return rows[0];
+    }
+    const [fallbackRows] = await conn.execute(
+      `SELECT id, name FROM categories
+       WHERE branch_id = ? AND type IN ('income', 'both') AND status_deleted = false
+         AND LOWER(name) NOT LIKE '%kas simpanan%'
+         AND LOWER(name) != 'pajak pb1'
+       ORDER BY (LOWER(name) LIKE '%pendapatan lainnya%') DESC, (LOWER(name) LIKE '%omzet%') DESC, id ASC
+       LIMIT 1`,
+      [branchId]
+    );
+    return fallbackRows[0] || null;
+  }
+
+  static async _ensureReportRowForDate(conn, { reportId, branchId, reportDate, user }) {
+    if (reportId > 0) {
+      const [reportRows] = await conn.execute(
+        `SELECT id, branch_id, report_date FROM cashier_daily_reports WHERE id = ? AND branch_id = ? LIMIT 1`,
+        [reportId, branchId]
+      );
+      return reportRows[0] || null;
+    }
+
+    const dateStr = sanitizeDateOnly(reportDate);
+    if (!dateStr) return null;
+
+    const [existingRows] = await conn.execute(
+      `SELECT id, branch_id, report_date FROM cashier_daily_reports WHERE branch_id = ? AND report_date = ? LIMIT 1`,
+      [branchId, dateStr]
+    );
+    if (existingRows[0]) return existingRows[0];
+
+    const legacySnapshot = await this.getLegacyOmzetSnapshot(branchId, dateStr);
+    if (legacySnapshot && legacySnapshot.report?.tx_count === 1) {
+      const lr = legacySnapshot.report;
+      const [ins] = await conn.execute(
+        `INSERT INTO cashier_daily_reports (
+           branch_id, report_date, created_by_names, submitted_by, status,
+           total_customer, apc, omzet_gross, pb1_amount, omzet_net,
+           omzet_sales_app, omzet_sales_cashier, omzet_sales_notes, omzet_sales_lampiran,
+           cash_omzet, kasir_notes, omzet_transaction_id, auto_sync_omzet
+         ) VALUES (?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [
+          branchId,
+          dateStr,
+          lr.created_by_names || null,
+          lr.submitted_by || user?.id || null,
+          lr.total_customer || 0,
+          lr.apc || 0,
+          lr.omzet_gross || 0,
+          lr.pb1_amount || 0,
+          lr.omzet_net || 0,
+          lr.omzet_sales_app ?? null,
+          lr.omzet_sales_cashier ?? null,
+          lr.omzet_sales_notes || null,
+          Array.isArray(lr.omzet_sales_lampiran) && lr.omzet_sales_lampiran.length > 0
+            ? JSON.stringify(lr.omzet_sales_lampiran)
+            : null,
+          lr.cash_omzet || 0,
+          lr.kasir_notes || null,
+          lr.omzet_transaction_id || null
+        ]
+      );
+      const createdId = ins.insertId;
+
+      for (const oi of legacySnapshot.omzet_items || []) {
+        await conn.execute(
+          `INSERT INTO cashier_report_omzet_items
+           (report_id, payment_method_id, channel_name, bank_account_id, amount_app, amount_cashier, is_taxable, pb1_amount, sort_order, notes, lampiran)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            createdId,
+            oi.payment_method_id || null,
+            oi.channel_name || 'Lainnya',
+            oi.bank_account_id || null,
+            toNum(oi.amount_app),
+            toNum(oi.amount_cashier),
+            oi.is_taxable ? 1 : 0,
+            toNum(oi.pb1_amount),
+            oi.sort_order || 0,
+            oi.notes || '',
+            JSON.stringify(Array.isArray(oi.lampiran) ? oi.lampiran : [])
+          ]
+        );
+      }
+
+      for (const sc of legacySnapshot.sales_channel_items || []) {
+        await conn.execute(
+          `INSERT INTO cashier_report_sales_channels
+           (report_id, sales_channel_id, sales_channel_name, payment_method_id, payment_method_name, omzet_item_index, amount, pb1_amount, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            createdId,
+            sc.sales_channel_id || null,
+            sc.sales_channel_name || '',
+            sc.payment_method_id || null,
+            sc.payment_method_name || '',
+            sc.omzet_item_index ?? null,
+            toNum(sc.amount),
+            sc.pb1_amount !== null && sc.pb1_amount !== undefined ? toNum(sc.pb1_amount) : null,
+            sc.sort_order || 0
+          ]
+        );
+      }
+
+      return { id: createdId, branch_id: branchId, report_date: dateStr };
+    }
+
+    const [insEmpty] = await conn.execute(
+      `INSERT INTO cashier_daily_reports (branch_id, report_date, created_by_names, submitted_by, status)
+       VALUES (?, ?, ?, ?, 'submitted')`,
+      [branchId, dateStr, user?.name || user?.email || null, user?.id || null]
+    );
+    return { id: insEmpty.insertId, branch_id: branchId, report_date: dateStr };
+  }
+
+  static async createPiutangItem({ reportId, reportDate, branchId, payload, user }) {
+    const rawEntries = Array.isArray(payload?.items) ? payload.items : [payload];
+    if (rawEntries.length === 0) {
+      const err = new Error('Minimal 1 item Piutang Mitra wajib diisi.');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const validatedEntries = rawEntries.map((entry, idx) => {
+      const rowLabel = rawEntries.length > 1 ? `Baris #${idx + 1}: ` : '';
+      const mitraId = parseInt(entry?.mitra_piutang_id, 10);
+      if (!Number.isFinite(mitraId) || mitraId <= 0) {
+        const err = new Error(`${rowLabel}Mitra Piutang wajib dipilih.`);
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const amount = round2(entry?.amount);
+      const paidAmount = round2(entry?.paid_amount || 0);
+      if (amount <= 0) {
+        const err = new Error(`${rowLabel}Nominal piutang wajib lebih dari 0.`);
+        err.statusCode = 400;
+        throw err;
+      }
+      if (paidAmount < 0 || paidAmount > amount) {
+        const err = new Error(`${rowLabel}DP / Sudah Dibayar tidak boleh negatif atau melebihi nominal piutang.`);
+        err.statusCode = 400;
+        throw err;
+      }
+
+      return {
+        mitraId,
+        amount,
+        paidAmount,
+        remainingDebt: Math.max(0, round2(amount - paidAmount)),
+        categoryIdInput: entry?.category_id ? parseInt(entry.category_id, 10) : null,
+        bankAccountId: paidAmount > 0 && entry?.bank_account_id ? parseInt(entry.bank_account_id, 10) : null,
+        notesText: String(entry?.notes || '').trim()
+      };
+    });
+
+    return await dbTransaction(async (conn) => {
+      const report = await this._ensureReportRowForDate(conn, {
+        reportId: Number(reportId) || 0,
+        branchId,
+        reportDate: reportDate || payload?.report_date,
+        user
+      });
+      if (!report) {
+        const err = new Error('Laporan kasir tidak ditemukan.');
+        err.statusCode = 404;
+        throw err;
+      }
+      const targetReportId = Number(report.id);
+      const dateStr = sanitizeDateOnly(report.report_date);
+
+      const createdItems = [];
+      const logSummaries = [];
+
+      for (const item of validatedEntries) {
+        const [mitraRows] = await conn.execute(
+          `SELECT id, nama FROM mitra_piutang WHERE id = ? AND branch_id = ? AND deleted_at IS NULL LIMIT 1`,
+          [item.mitraId, branchId]
+        );
+        const mitra = mitraRows[0];
+        if (!mitra) {
+          const err = new Error('Mitra Piutang tidak ditemukan di cabang ini.');
+          err.statusCode = 404;
+          throw err;
+        }
+
+        const category = await this._resolvePiutangCategory(conn, branchId, item.categoryIdInput);
+        const txNote = item.notesText || `Piutang Mitra - ${mitra.nama} (Laporan Kasir ${dateStr})`;
+
+        const [insItem] = await conn.execute(
+          `INSERT INTO cashier_report_piutang_items
+           (report_id, branch_id, mitra_piutang_id, category_id, bank_account_id, amount, paid_amount, remaining_debt, notes, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            targetReportId,
+            branchId,
+            item.mitraId,
+            category ? category.id : null,
+            item.bankAccountId,
+            item.amount,
+            item.paidAmount,
+            item.remainingDebt,
+            item.notesText || null,
+            user?.id || null
+          ]
+        );
+        const itemId = insItem.insertId;
+
+        const extRef = `cashier_report_piutang_${itemId}`;
+        const [insTx] = await conn.execute(
+          `INSERT INTO transactions
+           (user_id, branch_id, type, category_id, amount, note, transaction_date, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_draft, external_reference_id, status_deleted)
+           VALUES (?, ?, 'income', ?, ?, ?, ?, true, true, ?, ?, ?, ?, false, ?, false)`,
+          [
+            user?.id || null,
+            branchId,
+            category ? category.id : null,
+            item.amount,
+            txNote,
+            dateStr,
+            item.paidAmount,
+            item.remainingDebt,
+            item.mitraId,
+            item.bankAccountId,
+            extRef
+          ]
+        );
+        const txId = insTx.insertId;
+
+        await conn.execute(
+          `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
+           VALUES (?, ?, ?, ?, ?)`,
+          [txId, item.mitraId, item.amount, item.paidAmount, item.remainingDebt]
+        );
+
+        await conn.execute(
+          `UPDATE cashier_report_piutang_items SET transaction_id = ? WHERE id = ?`,
+          [txId, itemId]
+        );
+
+        createdItems.push({ id: itemId, transaction_id: txId });
+        logSummaries.push(
+          `Piutang Mitra "${mitra.nama}" ${formatCurrencySimple(item.amount)} (Sisa: ${formatCurrencySimple(item.remainingDebt)}, #${txId})`
+        );
+      }
+
+      const logText =
+        createdItems.length === 1
+          ? `Menambahkan ${logSummaries[0]}`
+          : `Menambahkan ${createdItems.length} Piutang Mitra: ${logSummaries.join('; ')}`;
+
+      await conn.execute(
+        `INSERT INTO cashier_report_logs (report_id, user_id, user_name, user_role, action, summary, changes_json)
+         VALUES (?, ?, ?, ?, 'update', ?, ?)`,
+        [
+          targetReportId,
+          user?.id || null,
+          user?.name || user?.email || 'Admin',
+          user?.role || 'admin',
+          logText,
+          JSON.stringify([{ field: 'piutang_items', label: 'Input Piutang Mitra', oldValue: null, newValue: logText }])
+        ]
+      );
+
+      return {
+        id: createdItems[0].id,
+        count: createdItems.length,
+        items: createdItems,
+        report_id: targetReportId,
+        report_date: dateStr,
+        transaction_id: createdItems[0].transaction_id
+      };
+    });
+  }
+
+  static async updatePiutangItem({ itemId, branchId, payload, user }) {
+    const mitraId = parseInt(payload?.mitra_piutang_id, 10);
+    if (!Number.isFinite(mitraId) || mitraId <= 0) {
+      const err = new Error('Mitra Piutang wajib dipilih.');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const amount = round2(payload?.amount);
+    const paidAmount = round2(payload?.paid_amount || 0);
+    if (amount <= 0) {
+      const err = new Error('Nominal piutang wajib lebih dari 0.');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (paidAmount < 0 || paidAmount > amount) {
+      const err = new Error('DP / Sudah Dibayar tidak boleh negatif atau melebihi nominal piutang.');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const categoryIdInput = payload?.category_id ? parseInt(payload.category_id, 10) : null;
+    const bankAccountId = payload?.bank_account_id ? parseInt(payload.bank_account_id, 10) : null;
+    const notesText = String(payload?.notes || '').trim();
+
+    return await dbTransaction(async (conn) => {
+      const [itemRows] = await conn.execute(
+        `SELECT crpi.*, cdr.report_date
+         FROM cashier_report_piutang_items crpi
+         INNER JOIN cashier_daily_reports cdr ON crpi.report_id = cdr.id
+         WHERE crpi.id = ? AND crpi.branch_id = ?
+         LIMIT 1`,
+        [itemId, branchId]
+      );
+      const existing = itemRows[0];
+      if (!existing) {
+        const err = new Error('Data Piutang Mitra tidak ditemukan.');
+        err.statusCode = 404;
+        throw err;
+      }
+
+      const [mitraRows] = await conn.execute(
+        `SELECT id, nama FROM mitra_piutang WHERE id = ? AND branch_id = ? AND deleted_at IS NULL LIMIT 1`,
+        [mitraId, branchId]
+      );
+      const mitra = mitraRows[0];
+      if (!mitra) {
+        const err = new Error('Mitra Piutang tidak ditemukan di cabang ini.');
+        err.statusCode = 404;
+        throw err;
+      }
+
+      let totalRepayments = 0;
+      if (existing.transaction_id) {
+        const [repayRows] = await conn.execute(
+          `SELECT COALESCE(SUM(amount), 0) as total_repaid
+           FROM transaction_repayments
+           WHERE transaction_id = ? AND deleted_at IS NULL`,
+          [existing.transaction_id]
+        );
+        totalRepayments = round2(repayRows[0]?.total_repaid || 0);
+      }
+
+      // Enforce audit-piutang-kas formula: remaining_debt = Porsi Nominal - max(DP, Total Repayments)
+      const effectivePaid = Math.max(paidAmount, totalRepayments);
+      if (amount < effectivePaid) {
+        const err = new Error(`Nominal piutang tidak boleh lebih kecil dari pembayaran/cicilan yang sudah masuk (${formatCurrencySimple(effectivePaid)}).`);
+        err.statusCode = 400;
+        throw err;
+      }
+      const remainingDebt = Math.max(0, round2(amount - effectivePaid));
+
+      const category = await this._resolvePiutangCategory(conn, branchId, categoryIdInput);
+      const dateStr = sanitizeDateOnly(existing.report_date);
+      const txNote = notesText || `Piutang Mitra - ${mitra.nama} (Laporan Kasir ${dateStr})`;
+
+      await conn.execute(
+        `UPDATE cashier_report_piutang_items
+         SET mitra_piutang_id = ?, category_id = ?, bank_account_id = ?, amount = ?, paid_amount = ?, remaining_debt = ?, notes = ?
+         WHERE id = ?`,
+        [mitraId, category ? category.id : null, bankAccountId, amount, effectivePaid, remainingDebt, notesText || null, itemId]
+      );
+
+      if (existing.transaction_id) {
+        await conn.execute(
+          `UPDATE transactions
+           SET category_id = ?, amount = ?, note = ?, paid_amount = ?, remaining_debt = ?, mitra_piutang_id = ?, bank_account_id = ?
+           WHERE id = ? AND status_deleted = false`,
+          [category ? category.id : null, amount, txNote, effectivePaid, remainingDebt, mitraId, bankAccountId, existing.transaction_id]
+        );
+        await conn.execute(`DELETE FROM transaction_mitra_details WHERE transaction_id = ?`, [existing.transaction_id]);
+        await conn.execute(
+          `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
+           VALUES (?, ?, ?, ?, ?)`,
+          [existing.transaction_id, mitraId, amount, effectivePaid, remainingDebt]
+        );
+      }
+
+      const summary = `Memperbarui Piutang Mitra "${mitra.nama}" menjadi ${formatCurrencySimple(amount)} (Sisa: ${formatCurrencySimple(remainingDebt)})`;
+      await conn.execute(
+        `INSERT INTO cashier_report_logs (report_id, user_id, user_name, user_role, action, summary, changes_json)
+         VALUES (?, ?, ?, ?, 'update', ?, ?)`,
+        [
+          existing.report_id,
+          user?.id || null,
+          user?.name || user?.email || 'Admin',
+          user?.role || 'admin',
+          summary,
+          JSON.stringify([{ field: 'piutang_items', label: 'Edit Piutang Mitra', oldValue: formatCurrencySimple(existing.amount), newValue: summary }])
+        ]
+      );
+
+      return { id: itemId, transaction_id: existing.transaction_id };
+    });
+  }
+
+  static async deletePiutangItem({ itemId, branchId, user }) {
+    return await dbTransaction(async (conn) => {
+      const [itemRows] = await conn.execute(
+        `SELECT crpi.*, mp.nama as mitra_nama
+         FROM cashier_report_piutang_items crpi
+         LEFT JOIN mitra_piutang mp ON crpi.mitra_piutang_id = mp.id
+         WHERE crpi.id = ? AND crpi.branch_id = ?
+         LIMIT 1`,
+        [itemId, branchId]
+      );
+      const existing = itemRows[0];
+      if (!existing) {
+        const err = new Error('Data Piutang Mitra tidak ditemukan.');
+        err.statusCode = 404;
+        throw err;
+      }
+
+      if (existing.transaction_id) {
+        const [repayRows] = await conn.execute(
+          `SELECT COUNT(*) as cnt FROM transaction_repayments WHERE transaction_id = ? AND deleted_at IS NULL`,
+          [existing.transaction_id]
+        );
+        if (Number(repayRows[0]?.cnt || 0) > 0) {
+          const err = new Error('Piutang ini sudah memiliki riwayat cicilan/pelunasan. Hapus cicilan di menu Mitra Piutang terlebih dahulu.');
+          err.statusCode = 400;
+          throw err;
+        }
+        const nowSql = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        await conn.execute(
+          `UPDATE transactions SET status_deleted = true, deleted_at = ? WHERE id = ?`,
+          [nowSql, existing.transaction_id]
+        );
+      }
+
+      await conn.execute(`DELETE FROM cashier_report_piutang_items WHERE id = ?`, [itemId]);
+
+      const summary = `Menghapus Piutang Mitra "${existing.mitra_nama || '-'}" sebesar ${formatCurrencySimple(existing.amount)}`;
+      await conn.execute(
+        `INSERT INTO cashier_report_logs (report_id, user_id, user_name, user_role, action, summary, changes_json)
+         VALUES (?, ?, ?, ?, 'update', ?, ?)`,
+        [
+          existing.report_id,
+          user?.id || null,
+          user?.name || user?.email || 'Admin',
+          user?.role || 'admin',
+          summary,
+          JSON.stringify([{ field: 'piutang_items', label: 'Hapus Piutang Mitra', oldValue: summary, newValue: null }])
+        ]
+      );
+
+      return { id: itemId, report_id: Number(existing.report_id) };
+    });
+  }
+
+  static async togglePiutangVerification({ itemId, isVerified, user }) {
+    const nextVerified = isVerified ? 1 : 0;
+    const verifiedBy = nextVerified ? (user?.id || null) : null;
+    const verifiedAt = nextVerified ? new Date() : null;
+
+    await query(
+      `UPDATE cashier_report_piutang_items
+       SET is_verified = ?, verified_by = ?, verified_at = ?
+       WHERE id = ?`,
+      [nextVerified, verifiedBy, verifiedAt, itemId]
+    );
+
+    const updatedRows = await query(
+      `SELECT crpi.id, crpi.report_id, crpi.is_verified, crpi.verified_by, crpi.verified_at,
+              COALESCE(uv.name, uv.email) as verified_by_name
+       FROM cashier_report_piutang_items crpi
+       LEFT JOIN users uv ON crpi.verified_by = uv.id
+       WHERE crpi.id = ?
+       LIMIT 1`,
+      [itemId]
+    );
+
+    const row = updatedRows[0];
+    if (!row) return null;
+    return {
+      id: Number(row.id),
+      report_id: Number(row.report_id),
       is_verified: Boolean(row.is_verified),
       verified_by: row.verified_by ? Number(row.verified_by) : null,
       verified_by_name: row.verified_by_name || null,

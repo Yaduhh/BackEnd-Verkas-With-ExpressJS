@@ -418,7 +418,16 @@ class FundTransfer {
     `;
     const logs = await query(dataSql, [...params, parseInt(limit), parseInt(offset)]);
 
-    const allBankAccounts = await query('SELECT id, name, type, account_number FROM bank_accounts WHERE branch_id = ?', [branchId]);
+    const allBankAccounts = await query(
+      `SELECT ba.id, ba.name, ba.type, ba.account_number
+       FROM bank_accounts ba
+       WHERE ba.branch_id = ?
+         OR EXISTS (
+           SELECT 1 FROM bank_account_branches bab
+           WHERE bab.bank_account_id = ba.id AND bab.branch_id = ?
+         )`,
+      [branchId, branchId]
+    );
     const bankMap = new Map();
     allBankAccounts.forEach(ba => bankMap.set(ba.id, ba.name));
 

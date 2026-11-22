@@ -1,6 +1,9 @@
+const axios = require('axios');
 const CashierReport = require('../models/CashierReport');
 const Branch = require('../models/Branch');
 const LockedPeriod = require('../models/LockedPeriod');
+const { query } = require('../config/database');
+const { parseOrderExcelPreview, buildOrderExcelTemplate } = require('../services/cashierOrderExcelService');
 
 const REVIEWER_ROLES = new Set(['admin', 'owner', 'co-owner', 'master']);
 
@@ -8,6 +11,63 @@ function resolveBranchId(req) {
   const raw = req.query.branch_id || req.body?.branch_id || req.branchId || req.headers['x-branch-id'];
   const parsed = parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function authorizePiutangItemAction(req, res, { mode = 'edit' } = {}) {
+  if (!REVIEWER_ROLES.has(req.user.role)) {
+    res.status(403).json({
+      success: false,
+      message: 'Hanya Admin, Co-Owner, Owner, atau Master yang dapat mengelola Piutang Mitra.'
+    });
+    return null;
+  }
+
+  if (req.user.role === 'admin') {
+    if (mode === 'delete' && req.user.can_delete === false) {
+      res.status(403).json({
+        success: false,
+        message: 'Akses Ditolak: Akun Admin Anda tidak memiliki izin hapus.'
+      });
+      return null;
+    }
+    if (mode !== 'delete' && req.user.can_edit === false) {
+      res.status(403).json({
+        success: false,
+        message: 'Akses Ditolak: Akun Admin Anda tidak memiliki izin edit/verifikasi.'
+      });
+      return null;
+    }
+  }
+
+  const itemId = parseInt(req.params.itemId, 10);
+  if (!Number.isFinite(itemId) || itemId <= 0) {
+    res.status(400).json({ success: false, message: 'ID item piutang tidak valid.' });
+    return null;
+  }
+
+  const item = await CashierReport.getPiutangItemById(itemId);
+  if (!item) {
+    res.status(404).json({ success: false, message: 'Data Piutang Mitra tidak ditemukan.' });
+    return null;
+  }
+
+  const branchId = Number(item.report_branch_id);
+  const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+  if (!hasAccess) {
+    res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+    return null;
+  }
+
+  const dateOnly = item.report_date ? String(item.report_date).slice(0, 10) : '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) {
+    const [yStr, mStr] = dateOnly.split('-');
+    if (await LockedPeriod.isLocked(branchId, parseInt(mStr, 10), parseInt(yStr, 10))) {
+      res.status(403).json({ success: false, message: 'Pembukuan untuk periode tanggal ini sudah dikunci.' });
+      return null;
+    }
+  }
+
+  return { itemId, item, branchId, dateOnly };
 }
 
 const cashierReportController = {
@@ -52,12 +112,13 @@ const cashierReportController = {
       const month = parseInt(req.query.month, 10) || (now.getMonth() + 1);
       const year = parseInt(req.query.year, 10) || now.getFullYear();
 
-      const [items, target] = await Promise.all([
+      const [items, target, branch_config] = await Promise.all([
         CashierReport.listByMonth({ branchId, month, year }),
-        CashierReport.getBranchTarget(branchId, month, year)
+        CashierReport.getBranchTarget(branchId, month, year),
+        CashierReport.getBranchConfig(branchId)
       ]);
 
-      return res.json({ success: true, data: { items, target, month, year } });
+      return res.json({ success: true, data: { items, target, branch_config, month, year } });
     } catch (error) {
       if (error.statusCode) {
         return res.status(error.statusCode).json({ success: false, message: error.message });
@@ -117,6 +178,170 @@ const cashierReportController = {
           ? 'Laporan harian kasir tersimpan & omzet kas berhasil disinkronkan.'
           : 'Laporan harian kasir berhasil disimpan.',
         data: fullData
+      });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
+  // POST /api/cashier-reports/pull-pesan-bosgil
+  // Tarik data order terbaru langsung dari Pesan-BosGiL backend lalu sinkronkan ke 2 tabel order saja
+  pullPesanBosgilOrders: async (req, res, next) => {
+    try {
+      const branchId = resolveBranchId(req);
+      if (!branchId) {
+        return res.status(400).json({ success: false, message: 'Branch ID wajib dipilih.' });
+      }
+
+      const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+      }
+
+      if (req.user.role === 'admin' && req.user.can_create === false && req.user.can_edit === false) {
+        return res.status(403).json({
+          success: false,
+          message: 'Akses Ditolak: Akun Admin Anda tidak memiliki izin menarik/memperbarui data order.'
+        });
+      }
+
+      const reportDate = req.body?.report_date || req.body?.date || req.query?.date;
+      if (!reportDate || !/^\d{4}-\d{2}-\d{2}/.test(String(reportDate))) {
+        return res.status(400).json({ success: false, message: 'Format tanggal laporan harus YYYY-MM-DD.' });
+      }
+
+      const dateOnly = String(reportDate).slice(0, 10);
+      const [yStr, mStr] = dateOnly.split('-');
+      const isLocked = await LockedPeriod.isLocked(branchId, parseInt(mStr, 10), parseInt(yStr, 10));
+      if (isLocked) {
+        return res.status(403).json({
+          success: false,
+          message: 'Pembukuan untuk periode tanggal ini sudah dikunci.'
+        });
+      }
+
+      const branch = await Branch.findById(branchId);
+      if (!branch) {
+        return res.status(404).json({ success: false, message: 'Cabang VerKas tidak ditemukan.' });
+      }
+
+      // Resolve shared secret / active VerKas API key so Pesan-BosGiL recognizes VerKas backend
+      let syncSecret = String(
+        process.env.PESAN_BOSGIL_SYNC_SECRET || process.env.PESAN_BOSGIL_API_KEY || ''
+      ).trim();
+      if (!syncSecret) {
+        try {
+          const keyRows = await query(
+            `SELECT api_key FROM api_keys
+             WHERE is_active = 1
+               AND (expires_at IS NULL OR expires_at > NOW())
+               AND (branch_id = ? OR branch_id IS NULL)
+             ORDER BY (branch_id = ?) DESC, id DESC
+             LIMIT 1`,
+            [branchId, branchId]
+          );
+          if (keyRows && keyRows[0]?.api_key) {
+            syncSecret = String(keyRows[0].api_key).trim();
+          }
+        } catch (keyErr) {
+          console.warn('[CashierReport pullPesanBosgilOrders] Lookup api_keys gagal:', keyErr.message);
+        }
+      }
+
+      const pesanBosgilBaseUrl = String(
+        process.env.PESAN_BOSGIL_API_URL || 'http://127.0.0.1:3002'
+      ).replace(/\/+$/, '');
+
+      const headers = { 'Content-Type': 'application/json' };
+      if (syncSecret) {
+        headers['X-API-Key'] = syncSecret;
+        headers['X-Verkas-Sync-Secret'] = syncSecret;
+      }
+
+      let pulledData;
+      try {
+        const response = await axios.post(
+          `${pesanBosgilBaseUrl}/verkas-sync/pull-orders`,
+          {
+            report_date: dateOnly,
+            branch_id: branch.id,
+            branch_code: branch.code || '',
+            branch_key: req.body?.branch_key || '',
+            branch_name: branch.name || ''
+          },
+          { headers, timeout: 15000 }
+        );
+        pulledData = response.data?.data;
+      } catch (pullErr) {
+        const remoteStatus = pullErr.response?.status;
+        const remoteMsg = pullErr.response?.data?.message;
+        if (remoteStatus) {
+          return res.status(remoteStatus >= 400 && remoteStatus < 500 ? remoteStatus : 502).json({
+            success: false,
+            message: remoteMsg || `Gagal menarik data dari Pesan-BosGiL (HTTP ${remoteStatus}).`
+          });
+        }
+        return res.status(502).json({
+          success: false,
+          message: `Server Pesan-BosGiL tidak dapat dihubungi (${pesanBosgilBaseUrl}): ${pullErr.message}`
+        });
+      }
+
+      const pulledOrders = Array.isArray(pulledData?.orders) ? pulledData.orders : [];
+      const fetchedRefsSet = new Set(
+        pulledOrders.map((o) => String(o?.external_reference_id || '').trim()).filter(Boolean)
+      );
+
+      // Clean up stale pesan_bosgil rows that were previously synced for this date but no longer exist/match
+      const existingReport = await CashierReport.getDailyReport(branchId, dateOnly);
+      const existingBosgilRefs = [
+        ...(existingReport?.dp_orders || []),
+        ...(existingReport?.admin_orders || [])
+      ]
+        .filter((o) => o?.external_source === 'pesan_bosgil' && o?.external_reference_id)
+        .map((o) => String(o.external_reference_id).trim());
+
+      const missingFromFreshPull = existingBosgilRefs.filter((ref) => !fetchedRefsSet.has(ref));
+      const mergedDeleteRefs = Array.from(
+        new Set([
+          ...(Array.isArray(pulledData?.delete_external_refs) ? pulledData.delete_external_refs : []),
+          ...missingFromFreshPull
+        ])
+      );
+
+      const synced = await CashierReport.syncExternalOrders({
+        branchId,
+        reportDate: dateOnly,
+        externalSource: 'pesan_bosgil',
+        orders: pulledOrders,
+        deleteExternalRefs: mergedDeleteRefs,
+        user: {
+          id: req.user?.id || req.userId || null,
+          name: req.user?.name ? `${req.user.name} (Sinkron Pesan-BosGiL)` : 'Sinkron Pesan-BosGiL',
+          role: req.user?.role || 'kasir'
+        }
+      });
+
+      const fullData = await CashierReport.getDailyReport(branchId, dateOnly);
+      const dpCount = Number(pulledData?.dp_deposit_count || 0);
+      const adminCount = Number(pulledData?.admin_pesanan_count || 0);
+
+      return res.json({
+        success: true,
+        message: `Sinkron Pesan-BosGiL selesai (${dpCount} DP/Deposit, ${adminCount} Admin Pesanan).`,
+        data: {
+          ...fullData,
+          sync_result: {
+            ...synced,
+            fetched_orders: pulledOrders.length,
+            dp_deposit_count: dpCount,
+            admin_pesanan_count: adminCount,
+            bosgil_branch: pulledData?.branch_key || null
+          }
+        }
       });
     } catch (error) {
       if (error.statusCode) {
@@ -190,13 +415,6 @@ const cashierReportController = {
         });
       }
 
-      if (req.user.role === 'admin' && req.user.can_edit === false) {
-        return res.status(403).json({
-          success: false,
-          message: 'Akses Ditolak: Akun Admin Anda tidak memiliki izin edit.'
-        });
-      }
-
       const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
       if (!hasAccess) {
         return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
@@ -210,6 +428,22 @@ const cashierReportController = {
       const existing = await CashierReport.getReportSnapshotById(reportId);
       if (!existing || Number(existing.report.branch_id) !== Number(branchId)) {
         return res.status(404).json({ success: false, message: 'Laporan kasir tidak ditemukan.' });
+      }
+
+      const hasExistingSalesChannels = Array.isArray(existing.sales_channel_items) && existing.sales_channel_items.length > 0;
+      if (req.user.role === 'admin') {
+        if (hasExistingSalesChannels && req.user.can_edit === false) {
+          return res.status(403).json({
+            success: false,
+            message: 'Akses Ditolak: Akun Admin Anda tidak memiliki izin edit.'
+          });
+        }
+        if (!hasExistingSalesChannels && req.user.can_create === false && req.user.can_edit === false) {
+          return res.status(403).json({
+            success: false,
+            message: 'Akses Ditolak: Akun Admin Anda tidak memiliki izin input/edit Sales Channel.'
+          });
+        }
       }
 
       const dateOnly = String(existing.report.report_date).slice(0, 10);
@@ -588,6 +822,267 @@ const cashierReportController = {
         message: nextVerified ? 'Order ditandai sudah dicek/benar.' : 'Verifikasi order dibatalkan.',
         data: updated
       });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
+  // POST /api/cashier-reports/:reportId/piutang
+  createPiutangItem: async (req, res, next) => {
+    try {
+      const branchId = resolveBranchId(req);
+      if (!branchId) {
+        return res.status(400).json({ success: false, message: 'Branch ID wajib dipilih.' });
+      }
+
+      if (!REVIEWER_ROLES.has(req.user.role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Hanya Admin, Co-Owner, Owner, atau Master yang dapat menginput Piutang Mitra.'
+        });
+      }
+
+      if (req.user.role === 'admin' && req.user.can_create === false && req.user.can_edit === false) {
+        return res.status(403).json({
+          success: false,
+          message: 'Akses Ditolak: Akun Admin Anda tidak memiliki izin input Piutang Mitra.'
+        });
+      }
+
+      const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+      }
+
+      const reportId = parseInt(req.params.reportId, 10);
+      if (!Number.isFinite(reportId) || reportId < 0) {
+        return res.status(400).json({ success: false, message: 'ID laporan tidak valid.' });
+      }
+
+      let dateOnly = '';
+      if (reportId > 0) {
+        const existing = await CashierReport.getReportSnapshotById(reportId);
+        if (!existing || Number(existing.report.branch_id) !== Number(branchId)) {
+          return res.status(404).json({ success: false, message: 'Laporan kasir tidak ditemukan.' });
+        }
+        dateOnly = String(existing.report.report_date).slice(0, 10);
+      } else {
+        const rawDate = String(req.body?.report_date || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+          return res.status(400).json({ success: false, message: 'Tanggal laporan (report_date) wajib disertakan.' });
+        }
+        dateOnly = rawDate;
+      }
+
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) {
+        const [yStr, mStr] = dateOnly.split('-');
+        if (await LockedPeriod.isLocked(branchId, parseInt(mStr, 10), parseInt(yStr, 10))) {
+          return res.status(403).json({ success: false, message: 'Pembukuan untuk periode tanggal ini sudah dikunci.' });
+        }
+      }
+
+      const created = await CashierReport.createPiutangItem({
+        reportId,
+        reportDate: dateOnly,
+        branchId,
+        payload: req.body,
+        user: req.user
+      });
+
+      const fullData = await CashierReport.getDailyReport(branchId, created.report_date || dateOnly);
+      return res.status(201).json({
+        success: true,
+        message:
+          created.count > 1
+            ? `${created.count} Piutang Mitra berhasil dicatat ke Transaksi dan saldo Mitra Piutang.`
+            : `Piutang Mitra berhasil dicatat ke Transaksi #${created.transaction_id} dan saldo Mitra Piutang.`,
+        data: fullData
+      });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
+  // PUT /api/cashier-reports/piutang/:itemId
+  updatePiutangItem: async (req, res, next) => {
+    try {
+      const ctx = await authorizePiutangItemAction(req, res, { mode: 'edit' });
+      if (!ctx) return;
+
+      await CashierReport.updatePiutangItem({
+        itemId: ctx.itemId,
+        branchId: ctx.branchId,
+        payload: req.body,
+        user: req.user
+      });
+
+      const fullData = await CashierReport.getDailyReport(ctx.branchId, ctx.dateOnly);
+      return res.json({
+        success: true,
+        message: 'Piutang Mitra berhasil diperbarui.',
+        data: fullData
+      });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
+  // DELETE /api/cashier-reports/piutang/:itemId
+  deletePiutangItem: async (req, res, next) => {
+    try {
+      const ctx = await authorizePiutangItemAction(req, res, { mode: 'delete' });
+      if (!ctx) return;
+
+      await CashierReport.deletePiutangItem({
+        itemId: ctx.itemId,
+        branchId: ctx.branchId,
+        user: req.user
+      });
+
+      const fullData = await CashierReport.getDailyReport(ctx.branchId, ctx.dateOnly);
+      return res.json({
+        success: true,
+        message: 'Piutang Mitra berhasil dihapus.',
+        data: fullData
+      });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
+  // PUT /api/cashier-reports/piutang/:itemId/verify
+  togglePiutangVerification: async (req, res, next) => {
+    try {
+      const ctx = await authorizePiutangItemAction(req, res, { mode: 'edit' });
+      if (!ctx) return;
+
+      const nextVerified =
+        typeof req.body?.is_verified === 'boolean'
+          ? req.body.is_verified
+          : !Boolean(ctx.item.is_verified);
+
+      const updated = await CashierReport.togglePiutangVerification({
+        itemId: ctx.itemId,
+        isVerified: nextVerified,
+        user: req.user
+      });
+
+      return res.json({
+        success: true,
+        message: nextVerified ? 'Piutang Mitra ditandai sudah dicek/benar.' : 'Verifikasi Piutang Mitra dibatalkan.',
+        data: updated
+      });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
+  // PUT /api/cashier-reports/branch-config
+  updateBranchConfig: async (req, res, next) => {
+    try {
+      const branchId = resolveBranchId(req);
+      if (!branchId) {
+        return res.status(400).json({ success: false, message: 'Branch ID wajib dipilih.' });
+      }
+
+      if (!REVIEWER_ROLES.has(req.user.role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Hanya Admin, Co-Owner, Owner, atau Master yang dapat mengubah template laporan kasir.'
+        });
+      }
+
+      const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+      }
+
+      const { order_template, show_sold_items, show_pesan_bosgil, show_offline_sales, show_hpp, show_entertain_goods, show_tc_apc, show_pb1 } = req.body || {};
+      const updated = await CashierReport.updateBranchConfig(branchId, {
+        order_template,
+        show_sold_items,
+        show_pesan_bosgil,
+        show_offline_sales,
+        show_hpp,
+        show_entertain_goods,
+        show_tc_apc,
+        show_pb1
+      });
+
+      return res.json({
+        success: true,
+        message: 'Pengaturan template laporan kasir berhasil disimpan.',
+        data: updated
+      });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
+  // POST /api/cashier-reports/orders/preview-excel
+  previewOrderExcel: async (req, res, next) => {
+    try {
+      const branchId = resolveBranchId(req);
+      if (!branchId) {
+        return res.status(400).json({ success: false, message: 'Branch ID wajib dipilih.' });
+      }
+
+      const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+      }
+
+      if (!req.file || !req.file.buffer) {
+        return res.status(400).json({ success: false, message: 'File Excel (.xlsx / .xls / .csv) wajib diunggah.' });
+      }
+
+      const tableType = String(req.body?.table_type || req.query.table_type || '').trim();
+      const requestedSheetName = req.body?.sheet_name || req.query.sheet_name || null;
+
+      const data = await parseOrderExcelPreview({
+        buffer: req.file.buffer,
+        branchId,
+        tableType,
+        requestedSheetName: requestedSheetName ? String(requestedSheetName) : null
+      });
+
+      return res.json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
+  // GET /api/cashier-reports/orders/template-excel?table_type=...&branch_name=...
+  downloadOrderExcelTemplate: async (req, res, next) => {
+    try {
+      const tableType = String(req.query.table_type || '').trim();
+      const branchName = String(req.query.branch_name || '').trim();
+      const { buffer, fileName } = await buildOrderExcelTemplate({ tableType, branchName });
+
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      return res.send(Buffer.from(buffer));
     } catch (error) {
       if (error.statusCode) {
         return res.status(error.statusCode).json({ success: false, message: error.message });

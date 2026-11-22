@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const {
   getAll,
+  getByGroup,
   create,
   updateAccount,
   deleteAccount,
@@ -14,6 +15,9 @@ router.use(authenticate);
 
 // Get all bank accounts for branch
 router.get('/', getAll);
+
+// Get all bank accounts across branches in a group
+router.get('/group', getByGroup);
 
 // Get bank account statement & breakdown
 router.get('/:id/statement', getStatement);

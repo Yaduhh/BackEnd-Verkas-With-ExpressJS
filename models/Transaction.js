@@ -1026,10 +1026,12 @@ class Transaction {
       if (!isDraft && pettyCashDetails && pettyCashDetails.length > 0) {
         for (const detail of pettyCashDetails) {
           if (detail.petty_cash_id && parseFloat(detail.amount) > 0) {
+            const detailBankId = detail.bank_account_id ? parseInt(detail.bank_account_id, 10) : null;
+            const detailDesc = detail.description ? String(detail.description).trim() : (note || 'Top-up dari Kas Berjalan');
             await conn.execute(
-              `INSERT INTO petty_cash_transactions (petty_cash_id, branch_id, type, amount, description, transaction_date, source_transaction_id, created_by)
-               VALUES (?, ?, 'topup', ?, ?, ?, ?, ?)`,
-              [detail.petty_cash_id, branchId, detail.amount, note || 'Top-up dari Kas Berjalan', transactionDate, newId, userId || null]
+              `INSERT INTO petty_cash_transactions (petty_cash_id, branch_id, type, amount, description, transaction_date, bank_account_id, source_transaction_id, created_by)
+               VALUES (?, ?, 'topup', ?, ?, ?, ?, ?, ?)`,
+              [detail.petty_cash_id, branchId, detail.amount, detailDesc, transactionDate, detailBankId, newId, userId || null]
             );
           }
         }
@@ -1335,10 +1337,12 @@ class Transaction {
           const effectiveNote = note !== undefined ? note : oldTx?.note;
           for (const detail of pettyCashDetails) {
             if (detail.petty_cash_id && parseFloat(detail.amount) > 0) {
+              const detailBankId = detail.bank_account_id ? parseInt(detail.bank_account_id, 10) : null;
+              const detailDesc = detail.description ? String(detail.description).trim() : (effectiveNote || 'Top-up dari Kas Berjalan');
               await conn.execute(
-                `INSERT INTO petty_cash_transactions (petty_cash_id, branch_id, type, amount, description, transaction_date, source_transaction_id, created_by)
-                 VALUES (?, ?, 'topup', ?, ?, ?, ?, ?)`,
-                [detail.petty_cash_id, effectiveBranchId, detail.amount, effectiveNote || 'Top-up dari Kas Berjalan', effectiveDate, id, oldTx?.user_id || null]
+                `INSERT INTO petty_cash_transactions (petty_cash_id, branch_id, type, amount, description, transaction_date, bank_account_id, source_transaction_id, created_by)
+                 VALUES (?, ?, 'topup', ?, ?, ?, ?, ?, ?)`,
+                [detail.petty_cash_id, effectiveBranchId, detail.amount, detailDesc, effectiveDate, detailBankId, id, oldTx?.user_id || null]
               );
             }
           }
@@ -1611,6 +1615,12 @@ class Transaction {
       // 2. Restore main transaction
       await conn.execute(
         'UPDATE transactions SET status_deleted = false, deleted_at = NULL WHERE id = ?',
+        [id]
+      );
+
+      // 2b. Restore any linked petty cash top-ups
+      await conn.execute(
+        'UPDATE petty_cash_transactions SET status_deleted = 0, deleted_at = NULL WHERE source_transaction_id = ?',
         [id]
       );
 

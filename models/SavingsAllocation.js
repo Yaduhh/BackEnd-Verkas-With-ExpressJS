@@ -15,8 +15,14 @@ class SavingsAllocation {
     const params = [categoryId];
     
     if (branchId) {
-      sql += ' AND ba.branch_id = ?';
-      params.push(branchId);
+      sql += ` AND (
+        ba.branch_id = ?
+        OR EXISTS (
+          SELECT 1 FROM bank_account_branches bab
+          WHERE bab.bank_account_id = ba.id AND bab.branch_id = ?
+        )
+      )`;
+      params.push(branchId, branchId);
     }
     
     sql += ' ORDER BY ba.name ASC';

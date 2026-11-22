@@ -44,9 +44,20 @@ async function resolveValidBankAccount(rawBankAccountId, branchId) {
     return { error: 'Rekening tidak valid' };
   }
   const rows = await query(
-    `SELECT id, name, type, CAST(COALESCE(initial_balance, 0) AS DECIMAL(15, 2)) AS initial_balance
-     FROM bank_accounts WHERE id = ? AND branch_id = ? AND is_active = 1`,
-    [parsed, branchId]
+    `SELECT ba.id, ba.name, ba.type, CAST(COALESCE(ba.initial_balance, 0) AS DECIMAL(15, 2)) AS initial_balance
+     FROM bank_accounts ba
+     WHERE ba.id = ? AND ba.is_active = 1
+       AND (
+         ba.branch_id = ?
+         OR (
+           ba.type != 'savings'
+           AND EXISTS (
+             SELECT 1 FROM bank_account_branches bab
+             WHERE bab.bank_account_id = ba.id AND bab.branch_id = ?
+           )
+         )
+       )`,
+    [parsed, branchId, branchId]
   );
   if (!rows || rows.length === 0) {
     return { error: 'Rekening tidak ditemukan di buku kas ini' };
@@ -73,8 +84,20 @@ async function resolveExpenseBankAccount(rawBankAccountId, branchId, pocket) {
 
   if (pocket?.lock_bank_account && pocket?.bank_account_id) {
     const lockedRows = await query(
-      `SELECT id, name FROM bank_accounts WHERE id = ? AND branch_id = ? AND is_active = 1`,
-      [pocket.bank_account_id, branchId]
+      `SELECT ba.id, ba.name
+       FROM bank_accounts ba
+       WHERE ba.id = ? AND ba.is_active = 1
+         AND (
+           ba.branch_id = ?
+           OR (
+             ba.type != 'savings'
+             AND EXISTS (
+               SELECT 1 FROM bank_account_branches bab
+               WHERE bab.bank_account_id = ba.id AND bab.branch_id = ?
+             )
+           )
+         )`,
+      [pocket.bank_account_id, branchId, branchId]
     );
     if (!lockedRows || lockedRows.length === 0) {
       return { error: 'Rekening yang dikunci pada Kas Kecil ini tidak aktif atau tidak ditemukan' };

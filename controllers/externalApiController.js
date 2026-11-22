@@ -433,19 +433,41 @@ const externalApiController = {
         }));
       }
 
-      // 4. Get Active Bank Accounts
+      // 4. Get Active Bank Accounts (including shared group accounts)
       let bankAccounts = [];
       if (branchIds.length > 0) {
+        const placeholders = branchIds.map(() => '?').join(',');
         const bankRows = await query(
           `SELECT ba.id, ba.name, ba.account_number, ba.type, ba.branch_id,
                   b.name as branch_name
            FROM bank_accounts ba
            JOIN branches b ON ba.branch_id = b.id
-           WHERE ba.branch_id IN (${branchIds.map(() => '?').join(',')})
-             AND ba.is_active = 1
+           WHERE ba.is_active = 1
+             AND (
+               ba.branch_id IN (${placeholders})
+               OR EXISTS (
+                 SELECT 1 FROM bank_account_branches bab
+                 WHERE bab.bank_account_id = ba.id AND bab.branch_id IN (${placeholders})
+               )
+             )
            ORDER BY ba.branch_id ASC, ba.name ASC`,
-          branchIds
+          [...branchIds, ...branchIds]
         );
+
+        const accountIds = bankRows.map((ba) => ba.id);
+        const sharedMap = new Map();
+        if (accountIds.length > 0) {
+          const shareRows = await query(
+            `SELECT bab.bank_account_id, bab.branch_id
+             FROM bank_account_branches bab
+             WHERE bab.bank_account_id IN (${accountIds.map(() => '?').join(',')})`,
+            accountIds
+          );
+          shareRows.forEach((sr) => {
+            if (!sharedMap.has(sr.bank_account_id)) sharedMap.set(sr.bank_account_id, []);
+            sharedMap.get(sr.bank_account_id).push(Number(sr.branch_id));
+          });
+        }
 
         bankAccounts = bankRows.map(ba => ({
           id: ba.id,
@@ -453,7 +475,8 @@ const externalApiController = {
           account_number: ba.account_number || null,
           type: ba.type,
           branch_id: ba.branch_id,
-          branch_name: ba.branch_name
+          branch_name: ba.branch_name,
+          shared_branch_ids: sharedMap.get(ba.id) || [Number(ba.branch_id)]
         }));
       }
 
@@ -527,7 +550,39 @@ const externalApiController = {
         }
       }
 
-      // 7. Get Active VerKas Users belonging ONLY to this API Key's VerKas account/team
+      // 7. Get Active Petty Cash Pockets (Kas Kecil) for accessible branches
+      let pettyCashes = [];
+      if (branchIds.length > 0) {
+        try {
+          const pcRows = await query(
+            `SELECT pc.id, pc.branch_id, pc.name, pc.description, pc.bank_account_id, pc.lock_bank_account,
+                    ba.name AS bank_account_name, ba.account_number AS bank_account_number,
+                    b.name AS branch_name
+             FROM petty_cashes pc
+             JOIN branches b ON pc.branch_id = b.id
+             LEFT JOIN bank_accounts ba ON pc.bank_account_id = ba.id
+             WHERE pc.branch_id IN (${branchIds.map(() => '?').join(',')})
+               AND pc.status_deleted = 0
+             ORDER BY pc.branch_id ASC, pc.name ASC`,
+            branchIds
+          );
+          pettyCashes = pcRows.map(pc => ({
+            id: pc.id,
+            branch_id: pc.branch_id,
+            branch_name: pc.branch_name || null,
+            name: pc.name,
+            description: pc.description || null,
+            bank_account_id: pc.bank_account_id || null,
+            lock_bank_account: Boolean(pc.bank_account_id && pc.lock_bank_account),
+            bank_account_name: pc.bank_account_name || null,
+            bank_account_number: pc.bank_account_number || null
+          }));
+        } catch (pcErr) {
+          console.warn('[ExternalAPI getMeta petty_cashes]:', pcErr.message);
+        }
+      }
+
+      // 8. Get Active VerKas Users belonging ONLY to this API Key's VerKas account/team
       const verkasUsers = await getScopedVerkasUsers(ownerId);
 
       return res.json({
@@ -554,6 +609,7 @@ const externalApiController = {
           categories,
           products,
           bank_accounts: bankAccounts,
+          petty_cashes: pettyCashes,
           locked_periods: lockedPeriods
         }
       });
@@ -590,6 +646,8 @@ const externalApiController = {
         mitra_piutang_id,
         is_savings,
         savings_details,
+        is_petty_cash,
+        petty_cash_details,
         product_items,
         is_umum = true,
         is_pb1_payment,
@@ -769,11 +827,13 @@ const externalApiController = {
 
       if (finalBankAccountId) {
         const targetAccount = await BankAccount.findById(finalBankAccountId);
-        if (
+        const isAccountAccessibleInBranch =
           targetAccount &&
           targetAccount.is_active &&
-          parseInt(targetAccount.branch_id) === parseInt(finalBranchId)
-        ) {
+          (parseInt(targetAccount.branch_id) === parseInt(finalBranchId) ||
+            (Array.isArray(targetAccount.shared_branch_ids) &&
+              targetAccount.shared_branch_ids.includes(parseInt(finalBranchId))));
+        if (isAccountAccessibleInBranch) {
           resolvedBankAccount = targetAccount;
         } else {
           // Account belongs to previous branch or is inactive -> pick matching account in target branch
@@ -857,6 +917,67 @@ const externalApiController = {
               category_id: sdCatId,
               category_name: sdCatName,
               amount: parseFloat(sd.amount)
+            });
+          }
+        }
+      }
+
+      // Normalize petty_cash_details across branches if needed
+      let normalizedPettyCashDetails = undefined;
+      if (Array.isArray(petty_cash_details)) {
+        normalizedPettyCashDetails = [];
+        for (const pcd of petty_cash_details) {
+          const pcdAmount = parseFloat(pcd?.amount || 0);
+          if (!pcd || isNaN(pcdAmount) || pcdAmount <= 0) continue;
+          let pcId = pcd.petty_cash_id ? parseInt(pcd.petty_cash_id, 10) : null;
+          let pcName = pcd.petty_cash_name ? String(pcd.petty_cash_name).trim() : '';
+
+          if (pcId) {
+            const pcRows = await query(
+              `SELECT id, branch_id, name FROM petty_cashes WHERE id = ? AND status_deleted = 0 LIMIT 1`,
+              [pcId]
+            );
+            const pcRec = pcRows[0];
+            if (!pcRec || parseInt(pcRec.branch_id) !== parseInt(finalBranchId)) {
+              const lookupPcName = (pcName || pcRec?.name || '').trim();
+              pcId = null;
+              if (lookupPcName) {
+                const matchedPcRows = await query(
+                  `SELECT id, name FROM petty_cashes
+                   WHERE branch_id = ? AND LOWER(TRIM(name)) = LOWER(TRIM(?)) AND status_deleted = 0
+                   LIMIT 1`,
+                  [finalBranchId, lookupPcName]
+                );
+                if (matchedPcRows.length > 0) {
+                  pcId = matchedPcRows[0].id;
+                  pcName = matchedPcRows[0].name;
+                }
+              }
+            } else {
+              pcName = pcRec.name;
+            }
+          } else if (pcName) {
+            const matchedPcRows = await query(
+              `SELECT id, name FROM petty_cashes
+               WHERE branch_id = ? AND LOWER(TRIM(name)) = LOWER(TRIM(?)) AND status_deleted = 0
+               LIMIT 1`,
+              [finalBranchId, pcName]
+            );
+            if (matchedPcRows.length > 0) {
+              pcId = matchedPcRows[0].id;
+              pcName = matchedPcRows[0].name;
+            }
+          }
+
+          if (pcId) {
+            const shouldDeductBank = Boolean(pcd.deduct_bank_account || pcd.bank_account_id);
+            const resolvedDetailBankId = shouldDeductBank ? finalBankAccountId : null;
+            normalizedPettyCashDetails.push({
+              petty_cash_id: pcId,
+              petty_cash_name: pcName,
+              amount: pcdAmount,
+              bank_account_id: resolvedDetailBankId,
+              description: pcd.description ? String(pcd.description).trim() : null
             });
           }
         }
@@ -1023,6 +1144,23 @@ const externalApiController = {
               ? existingTx.bank_account_id
               : finalBankAccountId;
 
+          const effectiveUpdatePettyCashDetails = isPb1PaymentVal
+            ? []
+            : Array.isArray(normalizedPettyCashDetails)
+            ? normalizedPettyCashDetails.map((d) => ({
+                ...d,
+                bank_account_id: d.bank_account_id ? effectiveUpdateBankAccountId : null
+              }))
+            : (is_petty_cash === false ? [] : undefined);
+
+          const effectiveUpdateIsPettyCash = isPb1PaymentVal
+            ? false
+            : is_petty_cash !== undefined
+            ? (Boolean(is_petty_cash) || (Array.isArray(effectiveUpdatePettyCashDetails) && effectiveUpdatePettyCashDetails.length > 0))
+            : Array.isArray(effectiveUpdatePettyCashDetails)
+            ? effectiveUpdatePettyCashDetails.length > 0
+            : undefined;
+
           await Transaction.update(existingTx.id, {
             branchId: parseInt(finalBranchId),
             amount: finalTxAmount,
@@ -1036,6 +1174,7 @@ const externalApiController = {
               : is_savings !== undefined
               ? (Boolean(is_savings) || (Array.isArray(normalizedSavingsDetails) && normalizedSavingsDetails.length > 0))
               : undefined,
+            isPettyCash: effectiveUpdateIsPettyCash,
             note: note ? note.trim() : existingTx.note,
             lampiran: formattedLampiran !== null ? formattedLampiran : existingTx.lampiran,
             savingsDetails: isPb1PaymentVal
@@ -1043,6 +1182,7 @@ const externalApiController = {
               : Array.isArray(normalizedSavingsDetails)
               ? normalizedSavingsDetails
               : (is_savings === false ? [] : undefined),
+            pettyCashDetails: effectiveUpdatePettyCashDetails,
             productItems: Array.isArray(normalizedProductItems) ? normalizedProductItems : undefined
           });
 
@@ -1080,6 +1220,8 @@ const externalApiController = {
               bank_account_id: finalBankAccountId,
               bank_account_name: resolvedBankAccount ? resolvedBankAccount.name : null,
               is_pb1_payment: is_pb1_payment !== undefined ? isPb1PaymentVal : Boolean(existingTx.is_pb1_payment),
+              is_petty_cash: Boolean(effectiveUpdateIsPettyCash),
+              petty_cash_details: Array.isArray(effectiveUpdatePettyCashDetails) ? effectiveUpdatePettyCashDetails : [],
               external_reference_id: existingTx.external_reference_id,
               creator_verkas_user: creatorResolved,
               actor_verkas_user: actorResolved
@@ -1093,6 +1235,13 @@ const externalApiController = {
         : is_umum !== undefined
         ? (is_umum === true || is_umum === 1 || is_umum === '1' || is_umum === 'true')
         : true;
+
+      const finalCreatePettyCashDetails = isPb1PaymentVal
+        ? []
+        : (Array.isArray(normalizedPettyCashDetails) ? normalizedPettyCashDetails : []);
+      const finalCreateIsPettyCash = isPb1PaymentVal
+        ? false
+        : (Boolean(is_petty_cash) || finalCreatePettyCashDetails.length > 0);
 
       // Create Transaction (userId = creatorResolved.id so "Dibuat Oleh" shows Pembuat PO)
       const createdTx = await Transaction.create({
@@ -1111,6 +1260,8 @@ const externalApiController = {
         mitraPiutangId: mitra_piutang_id ? parseInt(mitra_piutang_id) : null,
         isSavings: isPb1PaymentVal ? false : (Boolean(is_savings) || (Array.isArray(normalizedSavingsDetails) && normalizedSavingsDetails.length > 0)),
         savingsDetails: isPb1PaymentVal ? [] : (Array.isArray(normalizedSavingsDetails) ? normalizedSavingsDetails : []),
+        isPettyCash: finalCreateIsPettyCash,
+        pettyCashDetails: finalCreatePettyCashDetails,
         productItems: Array.isArray(normalizedProductItems) ? normalizedProductItems : [],
         note: note ? note.trim() : `[External Sync] ${type === 'income' ? 'Pemasukan' : 'Pengeluaran'} ${finalCategoryName}`,
         transactionDate: txDate,
@@ -1139,6 +1290,8 @@ const externalApiController = {
           lampiran: formattedLampiran,
           is_umum: finalCreateIsUmum,
           is_pb1_payment: isPb1PaymentVal,
+          is_petty_cash: finalCreateIsPettyCash,
+          petty_cash_details: finalCreatePettyCashDetails,
           external_sync_by: actorName
         },
         status: 'approved'
@@ -1159,6 +1312,8 @@ const externalApiController = {
           bank_account_name: updatedAccount ? updatedAccount.name : null,
           remaining_bank_balance: updatedAccount ? updatedAccount.balance : null,
           is_pb1_payment: isPb1PaymentVal,
+          is_petty_cash: finalCreateIsPettyCash,
+          petty_cash_details: finalCreatePettyCashDetails,
           external_reference_id: external_reference_id || null
         }
       });
