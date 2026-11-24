@@ -49,9 +49,35 @@ const round2 = (val) => Math.round((toNum(val) + Number.EPSILON) * 100) / 100;
 
 const sanitizeDateOnly = (val) => {
   if (!val) return null;
+  if (val instanceof Date) {
+    if (Number.isNaN(val.getTime())) return null;
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0');
+    const d = String(val.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
   const s = String(val).trim();
   const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
   return m ? m[1] : null;
+};
+
+const getJakartaTodayDateOnly = () =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(new Date());
+
+const parseJsonObjectSafe = (raw) => {
+  if (!raw) return {};
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  try {
+    const parsed = JSON.parse(String(raw));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 };
 
 const getEffectiveOmzetRowAmount = (item) => {
@@ -3338,6 +3364,370 @@ class CashierReport {
       verified_by_name: row.verified_by_name || null,
       verified_at: row.verified_at || null
     };
+  }
+
+  /**
+   * Compute active & recently released customer deposit balance (Saldo Deposit) for a branch as of `asOfDate` (Option A):
+   * - Includes `dp_deposit` rows whose payment occurred on or before `cutoffDate`
+   * - Deduplicates multi-day Pesan-BosGiL rows belonging to the same order (`_dep_dp`, `_dep_lunas`, `_dep`)
+   * - Active if not explicitly picked up on/before `cutoffDate` AND (`planned_pickup_date` is empty OR `planned_pickup_date > cutoffDate`)
+   * - Calculates actual cash received (`DP` only when unpaid/partially paid as of `cutoffDate`; full `TOTAL` when settled/paid upfront)
+   */
+  static async getDepositBalance({ branchId, asOfDate = null }) {
+    await ensureOrderPaymentMethodColumns();
+
+    const cutoffDate = sanitizeDateOnly(asOfDate) || getJakartaTodayDateOnly();
+    const branchConfig = await this.getBranchConfig(branchId);
+    const isTokoOnline = branchConfig?.order_template === 'toko_online';
+
+    const rows = await query(
+      `SELECT cro.*,
+              DATE_FORMAT(cdr.report_date, '%Y-%m-%d') AS report_date_str,
+              pm_dp.name AS dp_payment_method_name,
+              pm_set.name AS settlement_payment_method_name,
+              ba.name AS bank_account_name,
+              ba_set.name AS settlement_bank_account_name
+       FROM cashier_report_orders cro
+       INNER JOIN cashier_daily_reports cdr ON cro.report_id = cdr.id
+       LEFT JOIN payment_methods pm_dp ON cro.dp_payment_method_id = pm_dp.id
+       LEFT JOIN payment_methods pm_set ON cro.settlement_payment_method_id = pm_set.id
+       LEFT JOIN bank_accounts ba ON cro.bank_account_id = ba.id
+       LEFT JOIN bank_accounts ba_set ON cro.settlement_bank_account_id = ba_set.id
+       WHERE cdr.branch_id = ?
+         AND cro.order_section IN ('dp_deposit', 'admin_pesanan')
+       ORDER BY cdr.report_date ASC, cro.sort_order ASC, cro.id ASC`,
+      [branchId]
+    );
+
+    const normalizeBosgilOrderKey = (extSource, extRef) => {
+      if (extSource !== 'pesan_bosgil' || !extRef) return null;
+      return String(extRef).trim().replace(/_(dep_dp|dep_lunas|dep)$/, '');
+    };
+
+    // Index BosGiL admin_pesanan pickup_date (actual picked_up_at synced from Pesan-BosGiL)
+    const bosgilAdminMap = new Map();
+    for (const r of rows) {
+      if (r.order_section !== 'admin_pesanan') continue;
+      const key = normalizeBosgilOrderKey(r.external_source, r.external_reference_id);
+      if (!key) continue;
+      const pickupD = sanitizeDateOnly(r.pickup_date);
+      const reportD = sanitizeDateOnly(r.report_date_str);
+      const prev = bosgilAdminMap.get(key);
+      if (!prev || (pickupD && !prev.pickupDate)) {
+        bosgilAdminMap.set(key, { pickupDate: pickupD, reportDate: reportD });
+      }
+    }
+
+    // Filter & deduplicate dp_deposit candidates as of `cutoffDate`
+    const candidateMap = new Map();
+    for (const r of rows) {
+      if (r.order_section !== 'dp_deposit') continue;
+
+      const reportDate = sanitizeDateOnly(r.report_date_str);
+      const dpDate = sanitizeDateOnly(r.dp_transfer_date);
+      const settledDate = sanitizeDateOnly(r.settlement_transfer_date);
+
+      const paidDates = [dpDate, settledDate].filter(Boolean).sort();
+      const firstPaidDate = paidDates[0] || reportDate;
+      if (firstPaidDate && firstPaidDate > cutoffDate) {
+        // Payment happened after cutoff date
+        continue;
+      }
+
+      const bosgilKey = normalizeBosgilOrderKey(r.external_source, r.external_reference_id);
+      const dedupKey = bosgilKey ? `bosgil:${bosgilKey}` : `row:${r.id}`;
+
+      const prev = candidateMap.get(dedupKey);
+      if (!prev) {
+        candidateMap.set(dedupKey, r);
+      } else {
+        const prevSettled = sanitizeDateOnly(prev.settlement_transfer_date);
+        const curSettledValid = Boolean(settledDate && settledDate <= cutoffDate);
+        const prevSettledValid = Boolean(prevSettled && prevSettled <= cutoffDate);
+        if (curSettledValid && !prevSettledValid) {
+          candidateMap.set(dedupKey, r);
+        } else if (curSettledValid === prevSettledValid) {
+          const prevReport = sanitizeDateOnly(prev.report_date_str) || '';
+          if ((reportDate || '') >= prevReport) {
+            candidateMap.set(dedupKey, r);
+          }
+        }
+      }
+    }
+
+    const activeItems = [];
+    const releasedItems = [];
+    const channelStatsMap = new Map();
+
+    const addChannelStat = (label, bankAccountName, amount) => {
+      if (amount <= 0) return;
+      const cleanLabel = String(label || '').trim() || 'Lainnya';
+      const family = detectBankFamily(cleanLabel) || detectBankFamily(bankAccountName) || 'other';
+      const key = cleanLabel.toLowerCase();
+      if (!channelStatsMap.has(key)) {
+        channelStatsMap.set(key, {
+          channel_name: cleanLabel,
+          bank_account_name: bankAccountName || null,
+          bank_family: family,
+          total_amount: 0,
+          count: 0
+        });
+      }
+      const entry = channelStatsMap.get(key);
+      entry.total_amount = round2(entry.total_amount + amount);
+      entry.count += 1;
+    };
+
+    for (const r of candidateMap.values()) {
+      const extra = parseJsonObjectSafe(r.extra_data);
+      const reportDate = sanitizeDateOnly(r.report_date_str);
+      const dpDate = sanitizeDateOnly(r.dp_transfer_date);
+      const settledDate = sanitizeDateOnly(r.settlement_transfer_date);
+      const rawPlanned = sanitizeDateOnly(r.planned_pickup_date);
+      const rawRowPickup = sanitizeDateOnly(r.pickup_date);
+      const closedAtExtra = sanitizeDateOnly(extra.deposit_closed_at);
+
+      const productTotal = round2(r.product_total_amount);
+      const ongkir = round2(
+        r.ongkir_amount !== undefined && r.ongkir_amount !== null && toNum(r.ongkir_amount) > 0
+          ? r.ongkir_amount
+          : toNum(r.ongkir_bca_amount) + toNum(r.ongkir_mandiri_amount)
+      );
+      const totalOrder = round2(toNum(r.total_amount) > 0 ? r.total_amount : productTotal + ongkir);
+      if (totalOrder <= 0 && toNum(r.dp_amount) <= 0) continue;
+
+      const dpAmt = round2(r.dp_amount);
+      const settlementAmt = round2(r.settlement_amount);
+
+      const dpPaidAsOf = dpAmt > 0 && (!dpDate || dpDate <= cutoffDate) ? dpAmt : 0;
+      const settledDateAsOf = Boolean(settledDate && settledDate <= cutoffDate);
+      const settledAmtAsOf = settlementAmt > 0 && (!settledDate || settledDate <= cutoffDate);
+
+      let depositAmount = 0;
+      let remainingToPay = 0;
+      let paymentStatus = 'paid';
+
+      if (dpPaidAsOf > 0 && !settledDateAsOf && !settledAmtAsOf) {
+        depositAmount = dpPaidAsOf;
+        remainingToPay = Math.max(0, round2(totalOrder - depositAmount));
+        paymentStatus = remainingToPay > 0 ? 'dp' : 'paid';
+      } else if (dpPaidAsOf > 0 && (settledDateAsOf || settledAmtAsOf)) {
+        depositAmount = settlementAmt > 0 ? Math.min(totalOrder, round2(dpPaidAsOf + settlementAmt)) : totalOrder;
+        remainingToPay = Math.max(0, round2(totalOrder - depositAmount));
+        paymentStatus = remainingToPay > 0 ? 'dp' : 'paid';
+      } else {
+        depositAmount = totalOrder;
+        remainingToPay = 0;
+        paymentStatus = 'paid';
+      }
+
+      if (depositAmount <= 0) continue;
+
+      const bosgilKey = normalizeBosgilOrderKey(r.external_source, r.external_reference_id);
+      const adminMatch = bosgilKey ? bosgilAdminMap.get(bosgilKey) : null;
+
+      // Option A pickup / release date resolution
+      const plannedDate = isTokoOnline ? (rawPlanned || rawRowPickup) : rawPlanned;
+      const explicitPickupDate = isTokoOnline
+        ? closedAtExtra
+        : (rawRowPickup || adminMatch?.pickupDate || closedAtExtra);
+
+      const isPickedUpManually = Boolean(explicitPickupDate && explicitPickupDate <= cutoffDate);
+      const isPastPlannedDate = Boolean(!isPickedUpManually && plannedDate && plannedDate <= cutoffDate);
+      const depositStatus = isPickedUpManually
+        ? 'picked_up'
+        : isPastPlannedDate
+          ? 'auto_released'
+          : 'active';
+
+      const dpLabel =
+        r.dp_payment_method_name || r.dp_channel || r.bank_account_name || '';
+      const setLabel =
+        r.settlement_payment_method_name || r.settlement_channel || r.settlement_bank_account_name || dpLabel;
+
+      const primaryChannel = paymentStatus === 'paid' && !dpPaidAsOf ? setLabel : dpLabel;
+      const primaryBank = paymentStatus === 'paid' && !dpPaidAsOf
+        ? (r.settlement_bank_account_name || r.bank_account_name || null)
+        : (r.bank_account_name || null);
+
+      const formattedItem = {
+        id: Number(r.id),
+        report_id: Number(r.report_id),
+        report_date: reportDate,
+        customer_name: r.customer_name || '-',
+        account_holder_name: extra.account_holder_name ? String(extra.account_holder_name).trim() : '',
+        external_source: r.external_source || null,
+        external_reference_id: r.external_reference_id || null,
+        planned_pickup_date: plannedDate,
+        actual_pickup_date: explicitPickupDate,
+        dp_transfer_date: dpDate,
+        settlement_transfer_date: settledDateAsOf ? settledDate : null,
+        product_total_amount: productTotal,
+        ongkir_amount: ongkir,
+        total_amount: totalOrder,
+        dp_amount: dpPaidAsOf,
+        settlement_amount: paymentStatus === 'paid' && dpPaidAsOf > 0 ? Math.max(0, round2(depositAmount - dpPaidAsOf)) : 0,
+        deposit_amount: depositAmount,
+        remaining_to_pay: remainingToPay,
+        payment_status: paymentStatus,
+        deposit_status: depositStatus,
+        channel_name: primaryChannel || '-',
+        bank_account_name: primaryBank,
+        settlement_channel_name: setLabel && setLabel !== dpLabel ? setLabel : null,
+        item_name: extra.item_name ? String(extra.item_name) : '',
+        order_channel: extra.order_channel ? String(extra.order_channel) : '',
+        notes: r.notes || '',
+        is_verified: Boolean(r.is_verified)
+      };
+
+      if (depositStatus === 'active') {
+        activeItems.push(formattedItem);
+        if (dpPaidAsOf > 0 && paymentStatus === 'paid' && dpLabel && setLabel && dpLabel !== setLabel) {
+          const settledPortion = Math.max(0, round2(depositAmount - dpPaidAsOf));
+          addChannelStat(dpLabel, r.bank_account_name || null, dpPaidAsOf);
+          addChannelStat(setLabel, r.settlement_bank_account_name || null, settledPortion);
+        } else {
+          addChannelStat(primaryChannel, primaryBank, depositAmount);
+        }
+      } else {
+        releasedItems.push(formattedItem);
+      }
+    }
+
+    activeItems.sort((a, b) => {
+      const pA = a.planned_pickup_date || '9999-12-31';
+      const pB = b.planned_pickup_date || '9999-12-31';
+      if (pA !== pB) return pA.localeCompare(pB);
+      return String(b.report_date || '').localeCompare(String(a.report_date || '')) || (b.id - a.id);
+    });
+
+    releasedItems.sort((a, b) => {
+      const dA = a.actual_pickup_date || a.planned_pickup_date || a.report_date || '';
+      const dB = b.actual_pickup_date || b.planned_pickup_date || b.report_date || '';
+      if (dA !== dB) return dB.localeCompare(dA);
+      return b.id - a.id;
+    });
+
+    const activeDpItems = activeItems.filter((i) => i.payment_status === 'dp');
+    const activePaidItems = activeItems.filter((i) => i.payment_status === 'paid');
+
+    const summary = {
+      active_count: activeItems.length,
+      active_deposit_total: round2(activeItems.reduce((s, i) => s + i.deposit_amount, 0)),
+      active_order_total: round2(activeItems.reduce((s, i) => s + i.total_amount, 0)),
+      active_ongkir_total: round2(activeItems.reduce((s, i) => s + i.ongkir_amount, 0)),
+      active_remaining_total: round2(activeItems.reduce((s, i) => s + i.remaining_to_pay, 0)),
+      active_dp_only_count: activeDpItems.length,
+      active_dp_only_amount: round2(activeDpItems.reduce((s, i) => s + i.deposit_amount, 0)),
+      active_paid_count: activePaidItems.length,
+      active_paid_amount: round2(activePaidItems.reduce((s, i) => s + i.deposit_amount, 0)),
+      by_channel: Array.from(channelStatsMap.values()).sort((a, b) => b.total_amount - a.total_amount),
+      released_count: releasedItems.length,
+      released_deposit_total: round2(releasedItems.reduce((s, i) => s + i.deposit_amount, 0))
+    };
+
+    return {
+      as_of_date: cutoffDate,
+      order_template: branchConfig?.order_template || 'outlet',
+      summary,
+      active_items: activeItems,
+      released_items: releasedItems.slice(0, 100)
+    };
+  }
+
+  /**
+   * Mark a dp_deposit order row as picked up, reopen it, or extend its planned_pickup_date.
+   */
+  static async updateDepositPickupStatus({ orderId, action, pickupDate = null, plannedPickupDate = null, user = null }) {
+    return await dbTransaction(async (conn) => {
+      const [rows] = await conn.execute(
+        `SELECT cro.*, DATE_FORMAT(cdr.report_date, '%Y-%m-%d') AS report_date_str,
+                cdr.branch_id, b.cashier_order_template
+         FROM cashier_report_orders cro
+         INNER JOIN cashier_daily_reports cdr ON cro.report_id = cdr.id
+         INNER JOIN branches b ON cdr.branch_id = b.id
+         WHERE cro.id = ? AND cro.order_section = 'dp_deposit'
+         LIMIT 1`,
+        [orderId]
+      );
+      const order = rows[0];
+      if (!order) {
+        const err = new Error('Data DP / Deposit tidak ditemukan.');
+        err.statusCode = 404;
+        throw err;
+      }
+
+      const isTokoOnline = order.cashier_order_template === 'toko_online';
+      const extra = parseJsonObjectSafe(order.extra_data);
+      const todayStr = getJakartaTodayDateOnly();
+
+      let nextPlanned = sanitizeDateOnly(order.planned_pickup_date);
+      let nextPickup = sanitizeDateOnly(order.pickup_date);
+      let summaryLog = '';
+
+      if (action === 'mark_picked_up') {
+        const effectiveDate = sanitizeDateOnly(pickupDate) || todayStr;
+        if (isTokoOnline) {
+          extra.deposit_closed_at = effectiveDate;
+        } else {
+          nextPickup = effectiveDate;
+          delete extra.deposit_closed_at;
+        }
+        summaryLog = `Menandai deposit "${order.customer_name || '-'}" sudah diambil/selesai (${effectiveDate})`;
+      } else if (action === 'extend_planned' || action === 'reopen') {
+        const targetPlanned = sanitizeDateOnly(plannedPickupDate);
+        if (action === 'extend_planned' && !targetPlanned) {
+          const err = new Error('Tanggal rencana ambil/kirim baru wajib diisi.');
+          err.statusCode = 400;
+          throw err;
+        }
+        if (isTokoOnline) {
+          if (targetPlanned) nextPickup = targetPlanned;
+          delete extra.deposit_closed_at;
+        } else {
+          if (targetPlanned) nextPlanned = targetPlanned;
+          nextPickup = null;
+          delete extra.deposit_closed_at;
+        }
+        summaryLog = targetPlanned
+          ? `Mengubah rencana ambil/kirim deposit "${order.customer_name || '-'}" ke ${targetPlanned}`
+          : `Membuka kembali status deposit "${order.customer_name || '-'}"`;
+      } else {
+        const err = new Error('Aksi tidak dikenali.');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const nextExtraJson = Object.keys(extra).length > 0 ? JSON.stringify(extra) : null;
+      await conn.execute(
+        `UPDATE cashier_report_orders
+         SET planned_pickup_date = ?, pickup_date = ?, extra_data = ?
+         WHERE id = ?`,
+        [nextPlanned, nextPickup, nextExtraJson, orderId]
+      );
+
+      await conn.execute(
+        `INSERT INTO cashier_report_logs (report_id, branch_id, report_date, user_id, user_name, user_role, action, summary, changes)
+         VALUES (?, ?, ?, ?, ?, ?, 'update', ?, ?)`,
+        [
+          order.report_id,
+          order.branch_id,
+          order.report_date_str || getJakartaTodayDateOnly(),
+          user?.id || null,
+          user?.name || user?.email || 'Admin',
+          user?.role || 'admin',
+          summaryLog,
+          JSON.stringify([{ field: 'deposit_status', label: 'Status Saldo Deposit', oldValue: null, newValue: summaryLog }])
+        ]
+      );
+
+      return {
+        id: Number(orderId),
+        branch_id: Number(order.branch_id),
+        planned_pickup_date: nextPlanned,
+        pickup_date: nextPickup
+      };
+    });
   }
 
   static async getPiutangItemById(itemId) {

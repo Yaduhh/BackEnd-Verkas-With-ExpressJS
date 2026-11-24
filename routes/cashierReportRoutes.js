@@ -17,6 +17,8 @@ router.get('/daily', cashierReportController.getDaily);
 router.put('/daily', cashierReportController.saveDaily);
 router.post('/pull-pesan-bosgil', cashierReportController.pullPesanBosgilOrders);
 router.get('/monthly', cashierReportController.listMonthly);
+router.get('/deposits', cashierReportController.getDepositBalance);
+router.put('/deposits/:orderId/pickup', cashierReportController.updateDepositPickupStatus);
 router.put('/targets', cashierReportController.upsertTarget);
 router.put('/branch-config', cashierReportController.updateBranchConfig);
 router.get('/orders/template-excel', cashierReportController.downloadOrderExcelTemplate);

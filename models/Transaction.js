@@ -5,6 +5,7 @@ const {
   getTransactionPb1SubquerySql,
   getTransactionTaxableAmountSubquerySql
 } = require('../utils/pb1Helper');
+const { ensurePerformanceIndexesOnce } = require('../utils/performanceIndexes');
 
 class Transaction {
   // Find by ID
@@ -234,6 +235,8 @@ class Transaction {
     isDraft = undefined,
     includeDraft = false
   } = {}) {
+    await ensurePerformanceIndexesOnce();
+
     let selectFields = `
       SELECT t.*, b.name as branch_name, b.code as branch_code,
              c.name as category_name, c.min_attachment as category_min_attachment, COALESCE(u.name, u.email) as user_name,
@@ -314,6 +317,28 @@ class Transaction {
       joinDetailsParams.push(validMitraId);
     }
 
+    // Match parent date/status/draft filters inside derived tables so MySQL aggregates only the active window instead of full branch history
+    let subExtraClause = '';
+    const subExtraParams = [];
+    if (!includeDeleted && !onlyDeleted) {
+      subExtraClause += ' AND t_sub.status_deleted = false';
+    } else if (onlyDeleted) {
+      subExtraClause += ' AND t_sub.status_deleted = true';
+    }
+    if (isDraft === true || isDraft === 'true') {
+      subExtraClause += ' AND t_sub.is_draft = true';
+    } else if (!includeDraft) {
+      subExtraClause += ' AND (t_sub.is_draft = false OR t_sub.is_draft IS NULL)';
+    }
+    if (startDate && typeof startDate === 'string' && startDate.trim() !== '') {
+      subExtraClause += ' AND t_sub.transaction_date >= ?';
+      subExtraParams.push(startDate.trim() + ' 00:00:00');
+    }
+    if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
+      subExtraClause += ' AND t_sub.transaction_date <= ?';
+      subExtraParams.push(endDate.trim() + ' 23:59:59');
+    }
+
     let joinFutureRefund = '';
     const futureRefundParams = [];
     if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
@@ -323,11 +348,11 @@ class Transaction {
           SELECT tref.transaction_id, SUM(tref.amount) as total_future_refund 
           FROM transaction_refunds tref
           JOIN transactions t_sub ON t_sub.id = tref.transaction_id
-          WHERE tref.refund_date > ? AND ${subBranchClause}
+          WHERE tref.refund_date > ? AND ${subBranchClause}${subExtraClause}
           GROUP BY tref.transaction_id
         ) t_future_ref ON t.id = t_future_ref.transaction_id
       `;
-      futureRefundParams.push(parsedEnd, ...validBranchParams);
+      futureRefundParams.push(parsedEnd, ...validBranchParams, ...subExtraParams);
     } else {
       joinFutureRefund = `
         LEFT JOIN (
@@ -337,9 +362,9 @@ class Transaction {
     }
 
     const params = [
-      ...validBranchParams, // tid_agg
-      ...validBranchParams, // tr_sum
-      ...validBranchParams, // t_ref
+      ...validBranchParams, ...subExtraParams, // tid_agg
+      ...validBranchParams, ...subExtraParams, // tr_sum
+      ...validBranchParams, ...subExtraParams, // t_ref
       ...joinDetailsParams, // joinDetails
       ...futureRefundParams, // joinFutureRefund
       ...validBranchParams  // main WHERE branch filter
@@ -362,7 +387,7 @@ class Transaction {
         JOIN transactions t_sub ON t_sub.id = tid.transaction_id
         LEFT JOIN bank_accounts ba_sub ON tid.bank_account_id = ba_sub.id
         LEFT JOIN payment_methods pm ON tid.payment_method_id = pm.id
-        WHERE ${subBranchClause}
+        WHERE ${subBranchClause}${subExtraClause}
         GROUP BY tid.transaction_id
       ) tid_agg ON t.id = tid_agg.transaction_id
       LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id AND tr_notif.deleted_at IS NULL
@@ -371,14 +396,14 @@ class Transaction {
         SELECT tr.transaction_id, SUM(tr.amount) as total_repayment 
         FROM transaction_repayments tr
         JOIN transactions t_sub ON t_sub.id = tr.transaction_id
-        WHERE ${subBranchClause} AND tr.deleted_at IS NULL
+        WHERE ${subBranchClause}${subExtraClause} AND tr.deleted_at IS NULL
         GROUP BY tr.transaction_id
       ) tr_sum ON t.id = tr_sum.transaction_id
       LEFT JOIN (
         SELECT tref.transaction_id, SUM(tref.amount) as total_refund 
         FROM transaction_refunds tref
         JOIN transactions t_sub ON t_sub.id = tref.transaction_id
-        WHERE ${subBranchClause}
+        WHERE ${subBranchClause}${subExtraClause}
         GROUP BY tref.transaction_id
       ) t_ref ON t.id = t_ref.transaction_id
       ${joinDetails}
@@ -1736,322 +1761,401 @@ class Transaction {
 
   // Get summary for date range
   static async getSummary({ userId, branchId, branchIds = null, categoryId, subCategoryId, startDate, endDate, includeDeleted = false, excludeFolders = false, onlyFolders = false, isUmum = undefined }) {
-    const params = [];
+    await ensurePerformanceIndexesOnce();
 
-    // Conditionally build portions of the query
-    let joinDetails = '';
-    let pengeluaranCase = `t.amount`;
-    let categoryConditionForIncome = `FALSE`;
-    let categoryConditionForExpense = `TRUE`;
+    const runLegacySummary = async () => {
+      const params = [];
 
-    const selectParams = [];
-    if (startDate && typeof startDate === 'string' && startDate.includes('-')) {
-      const parts = startDate.split('-');
-      const startOfMonth = `${parts[0]}-${parts[1]}-01 00:00:00`;
-      selectParams.push(startOfMonth);
-    }
+      // Conditionally build portions of the query
+      let joinDetails = '';
+      let categoryConditionForExpense = `TRUE`;
 
-    if (categoryId) {
-      joinDetails = `
-        LEFT JOIN (
-          /* Virtual detail amount for specific category summary */
-          SELECT transaction_id, category_id, amount FROM transaction_savings_details
-        ) tsd_active ON t.id = tsd_active.transaction_id AND (tsd_active.category_id = ? OR EXISTS (SELECT 1 FROM categories c_sub WHERE c_sub.id = tsd_active.category_id AND c_sub.parent_id = ?))
-      `;
-      params.push(categoryId, categoryId);
-      pengeluaranCase = `CASE WHEN tsd_active.amount IS NOT NULL THEN tsd_active.amount ELSE t.amount END`;
-      categoryConditionForIncome = `TRUE`;
-      categoryConditionForExpense = `FALSE`;
-    }
-
-    let joinFutureRefund = '';
-    if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
-      const parsedEnd = endDate.trim().split(' ')[0].split('T')[0];
-      joinFutureRefund = `
-        LEFT JOIN (
-          SELECT transaction_id, SUM(amount) as total_future_refund 
-          FROM transaction_refunds 
-          WHERE refund_date > ? 
-          GROUP BY transaction_id
-        ) t_future_ref ON t.id = t_future_ref.transaction_id
-      `;
-      params.push(parsedEnd);
-    } else {
-      joinFutureRefund = `
-        LEFT JOIN (
-          SELECT NULL as transaction_id, 0 as total_future_refund
-        ) t_future_ref ON 1=0
-      `;
-    }
-
-    let sql = `
-      SELECT 
-        COALESCE(SUM(CASE 
-          WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-            (t.amount + COALESCE(t_future_ref.total_future_refund, 0))
-          ELSE 0 
-        END), 0) as omzet_gross,
-
-        COALESCE(SUM(CASE 
-          WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-            COALESCE(
-              ${getTransactionTaxableAmountSubquerySql('t')},
-              0
-            )
-          ELSE 0 
-        END), 0) as omzet_taxable,
-
-        COALESCE(SUM(CASE 
-          WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-            ${getTransactionPb1SubquerySql('t')}
-          ELSE 0 
-        END), 0) as omzet_pb1,
-
-        COALESCE(SUM(CASE 
-          WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-            (t.amount + COALESCE(t_future_ref.total_future_refund, 0)) 
-          ELSE 0 
-        END), 0) as lain_gross,
-
-        COALESCE(SUM(CASE 
-          WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-            COALESCE(
-              ${getTransactionTaxableAmountSubquerySql('t')},
-              0
-            )
-          ELSE 0 
-        END), 0) as lain_taxable,
-
-        COALESCE(SUM(CASE 
-          WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-            ${getTransactionPb1SubquerySql('t')}
-          ELSE 0 
-        END), 0) as lain_pb1,
-
-        COALESCE(SUM(CASE 
-          WHEN t.type = 'income' AND (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL AND ${startDate ? 't_parent.transaction_date < ?' : 'FALSE'} THEN t.amount
-          ELSE 0
-        END), 0) as pelunasan_piutang_lalu,
-
-        COALESCE(SUM(CASE 
-          WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryConditionForExpense}) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN (t.amount + COALESCE(t_future_ref.total_future_refund, 0)) + COALESCE(t.pb1, 0)
-          ELSE 0 
-        END), 0) as pengeluaran,
-
-        COALESCE(SUM(CASE 
-          WHEN t.type = 'income' AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-            COALESCE(
-              ${getTransactionTaxableAmountSubquerySql('t')},
-              t.pb1 * 11,
-              0
-            )
-          ELSE 0 
-        END), 0) as total_taxable,
-
-        COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.is_pb1_payment = true THEN t.amount ELSE 0 END), 0) as total_pb1_paid
-      FROM transactions t
-      LEFT JOIN categories c ON t.category_id = c.id
-      /* Join untuk dapet total pelunasan per transaksi */
-      LEFT JOIN (
-        SELECT transaction_id, SUM(amount) as total_repayment 
-        FROM transaction_repayments 
-        WHERE deleted_at IS NULL
-        GROUP BY transaction_id
-      ) tr_sum ON t.id = tr_sum.transaction_id
-      LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id AND tr_notif.deleted_at IS NULL
-      LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
-      LEFT JOIN (
-        SELECT transaction_id, SUM(amount) as total_refund 
-        FROM transaction_refunds 
-        GROUP BY transaction_id
-      ) t_ref ON t.id = t_ref.transaction_id
-      ${joinDetails}
-      ${joinFutureRefund}
-      WHERE 1=1
-    `;
-
-    // User ID
-    if (userId) {
-      sql += ' AND t.user_id = ?';
-      params.push(userId);
-    }
-
-    // Branch ID or Branch IDs
-    if (branchIds && Array.isArray(branchIds) && branchIds.length > 0) {
-      const validIds = branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
-      if (validIds.length > 0) {
-        const placeholders = validIds.map(() => '?').join(',');
-        sql += ` AND t.branch_id IN (${placeholders})`;
-        params.push(...validIds);
+      const selectParams = [];
+      if (startDate && typeof startDate === 'string' && startDate.includes('-')) {
+        const parts = startDate.split('-');
+        const startOfMonth = `${parts[0]}-${parts[1]}-01 00:00:00`;
+        selectParams.push(startOfMonth);
       }
-    } else if (branchId) {
-      sql += ' AND t.branch_id = ?';
-      params.push(branchId);
-    }
 
-    // Category Filter in WHERE clause
-    if (categoryId) {
-      if (subCategoryId) {
-        sql += ` AND (t.category_id = ? OR tsd_active.category_id = ?)`;
-        params.push(subCategoryId, subCategoryId);
+      if (categoryId) {
+        joinDetails = `
+          LEFT JOIN (
+            /* Virtual detail amount for specific category summary */
+            SELECT transaction_id, category_id, amount FROM transaction_savings_details
+          ) tsd_active ON t.id = tsd_active.transaction_id AND (tsd_active.category_id = ? OR EXISTS (SELECT 1 FROM categories c_sub WHERE c_sub.id = tsd_active.category_id AND c_sub.parent_id = ?))
+        `;
+        params.push(categoryId, categoryId);
+        categoryConditionForExpense = `FALSE`;
+      }
+
+      // Scope derived subqueries by branch/date when available so fallback doesn't aggregate unrelated history
+      let subScopeClause = 'WHERE 1=1';
+      const subScopeParams = [];
+      if (branchIds && Array.isArray(branchIds) && branchIds.length > 0) {
+        const validIds = branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
+        if (validIds.length > 0) {
+          subScopeClause += ` AND t_sub.branch_id IN (${validIds.map(() => '?').join(',')})`;
+          subScopeParams.push(...validIds);
+        }
+      } else if (branchId) {
+        subScopeClause += ' AND t_sub.branch_id = ?';
+        subScopeParams.push(branchId);
+      }
+      if (!includeDeleted) {
+        subScopeClause += ' AND t_sub.status_deleted = false';
+      }
+      subScopeClause += ' AND (t_sub.is_draft = false OR t_sub.is_draft IS NULL)';
+      if (startDate && typeof startDate === 'string' && startDate.trim() !== '') {
+        const sOnly = startDate.trim().split(' ')[0].split('T')[0];
+        subScopeClause += ' AND t_sub.transaction_date >= ?';
+        subScopeParams.push(`${sOnly} 00:00:00`);
+      }
+      if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
+        const eOnly = endDate.trim().split(' ')[0].split('T')[0];
+        subScopeClause += ' AND t_sub.transaction_date <= ?';
+        subScopeParams.push(`${eOnly} 23:59:59`);
+      }
+
+      let joinFutureRefund = '';
+      const futureRefundParams = [];
+      if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
+        const parsedEnd = endDate.trim().split(' ')[0].split('T')[0];
+        joinFutureRefund = `
+          LEFT JOIN (
+            SELECT tref.transaction_id, SUM(tref.amount) as total_future_refund 
+            FROM transaction_refunds tref
+            JOIN transactions t_sub ON t_sub.id = tref.transaction_id
+            ${subScopeClause} AND tref.refund_date > ?
+            GROUP BY tref.transaction_id
+          ) t_future_ref ON t.id = t_future_ref.transaction_id
+        `;
+        futureRefundParams.push(...subScopeParams, parsedEnd);
       } else {
-        sql += ` AND (t.category_id = ? OR c.parent_id = ? OR tsd_active.category_id = ? OR EXISTS (SELECT 1 FROM categories c2 WHERE c2.id = tsd_active.category_id AND c2.parent_id = ?))`;
-        params.push(categoryId, categoryId, categoryId, categoryId);
+        joinFutureRefund = `
+          LEFT JOIN (
+            SELECT NULL as transaction_id, 0 as total_future_refund
+          ) t_future_ref ON 1=0
+        `;
       }
-    }
 
-    if (!includeDeleted) {
-      sql += ' AND t.status_deleted = false';
-    }
+      const preJoinParams = [
+        ...subScopeParams, // tr_sum
+        ...subScopeParams, // t_ref
+        ...params,         // tsd_active (if categoryId)
+        ...futureRefundParams
+      ];
+      params.length = 0;
+      params.push(...preJoinParams);
 
-    // Always exclude drafts from financial summary calculations
-    sql += ' AND (t.is_draft = false OR t.is_draft IS NULL)';
+      let sql = `
+        SELECT 
+          COALESCE(SUM(CASE 
+            WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+              (t.amount + COALESCE(t_future_ref.total_future_refund, 0))
+            ELSE 0 
+          END), 0) as omzet_gross,
 
-    if (startDate) {
-      sql += ' AND DATE(t.transaction_date) >= ?';
-      params.push(startDate);
-    }
+          COALESCE(SUM(CASE 
+            WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+              COALESCE(
+                ${getTransactionTaxableAmountSubquerySql('t')},
+                0
+              )
+            ELSE 0 
+          END), 0) as omzet_taxable,
 
-    if (endDate) {
-      sql += ' AND DATE(t.transaction_date) <= ?';
-      params.push(endDate);
-    }
+          COALESCE(SUM(CASE 
+            WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+              ${getTransactionPb1SubquerySql('t')}
+            ELSE 0 
+          END), 0) as omzet_pb1,
 
-    if (isUmum !== undefined) {
-      sql += ' AND t.is_umum = ?';
-      params.push(isUmum === 'true' || isUmum === true || isUmum === 1);
-    } else if (excludeFolders) {
-      sql += ' AND t.is_umum = true';
-    } else if (onlyFolders) {
-      sql += ' AND t.is_umum = false';
-    }
+          COALESCE(SUM(CASE 
+            WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+              (t.amount + COALESCE(t_future_ref.total_future_refund, 0)) 
+            ELSE 0 
+          END), 0) as lain_gross,
 
-    const results = await query(sql, [...selectParams, ...params]);
-    const {
-      omzet_gross,
-      omzet_taxable,
-      omzet_pb1,
-      lain_gross,
-      lain_taxable,
-      lain_pb1,
-      pelunasan_piutang_lalu,
-      pengeluaran,
-      total_taxable,
-      total_pb1_paid
-    } = results[0];
+          COALESCE(SUM(CASE 
+            WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+              COALESCE(
+                ${getTransactionTaxableAmountSubquerySql('t')},
+                0
+              )
+            ELSE 0 
+          END), 0) as lain_taxable,
 
-    const omzetTax = omzet_pb1 !== undefined && Number(omzet_pb1) > 0 ? Number(omzet_pb1) : Math.round((Number(omzet_taxable) * 10) / 110);
-    const totalOmzetNet = Number(omzet_gross) - omzetTax;
+          COALESCE(SUM(CASE 
+            WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+              ${getTransactionPb1SubquerySql('t')}
+            ELSE 0 
+          END), 0) as lain_pb1,
 
-    const lainTax = lain_pb1 !== undefined && Number(lain_pb1) > 0 ? Number(lain_pb1) : Math.round((Number(lain_taxable) * 10) / 110);
-    const totalPemasukanLainNet = Number(lain_gross) - lainTax;
+          COALESCE(SUM(CASE 
+            WHEN t.type = 'income' AND (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL AND ${startDate ? 't_parent.transaction_date < ?' : 'FALSE'} THEN t.amount
+            ELSE 0
+          END), 0) as pelunasan_piutang_lalu,
 
-    const totalPelunasanLalu = Number(pelunasan_piutang_lalu);
+          COALESCE(SUM(CASE 
+            WHEN t.type = 'expense' AND (t.is_umum = false OR ${categoryConditionForExpense}) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN (t.amount + COALESCE(t_future_ref.total_future_refund, 0)) + COALESCE(t.pb1, 0)
+            ELSE 0 
+          END), 0) as pengeluaran,
 
-    const totalPb1Paid = Number(total_pb1_paid);
+          COALESCE(SUM(CASE 
+            WHEN t.type = 'income' AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
+              COALESCE(
+                ${getTransactionTaxableAmountSubquerySql('t')},
+                t.pb1 * 11,
+                0
+              )
+            ELSE 0 
+          END), 0) as total_taxable,
 
-    // Synchronize both Pemasukan & Pengeluaran with Branch Financial Report (100% exact match across all branches)
+          COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.is_pb1_payment = true THEN t.amount ELSE 0 END), 0) as total_pb1_paid
+        FROM transactions t
+        LEFT JOIN categories c ON t.category_id = c.id
+        /* Join untuk dapet total pelunasan per transaksi */
+        LEFT JOIN (
+          SELECT tr.transaction_id, SUM(tr.amount) as total_repayment 
+          FROM transaction_repayments tr
+          JOIN transactions t_sub ON t_sub.id = tr.transaction_id
+          ${subScopeClause} AND tr.deleted_at IS NULL
+          GROUP BY tr.transaction_id
+        ) tr_sum ON t.id = tr_sum.transaction_id
+        LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id AND tr_notif.deleted_at IS NULL
+        LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
+        LEFT JOIN (
+          SELECT tref.transaction_id, SUM(tref.amount) as total_refund 
+          FROM transaction_refunds tref
+          JOIN transactions t_sub ON t_sub.id = tref.transaction_id
+          ${subScopeClause}
+          GROUP BY tref.transaction_id
+        ) t_ref ON t.id = t_ref.transaction_id
+        ${joinDetails}
+        ${joinFutureRefund}
+        WHERE 1=1
+      `;
+
+      // User ID
+      if (userId) {
+        sql += ' AND t.user_id = ?';
+        params.push(userId);
+      }
+
+      // Branch ID or Branch IDs
+      if (branchIds && Array.isArray(branchIds) && branchIds.length > 0) {
+        const validIds = branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
+        if (validIds.length > 0) {
+          const placeholders = validIds.map(() => '?').join(',');
+          sql += ` AND t.branch_id IN (${placeholders})`;
+          params.push(...validIds);
+        }
+      } else if (branchId) {
+        sql += ' AND t.branch_id = ?';
+        params.push(branchId);
+      }
+
+      // Category Filter in WHERE clause
+      if (categoryId) {
+        if (subCategoryId) {
+          sql += ` AND (t.category_id = ? OR tsd_active.category_id = ?)`;
+          params.push(subCategoryId, subCategoryId);
+        } else {
+          sql += ` AND (t.category_id = ? OR c.parent_id = ? OR tsd_active.category_id = ? OR EXISTS (SELECT 1 FROM categories c2 WHERE c2.id = tsd_active.category_id AND c2.parent_id = ?))`;
+          params.push(categoryId, categoryId, categoryId, categoryId);
+        }
+      }
+
+      if (!includeDeleted) {
+        sql += ' AND t.status_deleted = false';
+      }
+
+      // Always exclude drafts from financial summary calculations
+      sql += ' AND (t.is_draft = false OR t.is_draft IS NULL)';
+
+      if (startDate && typeof startDate === 'string' && startDate.trim() !== '') {
+        const startOnly = startDate.trim().split(' ')[0].split('T')[0];
+        sql += ' AND t.transaction_date >= ?';
+        params.push(`${startOnly} 00:00:00`);
+      }
+
+      if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
+        const endOnly = endDate.trim().split(' ')[0].split('T')[0];
+        sql += ' AND t.transaction_date <= ?';
+        params.push(`${endOnly} 23:59:59`);
+      }
+
+      if (isUmum !== undefined) {
+        sql += ' AND t.is_umum = ?';
+        params.push(isUmum === 'true' || isUmum === true || isUmum === 1);
+      } else if (excludeFolders) {
+        sql += ' AND t.is_umum = true';
+      } else if (onlyFolders) {
+        sql += ' AND t.is_umum = false';
+      }
+
+      const results = await query(sql, [...selectParams, ...params]);
+      return results[0];
+    };
+
+    const buildLegacyResponse = (row) => {
+      const {
+        omzet_gross,
+        omzet_taxable,
+        lain_gross,
+        lain_taxable,
+        pelunasan_piutang_lalu,
+        pengeluaran,
+        total_taxable,
+        total_pb1_paid
+      } = row;
+      const totalPb1Paid = Number(total_pb1_paid);
+      const fallbackOmzetTax = Math.round((Number(omzet_taxable) * 10) / 110);
+      const fallbackTotalOmzetNet = Number(omzet_gross) - fallbackOmzetTax;
+      const fallbackLainTax = Math.round((Number(lain_taxable) * 10) / 110);
+      const fallbackTotalPemasukanLainNet = Number(lain_gross) - fallbackLainTax;
+      const fallbackTotalPelunasanLalu = Number(pelunasan_piutang_lalu);
+      const fallbackTotalPb1 = Math.round((Number(total_taxable) * 10) / 110);
+      const fallbackSaldoPb1 = fallbackTotalPb1 - totalPb1Paid;
+      const fallbackTotalPemasukan = fallbackTotalOmzetNet + fallbackTotalPemasukanLainNet + fallbackTotalPelunasanLalu;
+      const fallbackTotalPengeluaran = Number(pengeluaran);
+      const fallbackSaldo = fallbackTotalPemasukan - fallbackTotalPengeluaran;
+
+      return {
+        pemasukan: fallbackTotalPemasukan,
+        total_omzet: fallbackTotalOmzetNet,
+        pemasukan_lain: fallbackTotalPemasukanLainNet,
+        pelunasan_piutang_lalu: fallbackTotalPelunasanLalu,
+        pengeluaran: fallbackTotalPengeluaran,
+        saldo: fallbackSaldo,
+        total_pb1: fallbackTotalPb1,
+        total_pb1_paid: totalPb1Paid,
+        saldo_pb1: fallbackSaldoPb1
+      };
+    };
+
+    // Fast unified path: skip the expensive legacy full-scan query and execute lightweight indexed queries in parallel
     if (branchId && startDate && endDate) {
+      const canUseLightweightPb1Query =
+        !userId &&
+        !categoryId &&
+        !subCategoryId &&
+        (!branchIds || !Array.isArray(branchIds) || branchIds.length === 0) &&
+        !includeDeleted;
+
       try {
         const startDateOnly = startDate.split(' ')[0].split('T')[0];
         const endDateOnly = endDate.split(' ')[0].split('T')[0];
         const startDtWithTime = `${startDateOnly} 00:00:00`;
         const endDtWithTime = `${endDateOnly} 23:59:59`;
 
-        // 1. Pelunasan Piutang Bulan Lalu (exact match with branchReportController.js)
-        const debtRepaymentResult = await query(
-            `SELECT SUM(tr.amount) as total
-             FROM transaction_repayments tr
-             JOIN transactions t ON tr.transaction_id = t.id
-             WHERE tr.payment_date BETWEEN ? AND ?
-               AND tr.deleted_at IS NULL
-               AND t.transaction_date < ?
-               AND t.branch_id = ?
-               AND t.status_deleted = false
-               AND (t.is_draft = false OR t.is_draft IS NULL)`,
-            [startDateOnly, endDateOnly, startDateOnly, branchId]
+        let pb1PaidPromise;
+        if (canUseLightweightPb1Query) {
+          let pb1Sql = `
+            SELECT COALESCE(SUM(t.amount), 0) as total_pb1_paid
+            FROM transactions t
+            WHERE t.branch_id = ?
+              AND t.type = 'expense'
+              AND t.is_pb1_payment = true
+              AND t.status_deleted = false
+              AND (t.is_draft = false OR t.is_draft IS NULL)
+              AND t.transaction_date >= ?
+              AND t.transaction_date <= ?
+          `;
+          const pb1Params = [branchId, startDtWithTime, endDtWithTime];
+          if (isUmum !== undefined) {
+            pb1Sql += ' AND t.is_umum = ?';
+            pb1Params.push(isUmum === 'true' || isUmum === true || isUmum === 1);
+          } else if (excludeFolders) {
+            pb1Sql += ' AND t.is_umum = true';
+          } else if (onlyFolders) {
+            pb1Sql += ' AND t.is_umum = false';
+          }
+          pb1PaidPromise = query(pb1Sql, pb1Params).then((rows) => Number(rows[0]?.total_pb1_paid || 0));
+        } else {
+          pb1PaidPromise = runLegacySummary().then((row) => Number(row?.total_pb1_paid || 0));
+        }
+
+        // Preload branch expense category IDs once instead of running a correlated subquery per income category group
+        const expenseCatsPromise = query(
+          `SELECT DISTINCT category_id
+           FROM transactions
+           WHERE branch_id = ?
+             AND type = 'expense'
+             AND status_deleted = false
+             AND (is_draft = false OR is_draft IS NULL)
+             AND category_id IS NOT NULL`,
+          [branchId]
         );
-        const pelunasanPiutangBulanLalu = parseFloat(debtRepaymentResult[0]?.total || 0);
+
+        // 1. Pelunasan Piutang Bulan Lalu (exact match with branchReportController.js)
+        const debtRepaymentPromise = query(
+          `SELECT SUM(tr.amount) as total
+           FROM transaction_repayments tr
+           JOIN transactions t ON tr.transaction_id = t.id
+           WHERE tr.payment_date BETWEEN ? AND ?
+             AND tr.deleted_at IS NULL
+             AND t.transaction_date < ?
+             AND t.branch_id = ?
+             AND t.status_deleted = false
+             AND (t.is_draft = false OR t.is_draft IS NULL)`,
+          [startDateOnly, endDateOnly, startDateOnly, branchId]
+        );
 
         // 2. Income Breakdown & Net Calculation (exact match with branchReportController.js)
-        const incomeBreakdownResult = await query(
-            `SELECT 
-                t.category_id,
-                COALESCE(c.name, 'Lain-lain') as category_name,
-                t.is_debt_payment,
-                SUM(t.amount + COALESCE(future_ref.amount, 0)) as total_gross,
-                SUM(
-                    COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
-                ) as taxable_amount,
-                SUM(
-                    ${getTransactionPb1SubquerySql('t')}
-                ) as total_pb1,
-                (SELECT COUNT(*) FROM transactions t2 WHERE t2.category_id = t.category_id AND t2.type = 'expense' AND t2.status_deleted = false AND (t2.is_draft = false OR t2.is_draft IS NULL) AND t2.branch_id = t.branch_id) as has_expense
-             FROM transactions t
-             LEFT JOIN categories c ON t.category_id = c.id
-             LEFT JOIN (
-                 SELECT transaction_id, SUM(amount) as amount 
-                 FROM transaction_refunds 
-                 WHERE refund_date > ? 
-                 GROUP BY transaction_id
-             ) future_ref ON t.id = future_ref.transaction_id
-             WHERE t.branch_id = ?
-               AND t.type = 'income'
-               AND t.transaction_date BETWEEN ? AND ?
-               AND t.status_deleted = false
-               AND (t.is_draft = false OR t.is_draft IS NULL)
-               AND t.is_umum = true
-               AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
-             GROUP BY category_name, t.is_debt_payment, t.category_id`,
-            [endDateOnly, branchId, startDateOnly, endDateOnly]
+        const incomeBreakdownPromise = query(
+          `SELECT 
+              t.category_id,
+              COALESCE(c.name, 'Lain-lain') as category_name,
+              t.is_debt_payment,
+              SUM(t.amount + COALESCE(future_ref.amount, 0)) as total_gross,
+              SUM(
+                  COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
+              ) as taxable_amount,
+              SUM(
+                  ${getTransactionPb1SubquerySql('t')}
+              ) as total_pb1
+           FROM transactions t
+           LEFT JOIN categories c ON t.category_id = c.id
+           LEFT JOIN (
+               SELECT tref.transaction_id, SUM(tref.amount) as amount 
+               FROM transaction_refunds tref
+               JOIN transactions t_sub ON t_sub.id = tref.transaction_id
+               WHERE tref.refund_date > ?
+                 AND t_sub.branch_id = ?
+                 AND t_sub.type = 'income'
+                 AND t_sub.transaction_date BETWEEN ? AND ?
+                 AND t_sub.status_deleted = false
+                 AND (t_sub.is_draft = false OR t_sub.is_draft IS NULL)
+                 AND t_sub.is_umum = true
+               GROUP BY tref.transaction_id
+           ) future_ref ON t.id = future_ref.transaction_id
+           WHERE t.branch_id = ?
+             AND t.type = 'income'
+             AND t.transaction_date BETWEEN ? AND ?
+             AND t.status_deleted = false
+             AND (t.is_draft = false OR t.is_draft IS NULL)
+             AND t.is_umum = true
+             AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
+           GROUP BY category_name, t.is_debt_payment, t.category_id`,
+          [endDateOnly, branchId, startDateOnly, endDateOnly, branchId, startDateOnly, endDateOnly]
         );
 
-        const pastIncomeRefundsResult = await query(
-            `SELECT COALESCE(SUM(tr.amount), 0) as total_past_refunds
-             FROM transaction_refunds tr
-             JOIN transactions t ON tr.transaction_id = t.id
-             WHERE t.branch_id = ?
-               AND t.type = 'income'
-               AND tr.refund_date BETWEEN ? AND ?
-               AND t.transaction_date < ?
-               AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-               AND t.is_umum = true`,
-            [branchId, startDateOnly, endDateOnly, startDateOnly]
+        const pastIncomeRefundsPromise = query(
+          `SELECT COALESCE(SUM(tr.amount), 0) as total_past_refunds
+           FROM transaction_refunds tr
+           JOIN transactions t ON tr.transaction_id = t.id
+           WHERE t.branch_id = ?
+             AND t.type = 'income'
+             AND tr.refund_date BETWEEN ? AND ?
+             AND t.transaction_date < ?
+             AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
+             AND t.is_umum = true`,
+          [branchId, startDateOnly, endDateOnly, startDateOnly]
         );
-        const pastIncomeRefunds = parseFloat(pastIncomeRefundsResult[0]?.total_past_refunds || 0);
-
-        let omzetNetSum = 0;
-        let omzetTaxSum = 0;
-        let lainNetSum = 0;
-        let lainTaxSum = 0;
-
-        incomeBreakdownResult.forEach(item => {
-            const gross = parseFloat(item.total_gross) || 0;
-            const taxable = parseFloat(item.taxable_amount) || 0;
-            const tax = item.total_pb1 !== undefined && item.total_pb1 !== null
-                ? parseFloat(item.total_pb1) || 0
-                : Math.round((taxable * 10) / 110);
-            const net = gross - tax;
-
-            const nameUpper = item.category_name.toUpperCase();
-            const isOmzet = nameUpper.includes('OMZET') || nameUpper.includes('OMSET');
-            const hasExpense = parseInt(item.has_expense) > 0;
-
-            if (isOmzet) {
-                omzetNetSum += net;
-                omzetTaxSum += tax;
-            } else {
-                if ((!item.is_debt_payment || item.is_debt_payment == 0) && !hasExpense) {
-                    lainNetSum += net;
-                    lainTaxSum += tax;
-                }
-            }
-        });
-
-        omzetNetSum = Math.max(0, omzetNetSum - pastIncomeRefunds);
 
         // 3. Expense Breakdown & System Pengeluaran (exact match with branchReportController.js)
-        const expenseBreakdownRes = await query(
+        const expenseBreakdownPromise = query(
           `SELECT COALESCE(SUM(total), 0) as folder_pengeluaran
            FROM (
               /* 1. Pengeluaran Reguler & Retur dalam periode */
@@ -2064,10 +2168,17 @@ class Transaction {
               FROM transactions t 
               LEFT JOIN categories c ON t.category_id = c.id 
               LEFT JOIN (
-                  SELECT transaction_id, SUM(amount) as amount 
-                  FROM transaction_refunds 
-                  WHERE refund_date > ? 
-                  GROUP BY transaction_id
+                  SELECT tref.transaction_id, SUM(tref.amount) as amount 
+                  FROM transaction_refunds tref
+                  JOIN transactions t_sub ON t_sub.id = tref.transaction_id
+                  WHERE tref.refund_date > ?
+                    AND t_sub.branch_id = ?
+                    AND t_sub.transaction_date BETWEEN ? AND ?
+                    AND t_sub.status_deleted = false
+                    AND (t_sub.is_draft = false OR t_sub.is_draft IS NULL)
+                    AND t_sub.is_umum = true
+                    AND (t_sub.is_savings = 0 OR t_sub.is_savings IS NULL)
+                  GROUP BY tref.transaction_id
               ) future_ref ON t.id = future_ref.transaction_id
               WHERE t.branch_id = ? 
                 AND t.transaction_date BETWEEN ? AND ? 
@@ -2111,12 +2222,16 @@ class Transaction {
                 AND t.is_umum = true
                 AND (t.is_savings = 0 OR t.is_savings IS NULL)
            ) as consolidated`,
-          [endDateOnly, branchId, startDateOnly, endDateOnly, branchId, branchId, startDateOnly, endDateOnly, branchId, startDateOnly, endDateOnly, startDateOnly]
+          [
+            endDateOnly, branchId, startDateOnly, endDateOnly,
+            branchId, startDateOnly, endDateOnly,
+            branchId,
+            branchId, startDateOnly, endDateOnly,
+            branchId, startDateOnly, endDateOnly, startDateOnly
+          ]
         );
 
-        const folderPengeluaran = parseFloat(expenseBreakdownRes[0]?.folder_pengeluaran || 0);
-
-        const mitraPiutangRes = await query(
+        const mitraPiutangPromise = query(
           `SELECT (
               SELECT COALESCE(SUM(t.remaining_debt + COALESCE((
                 SELECT SUM(tr.amount)
@@ -2156,6 +2271,60 @@ class Transaction {
             endDtWithTime
           ]
         );
+
+        const [
+          totalPb1Paid,
+          expenseCatsRows,
+          debtRepaymentResult,
+          incomeBreakdownResult,
+          pastIncomeRefundsResult,
+          expenseBreakdownRes,
+          mitraPiutangRes
+        ] = await Promise.all([
+          pb1PaidPromise,
+          expenseCatsPromise,
+          debtRepaymentPromise,
+          incomeBreakdownPromise,
+          pastIncomeRefundsPromise,
+          expenseBreakdownPromise,
+          mitraPiutangPromise
+        ]);
+
+        const expenseCategoryIds = new Set(expenseCatsRows.map((r) => r.category_id));
+        const pelunasanPiutangBulanLalu = parseFloat(debtRepaymentResult[0]?.total || 0);
+        const pastIncomeRefunds = parseFloat(pastIncomeRefundsResult[0]?.total_past_refunds || 0);
+
+        let omzetNetSum = 0;
+        let omzetTaxSum = 0;
+        let lainNetSum = 0;
+        let lainTaxSum = 0;
+
+        incomeBreakdownResult.forEach(item => {
+          const gross = parseFloat(item.total_gross) || 0;
+          const taxable = parseFloat(item.taxable_amount) || 0;
+          const tax = item.total_pb1 !== undefined && item.total_pb1 !== null
+            ? parseFloat(item.total_pb1) || 0
+            : Math.round((taxable * 10) / 110);
+          const net = gross - tax;
+
+          const nameUpper = item.category_name.toUpperCase();
+          const isOmzet = nameUpper.includes('OMZET') || nameUpper.includes('OMSET');
+          const hasExpense = item.category_id !== null && item.category_id !== undefined && expenseCategoryIds.has(item.category_id);
+
+          if (isOmzet) {
+            omzetNetSum += net;
+            omzetTaxSum += tax;
+          } else {
+            if ((!item.is_debt_payment || item.is_debt_payment == 0) && !hasExpense) {
+              lainNetSum += net;
+              lainTaxSum += tax;
+            }
+          }
+        });
+
+        omzetNetSum = Math.max(0, omzetNetSum - pastIncomeRefunds);
+
+        const folderPengeluaran = parseFloat(expenseBreakdownRes[0]?.folder_pengeluaran || 0);
         const totalPiutangMitra = parseFloat(mitraPiutangRes[0]?.total_piutang || 0);
 
         const totalPemasukan = omzetNetSum + lainNetSum + pelunasanPiutangBulanLalu;
@@ -2181,32 +2350,8 @@ class Transaction {
       }
     }
 
-    const fallbackOmzetTax = Math.round((Number(omzet_taxable) * 10) / 110);
-    const fallbackTotalOmzetNet = Number(omzet_gross) - fallbackOmzetTax;
-
-    const fallbackLainTax = Math.round((Number(lain_taxable) * 10) / 110);
-    const fallbackTotalPemasukanLainNet = Number(lain_gross) - fallbackLainTax;
-
-    const fallbackTotalPelunasanLalu = Number(pelunasan_piutang_lalu);
-
-    const fallbackTotalPb1 = Math.round((Number(total_taxable) * 10) / 110);
-    const fallbackSaldoPb1 = fallbackTotalPb1 - totalPb1Paid;
-
-    const fallbackTotalPemasukan = fallbackTotalOmzetNet + fallbackTotalPemasukanLainNet + fallbackTotalPelunasanLalu;
-    const fallbackTotalPengeluaran = Number(pengeluaran);
-    const fallbackSaldo = fallbackTotalPemasukan - fallbackTotalPengeluaran;
-
-    return {
-      pemasukan: fallbackTotalPemasukan,
-      total_omzet: fallbackTotalOmzetNet,
-      pemasukan_lain: fallbackTotalPemasukanLainNet,
-      pelunasan_piutang_lalu: fallbackTotalPelunasanLalu,
-      pengeluaran: fallbackTotalPengeluaran,
-      saldo: fallbackSaldo,
-      total_pb1: fallbackTotalPb1,
-      total_pb1_paid: totalPb1Paid,
-      saldo_pb1: fallbackSaldoPb1
-    };
+    const legacyRow = await runLegacySummary();
+    return buildLegacyResponse(legacyRow);
   }
 
   // Get aggregated balance and transaction count per Kas Simpanan subcategory in a single query

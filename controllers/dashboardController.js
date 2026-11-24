@@ -163,122 +163,137 @@ function formatSection(date, items, transactions, req) {
 }
 
 // Helper: Calculate trend against previous period
-async function calculateTrend(branchId, periodType, params, currentSummary, isUmum, hasPb1) {
+function getPrevPeriodRange(periodType, params) {
   let prevStart = null;
   let prevEnd = null;
 
-  try {
-    switch (periodType) {
-      case 'Harian': {
-        const { finalStartDate, finalEndDate } = params;
-        const startObj = parseDate(finalStartDate);
-        const endObj = parseDate(finalEndDate);
+  switch (periodType) {
+    case 'Harian': {
+      const { finalStartDate, finalEndDate } = params;
+      const startObj = parseDate(finalStartDate);
+      const endObj = parseDate(finalEndDate);
 
-        // Calculate diff in days
-        const diffTime = Math.abs(endObj - startObj);
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      // Calculate diff in days
+      const diffTime = Math.abs(endObj - startObj);
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-        const prevEndObj = new Date(startObj);
-        prevEndObj.setDate(prevEndObj.getDate() - 1);
+      const prevEndObj = new Date(startObj);
+      prevEndObj.setDate(prevEndObj.getDate() - 1);
 
-        const prevStartObj = new Date(prevEndObj);
-        prevStartObj.setDate(prevStartObj.getDate() - diffDays);
+      const prevStartObj = new Date(prevEndObj);
+      prevStartObj.setDate(prevStartObj.getDate() - diffDays);
 
-        prevStart = formatDate(prevStartObj);
-        prevEnd = formatDate(prevEndObj);
-        break;
+      prevStart = formatDate(prevStartObj);
+      prevEnd = formatDate(prevEndObj);
+      break;
+    }
+    case 'Mingguan': {
+      const currentYear = parseInt(params.year);
+      const currentMonth = parseInt(params.month);
+      const currentWeek = parseInt(params.week) || 1;
+
+      const currentRange = getWeekRange(currentYear, currentMonth, currentWeek);
+      const curStartObj = parseDate(currentRange.start);
+
+      const prevEndObj = new Date(curStartObj);
+      prevEndObj.setDate(prevEndObj.getDate() - 1);
+      const prevStartObj = new Date(prevEndObj);
+      prevStartObj.setDate(prevStartObj.getDate() - 6);
+
+      prevStart = formatDate(prevStartObj);
+      prevEnd = formatDate(prevEndObj);
+      break;
+    }
+    case 'BulananAll': {
+      const prevYearRange = getYearRange(parseInt(params.year) - 1);
+      prevStart = prevYearRange.start;
+      prevEnd = prevYearRange.end;
+      break;
+    }
+    case 'Bulanan': {
+      const currentYear = parseInt(params.year);
+      const currentMonth = parseInt(params.month);
+      let prevYear = currentYear;
+      let prevMonth = currentMonth - 1;
+      if (prevMonth < 1) {
+        prevMonth = 12;
+        prevYear -= 1;
       }
-      case 'Mingguan': {
-        const currentYear = parseInt(params.year);
-        const currentMonth = parseInt(params.month);
-        const currentWeek = parseInt(params.week) || 1;
-
-        const currentRange = getWeekRange(currentYear, currentMonth, currentWeek);
-        const curStartObj = parseDate(currentRange.start);
-
-        const prevEndObj = new Date(curStartObj);
-        prevEndObj.setDate(prevEndObj.getDate() - 1);
-        const prevStartObj = new Date(prevEndObj);
-        prevStartObj.setDate(prevStartObj.getDate() - 6);
-
-        prevStart = formatDate(prevStartObj);
-        prevEnd = formatDate(prevEndObj);
-        break;
-      }
-      case 'BulananAll': {
+      const prevMonthRange = getMonthRange(prevYear, prevMonth);
+      prevStart = prevMonthRange.start;
+      prevEnd = prevMonthRange.end;
+      break;
+    }
+    case 'Tahunan': {
+      if (params.year) {
         const prevYearRange = getYearRange(parseInt(params.year) - 1);
         prevStart = prevYearRange.start;
         prevEnd = prevYearRange.end;
-        break;
+      } else {
+        return null; // Cannot compare if all years are selected
       }
-      case 'Bulanan': {
-        const currentYear = parseInt(params.year);
-        const currentMonth = parseInt(params.month);
-        let prevYear = currentYear;
-        let prevMonth = currentMonth - 1;
-        if (prevMonth < 1) {
-          prevMonth = 12;
-          prevYear -= 1;
-        }
-        const prevMonthRange = getMonthRange(prevYear, prevMonth);
-        prevStart = prevMonthRange.start;
-        prevEnd = prevMonthRange.end;
-        break;
-      }
-      case 'Tahunan': {
-        if (params.year) {
-          const prevYearRange = getYearRange(parseInt(params.year) - 1);
-          prevStart = prevYearRange.start;
-          prevEnd = prevYearRange.end;
-        } else {
-          return null; // Cannot compare if all years are selected
-        }
-        break;
-      }
+      break;
+    }
+  }
+
+  if (!prevStart || !prevEnd) return null;
+  return { prevStart, prevEnd };
+}
+
+function buildTrendFromSummaries(currentSummary, prevSummary) {
+  if (!currentSummary || !prevSummary) return null;
+
+  const calculateChange = (current, previous) => {
+    const curVal = Number(current) || 0;
+    const prevVal = Number(previous) || 0;
+
+    if (prevVal === 0) {
+      if (curVal === 0) return { pctStr: '0.0%', isUp: true };
+      return { pctStr: '+100.0%', isUp: true };
     }
 
-    if (!prevStart || !prevEnd) return null;
+    const pct = ((curVal - prevVal) / Math.abs(prevVal)) * 100;
+    const isUp = pct >= 0;
+    const sign = isUp ? '+' : '';
+    return { pctStr: `${sign}${pct.toFixed(1)}%`, isUp };
+  };
 
-    const prevSummary = await Transaction.getSummary({
+  const incTrend = calculateChange(currentSummary.pemasukan, prevSummary.pemasukan);
+  const expTrend = calculateChange(currentSummary.pengeluaran, prevSummary.pengeluaran);
+  const salTrend = calculateChange(currentSummary.saldo, prevSummary.saldo);
+
+  return {
+    inc: incTrend.pctStr,
+    incUp: incTrend.isUp,
+    exp: expTrend.pctStr,
+    expUp: expTrend.isUp,
+    expDesc: expTrend.isUp ? '(Naik)' : '(Hemat)',
+    sal: salTrend.pctStr,
+    salUp: salTrend.isUp
+  };
+}
+
+async function fetchPrevPeriodSummary(branchId, periodType, params, isUmum, hasPb1) {
+  try {
+    const range = getPrevPeriodRange(periodType, params);
+    if (!range) return null;
+    return await Transaction.getSummary({
       branchId,
-      startDate: prevStart,
-      endDate: prevEnd,
-      isUmum: isUmum,
-      hasPb1: hasPb1
+      startDate: range.prevStart,
+      endDate: range.prevEnd,
+      isUmum,
+      hasPb1
     });
-
-    const calculateChange = (current, previous) => {
-      const curVal = Number(current) || 0;
-      const prevVal = Number(previous) || 0;
-
-      if (prevVal === 0) {
-        if (curVal === 0) return { pctStr: '0.0%', isUp: true };
-        return { pctStr: '+100.0%', isUp: true };
-      }
-
-      const pct = ((curVal - prevVal) / Math.abs(prevVal)) * 100;
-      const isUp = pct >= 0;
-      const sign = isUp ? '+' : '';
-      return { pctStr: `${sign}${pct.toFixed(1)}%`, isUp };
-    };
-
-    const incTrend = calculateChange(currentSummary.pemasukan, prevSummary.pemasukan);
-    const expTrend = calculateChange(currentSummary.pengeluaran, prevSummary.pengeluaran);
-    const salTrend = calculateChange(currentSummary.saldo, prevSummary.saldo);
-
-    return {
-      inc: incTrend.pctStr,
-      incUp: incTrend.isUp,
-      exp: expTrend.pctStr,
-      expUp: expTrend.isUp,
-      expDesc: expTrend.isUp ? '(Naik)' : '(Hemat)',
-      sal: salTrend.pctStr,
-      salUp: salTrend.isUp
-    };
   } catch (error) {
     console.error('Trend calculation error:', error);
     return null;
   }
+}
+
+// Helper to calculate percentage trend compared to previous period
+async function calculateTrend(branchId, periodType, params, currentSummary, isUmum, hasPb1) {
+  const prevSummary = await fetchPrevPeriodSummary(branchId, periodType, params, isUmum, hasPb1);
+  return buildTrendFromSummaries(currentSummary, prevSummary);
 }
 
 // Dashboard Harian
@@ -299,25 +314,27 @@ const getHarian = async (req, res, next) => {
     const isUmum = req.query.is_umum === 'all' ? undefined : (req.query.is_umum === 'false' ? false : true);
     const hasPb1 = req.query.has_pb1 === 'true';
 
-    const transactions = await Transaction.findAll({
-      branchId: branchId,
-      startDate: finalStartDate,
-      endDate: finalEndDate,
-      limit: 10000,
-      page: 1,
-      isUmum: isUmum,
-      hasPb1: hasPb1
-    });
+    const [transactions, summary, prevSummary] = await Promise.all([
+      Transaction.findAll({
+        branchId: branchId,
+        startDate: finalStartDate,
+        endDate: finalEndDate,
+        limit: 10000,
+        page: 1,
+        isUmum: isUmum,
+        hasPb1: hasPb1
+      }),
+      Transaction.getSummary({
+        branchId: branchId,
+        startDate: finalStartDate,
+        endDate: finalEndDate,
+        isUmum: isUmum,
+        hasPb1: hasPb1
+      }),
+      fetchPrevPeriodSummary(branchId, 'Harian', { finalStartDate, finalEndDate }, isUmum, hasPb1)
+    ]);
 
-    const summary = await Transaction.getSummary({
-      branchId: branchId,
-      startDate: finalStartDate,
-      endDate: finalEndDate,
-      isUmum: isUmum,
-      hasPb1: hasPb1
-    });
-
-    summary.trend = await calculateTrend(branchId, 'Harian', { finalStartDate, finalEndDate }, summary, isUmum, hasPb1) || null;
+    summary.trend = buildTrendFromSummaries(summary, prevSummary) || null;
 
     const transactionsByDate = {};
     transactions.forEach(t => {
@@ -377,15 +394,25 @@ const getMingguan = async (req, res, next) => {
     const isUmum = req.query.is_umum === 'all' ? undefined : (req.query.is_umum === 'false' ? false : true);
     const hasPb1 = req.query.has_pb1 === 'true';
     const monthRange = getMonthRange(parseInt(year), parseInt(month));
-    const allTransactions = await Transaction.findAll({
-      branchId: branchId,
-      startDate: monthRange.start,
-      endDate: monthRange.end,
-      limit: 10000,
-      page: 1,
-      isUmum: isUmum,
-      hasPb1: hasPb1
-    });
+    const [allTransactions, summary, prevSummary] = await Promise.all([
+      Transaction.findAll({
+        branchId: branchId,
+        startDate: monthRange.start,
+        endDate: monthRange.end,
+        limit: 10000,
+        page: 1,
+        isUmum: isUmum,
+        hasPb1: hasPb1
+      }),
+      Transaction.getSummary({
+        branchId: branchId,
+        startDate: monthRange.start,
+        endDate: monthRange.end,
+        isUmum: isUmum,
+        hasPb1: hasPb1
+      }),
+      fetchPrevPeriodSummary(branchId, 'Mingguan', { year, month, week }, isUmum, hasPb1)
+    ]);
 
     const weeks = [];
     for (let w = 1; w <= 5; w++) {
@@ -409,15 +436,7 @@ const getMingguan = async (req, res, next) => {
       }
     }
 
-    const summary = await Transaction.getSummary({
-      branchId: branchId,
-      startDate: monthRange.start,
-      endDate: monthRange.end,
-      isUmum: isUmum,
-      hasPb1: hasPb1
-    });
-
-    summary.trend = await calculateTrend(branchId, 'Mingguan', { year, month, week }, summary, isUmum, hasPb1) || null;
+    summary.trend = buildTrendFromSummaries(summary, prevSummary) || null;
 
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
     const title = `${months[parseInt(month) - 1]} ${year}`;
@@ -456,25 +475,27 @@ const getBulananAll = async (req, res, next) => {
     const hasPb1 = req.query.has_pb1 === 'true';
     const yearRange = getYearRange(parseInt(year));
 
-    const transactions = await Transaction.findAll({
-      branchId: branchId,
-      startDate: yearRange.start,
-      endDate: yearRange.end,
-      limit: 10000,
-      page: 1,
-      isUmum: isUmum,
-      hasPb1: hasPb1
-    });
+    const [transactions, summary, prevSummary] = await Promise.all([
+      Transaction.findAll({
+        branchId: branchId,
+        startDate: yearRange.start,
+        endDate: yearRange.end,
+        limit: 10000,
+        page: 1,
+        isUmum: isUmum,
+        hasPb1: hasPb1
+      }),
+      Transaction.getSummary({
+        branchId: branchId,
+        startDate: yearRange.start,
+        endDate: yearRange.end,
+        isUmum: isUmum,
+        hasPb1: hasPb1
+      }),
+      fetchPrevPeriodSummary(branchId, 'BulananAll', { year }, isUmum, hasPb1)
+    ]);
 
-    const summary = await Transaction.getSummary({
-      branchId: branchId,
-      startDate: yearRange.start,
-      endDate: yearRange.end,
-      isUmum: isUmum,
-      hasPb1: hasPb1
-    });
-
-    summary.trend = await calculateTrend(branchId, 'BulananAll', { year }, summary, isUmum, hasPb1) || null;
+    summary.trend = buildTrendFromSummaries(summary, prevSummary) || null;
 
     const transactionsByMonth = {};
     transactions.forEach(t => {
@@ -549,7 +570,7 @@ const getBulanan = async (req, res, next) => {
     const isUmum = req.query.is_umum === 'all' ? undefined : (req.query.is_umum === 'false' ? false : true);
     const hasPb1 = req.query.has_pb1 === 'true';
     const monthRange = getMonthRange(parseInt(year), parseInt(month));
-    const [transactions, summary] = await Promise.all([
+    const [transactions, summary, prevSummary] = await Promise.all([
       Transaction.findAll({
         branchId: branchId,
         startDate: monthRange.start,
@@ -565,10 +586,11 @@ const getBulanan = async (req, res, next) => {
         endDate: monthRange.end,
         isUmum: isUmum,
         hasPb1: hasPb1
-      })
+      }),
+      fetchPrevPeriodSummary(branchId, 'Bulanan', { year, month }, isUmum, hasPb1)
     ]);
 
-    summary.trend = await calculateTrend(branchId, 'Bulanan', { year, month }, summary, isUmum, hasPb1) || null;
+    summary.trend = buildTrendFromSummaries(summary, prevSummary) || null;
 
     const transactionsByDate = {};
     transactions.forEach(t => {
@@ -628,7 +650,7 @@ const getTahunan = async (req, res, next) => {
       endDate = yearRange.end;
     }
 
-    const [transactions, summary] = await Promise.all([
+    const [transactions, summary, prevSummary] = await Promise.all([
       Transaction.findAll({
         branchId: branchId,
         startDate: startDate,
@@ -644,10 +666,11 @@ const getTahunan = async (req, res, next) => {
         endDate: endDate,
         isUmum: isUmum,
         hasPb1: hasPb1
-      })
+      }),
+      fetchPrevPeriodSummary(branchId, 'Tahunan', { year }, isUmum, hasPb1)
     ]);
 
-    summary.trend = await calculateTrend(branchId, 'Tahunan', { year }, summary, isUmum, hasPb1) || null;
+    summary.trend = buildTrendFromSummaries(summary, prevSummary) || null;
 
     const transactionsByYear = {};
     transactions.forEach(t => {
@@ -773,8 +796,8 @@ const getGroupDashboard = async (req, res, next) => {
       title = `${months[currentMonth - 1]} ${currentYear}`;
     }
 
-    // Fetch transactions across branches
-    const transactions = await Transaction.findAll({
+    // Fetch transactions and summary across branches concurrently
+    const transactionsPromise = Transaction.findAll({
       branchIds: targetBranchIds,
       startDate: finalStart,
       endDate: finalEnd,
@@ -784,37 +807,46 @@ const getGroupDashboard = async (req, res, next) => {
       hasPb1: hasPb1
     });
 
-    // Fetch summary across branches with unified financial logic
+    let transactions;
     let summary;
     if (targetBranchIds.length === 1) {
-      summary = await Transaction.getSummary({
-        branchId: targetBranchIds[0],
-        startDate: finalStart,
-        endDate: finalEnd,
-        isUmum: isUmum,
-        hasPb1: hasPb1
-      });
-
-      summary.trend = await calculateTrend(
-        targetBranchIds[0],
-        tab === 'Mingguan' ? 'Bulanan' : tab,
-        { year: currentYear, month: currentMonth, finalStartDate: finalStart, finalEndDate: finalEnd },
-        summary,
-        isUmum,
-        hasPb1
-      ) || null;
-    } else {
-      const branchSummaries = await Promise.all(
-        targetBranchIds.map(bId =>
-          Transaction.getSummary({
-            branchId: bId,
-            startDate: finalStart,
-            endDate: finalEnd,
-            isUmum: isUmum,
-            hasPb1: hasPb1
-          })
+      const trendPeriod = tab === 'Mingguan' ? 'Bulanan' : tab;
+      const [txRows, curSummary, prevSummary] = await Promise.all([
+        transactionsPromise,
+        Transaction.getSummary({
+          branchId: targetBranchIds[0],
+          startDate: finalStart,
+          endDate: finalEnd,
+          isUmum: isUmum,
+          hasPb1: hasPb1
+        }),
+        fetchPrevPeriodSummary(
+          targetBranchIds[0],
+          trendPeriod,
+          { year: currentYear, month: currentMonth, finalStartDate: finalStart, finalEndDate: finalEnd },
+          isUmum,
+          hasPb1
         )
-      );
+      ]);
+      transactions = txRows;
+      summary = curSummary;
+      summary.trend = buildTrendFromSummaries(summary, prevSummary) || null;
+    } else {
+      const [txRows, branchSummaries] = await Promise.all([
+        transactionsPromise,
+        Promise.all(
+          targetBranchIds.map(bId =>
+            Transaction.getSummary({
+              branchId: bId,
+              startDate: finalStart,
+              endDate: finalEnd,
+              isUmum: isUmum,
+              hasPb1: hasPb1
+            })
+          )
+        )
+      ]);
+      transactions = txRows;
 
       summary = branchSummaries.reduce((acc, curr) => ({
         pemasukan: acc.pemasukan + (curr.pemasukan || 0),

@@ -1038,6 +1038,96 @@ const cashierReportController = {
     }
   },
 
+  // GET /api/cashier-reports/deposits?as_of_date=YYYY-MM-DD
+  getDepositBalance: async (req, res, next) => {
+    try {
+      const branchId = resolveBranchId(req);
+      if (!branchId) {
+        return res.status(400).json({ success: false, message: 'Branch ID wajib dipilih.' });
+      }
+
+      const hasAccess = await Branch.userHasAccess(req.userId, branchId, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+      }
+
+      const asOfDate = req.query.as_of_date ? String(req.query.as_of_date).trim() : null;
+      const data = await CashierReport.getDepositBalance({ branchId, asOfDate });
+      return res.json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
+  // PUT /api/cashier-reports/deposits/:orderId/pickup
+  updateDepositPickupStatus: async (req, res, next) => {
+    try {
+      if (!REVIEWER_ROLES.has(req.user.role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Hanya Admin, Co-Owner, Owner, atau Master yang dapat memperbarui status deposit.'
+        });
+      }
+
+      if (req.user.role === 'admin' && req.user.can_edit === false) {
+        return res.status(403).json({
+          success: false,
+          message: 'Akses Ditolak: Akun Admin Anda tidak memiliki izin edit.'
+        });
+      }
+
+      const orderId = parseInt(req.params.orderId, 10);
+      if (!Number.isFinite(orderId) || orderId <= 0) {
+        return res.status(400).json({ success: false, message: 'ID order tidak valid.' });
+      }
+
+      const order = await CashierReport.getOrderById(orderId);
+      if (!order) {
+        return res.status(404).json({ success: false, message: 'Data order tidak ditemukan.' });
+      }
+
+      const hasAccess = await Branch.userHasAccess(req.userId, order.branch_id, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke cabang ini.' });
+      }
+
+      const dateOnly = order.report_date ? String(order.report_date).slice(0, 10) : '';
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) {
+        const [yStr, mStr] = dateOnly.split('-');
+        const isLocked = await LockedPeriod.isLocked(order.branch_id, parseInt(mStr, 10), parseInt(yStr, 10));
+        if (isLocked) {
+          return res.status(403).json({
+            success: false,
+            message: 'Pembukuan untuk periode tanggal laporan order ini sudah dikunci.'
+          });
+        }
+      }
+
+      const { action, pickup_date, planned_pickup_date } = req.body || {};
+      const result = await CashierReport.updateDepositPickupStatus({
+        orderId,
+        action: action || 'mark_picked_up',
+        pickupDate: pickup_date || null,
+        plannedPickupDate: planned_pickup_date || null,
+        user: req.user
+      });
+
+      return res.json({
+        success: true,
+        message: 'Status Saldo Deposit berhasil diperbarui.',
+        data: result
+      });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, message: error.message });
+      }
+      next(error);
+    }
+  },
+
   // POST /api/cashier-reports/orders/preview-excel
   previewOrderExcel: async (req, res, next) => {
     try {
