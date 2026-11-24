@@ -2,6 +2,7 @@ const { query } = require('../config/database');
 
 const PERFORMANCE_INDEXES = [
   { table: 'transactions', name: 'idx_tx_branch_del_date', columns: '(branch_id, status_deleted, transaction_date)' },
+  { table: 'transactions', name: 'idx_tx_branch_del_date_created_id', columns: '(branch_id, status_deleted, transaction_date, created_at, id)' },
   { table: 'transactions', name: 'idx_tx_branch_type_del_cat', columns: '(branch_id, type, status_deleted, category_id)' },
   { table: 'transactions', name: 'idx_tx_mitra_del_date', columns: '(mitra_piutang_id, status_deleted, transaction_date)' },
   { table: 'transaction_repayments', name: 'idx_tr_paydate_del_tx', columns: '(deleted_at, payment_date, transaction_id)' },

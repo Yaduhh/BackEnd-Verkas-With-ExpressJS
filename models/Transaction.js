@@ -641,6 +641,7 @@ class Transaction {
     type,
     fundSource = null,
     categories = null,
+    excludeCategories = null,
     search = null,
     lampiranStatus = null,
     startDate,
@@ -649,6 +650,8 @@ class Transaction {
     limit = 100,
     cursor = null
   } = {}) {
+    await ensurePerformanceIndexesOnce();
+
     const validIds = Array.isArray(branchIds)
       ? branchIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0)
       : [];
@@ -669,7 +672,7 @@ class Transaction {
     `;
     const idParams = [];
 
-    if (categories?.length || lampiranStatus || (search && search.trim())) {
+    if (categories?.length || excludeCategories?.length || lampiranStatus || (search && search.trim())) {
       idSql += ` LEFT JOIN categories c ON t.category_id = c.id`;
     }
     if (lampiranStatus) {
@@ -724,6 +727,21 @@ class Transaction {
           )
         )`;
         idParams.push(...cleanCats, ...cleanCats, ...cleanCats, ...cleanCats);
+      }
+    }
+
+    if (Array.isArray(excludeCategories) && excludeCategories.length > 0) {
+      const cleanExcl = excludeCategories.map(c => String(c).trim()).filter(Boolean);
+      if (cleanExcl.length > 0) {
+        const placeholders = cleanExcl.map(() => '?').join(',');
+        idSql += ` AND (
+          t.category_id IS NULL
+          OR (
+            c.name NOT IN (${placeholders})
+            AND (c.parent_id IS NULL OR c.parent_id NOT IN (SELECT id FROM categories WHERE name IN (${placeholders})))
+          )
+        )`;
+        idParams.push(...cleanExcl, ...cleanExcl);
       }
     }
 

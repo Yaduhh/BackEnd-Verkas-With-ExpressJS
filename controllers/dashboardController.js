@@ -1267,6 +1267,91 @@ const getGlobalBalanceSummary = async (req, res, next) => {
 };
 
 // Buku Besar (Multi-Branch Ledger without Summary/Stats, Server-Side Paginated & Filtered)
+function getLedgerExcludedSettingKey(userId) {
+  return `ledger_excluded_categories_user_${userId}`;
+}
+
+async function loadLedgerExcludedCategories(userId) {
+  try {
+    const rows = await query(
+      'SELECT `value` FROM system_settings WHERE `key` = ? LIMIT 1',
+      [getLedgerExcludedSettingKey(userId)]
+    );
+    if (!rows.length || !rows[0].value) return [];
+    const parsed = JSON.parse(rows[0].value);
+    if (!Array.isArray(parsed)) return [];
+    return Array.from(new Set(parsed.map(v => String(v || '').trim()).filter(Boolean)));
+  } catch (err) {
+    return [];
+  }
+}
+
+async function loadLedgerAvailableCategories(accessibleIds) {
+  if (!accessibleIds || accessibleIds.length === 0) return [];
+  const placeholders = accessibleIds.map(() => '?').join(',');
+  const rows = await query(
+    `SELECT c.name, c.type, cp.name as parent_name
+     FROM categories c
+     LEFT JOIN categories cp ON c.parent_id = cp.id
+     WHERE c.status_deleted = false
+       AND (c.branch_id IN (${placeholders}) OR c.branch_id IS NULL)
+     ORDER BY c.name ASC`,
+    accessibleIds
+  );
+
+  // Deduplicate category + parent pairs across branches and unify income/expense type
+  const merged = new Map();
+  for (const r of rows) {
+    const cleanName = String(r.name || '').trim();
+    if (!cleanName) continue;
+    const parentName = r.parent_name ? String(r.parent_name).trim() : null;
+    const key = `${cleanName.toLowerCase()}::${(parentName || '').toLowerCase()}`;
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, {
+        name: cleanName,
+        type: r.type || 'both',
+        parent_name: parentName
+      });
+    } else if (existing.type !== r.type && existing.type !== 'both') {
+      existing.type = 'both';
+    }
+  }
+  return Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+const updateLedgerExcludedCategories = async (req, res, next) => {
+  try {
+    const rawList = Array.isArray(req.body?.excludedCategories) ? req.body.excludedCategories : [];
+    const cleaned = Array.from(new Set(rawList.map(v => String(v || '').trim()).filter(Boolean)));
+
+    await query(`
+      CREATE TABLE IF NOT EXISTS system_settings (
+        \`key\` VARCHAR(255) PRIMARY KEY,
+        \`value\` TEXT,
+        \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+
+    const settingKey = getLedgerExcludedSettingKey(req.userId);
+    const jsonVal = JSON.stringify(cleaned);
+    await query(
+      'INSERT INTO system_settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)',
+      [settingKey, jsonVal]
+    );
+
+    res.json({
+      success: true,
+      message: 'Pengaturan kategori tersembunyi Buku Besar berhasil disimpan',
+      data: {
+        excludedCategories: cleaned
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const getLedger = async (req, res, next) => {
   try {
     const {
@@ -1280,6 +1365,7 @@ const getLedger = async (req, res, next) => {
       type,
       fundSource,
       categories,
+      applyDefaultExcluded = 'true',
       lampiran,
       search,
       sort = 'terbaru',
@@ -1291,7 +1377,10 @@ const getLedger = async (req, res, next) => {
     } = req.query;
 
     const Branch = require('../models/Branch');
-    const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user.role);
+    const [accessibleBranches, defaultExcludedCategories] = await Promise.all([
+      Branch.findByUserAccess(req.userId, req.user.role),
+      loadLedgerExcludedCategories(req.userId)
+    ]);
     const accessibleIds = accessibleBranches.map(b => b.id);
 
     let targetBranches = accessibleBranches;
@@ -1305,12 +1394,19 @@ const getLedger = async (req, res, next) => {
     const pageNum = Math.max(1, parseInt(page) || 1);
     const pageLimit = Math.min(500, Math.max(10, parseInt(limit) || 100));
 
+    const cursor = cursorDate && cursorCreatedAt && cursorId
+      ? { date: String(cursorDate), created_at: String(cursorCreatedAt), id: parseInt(cursorId) }
+      : null;
+
     if (targetBranches.length === 0) {
+      const availableCategories = !cursor ? await loadLedgerAvailableCategories(accessibleIds) : undefined;
       return res.json({
         success: true,
         data: {
           branches: accessibleBranches.map(b => ({ id: b.id, name: b.name, code: b.code, group_name: b.group_name })),
           sections: [],
+          availableCategories,
+          defaultExcludedCategories,
           page: pageNum,
           limit: pageLimit,
           hasMore: false
@@ -1342,6 +1438,12 @@ const getLedger = async (req, res, next) => {
       ? (Array.isArray(categories) ? categories : String(categories).split(',')).map(c => c.trim()).filter(Boolean)
       : null;
 
+    // Respect default hidden categories unless temporarily bypassed or explicitly picked in FilterModal
+    const shouldExcludeDefault = applyDefaultExcluded !== 'false' && defaultExcludedCategories.length > 0;
+    const effectiveExcludeCategories = shouldExcludeDefault
+      ? defaultExcludedCategories.filter(ex => !(parsedCategories || []).includes(ex))
+      : null;
+
     const validType = type === 'income' || type === 'expense' ? type : undefined;
     const validFundSource = ['kas_berjalan', 'kas_simpanan', 'kas_kecil'].includes(String(fundSource || '').trim())
       ? String(fundSource).trim()
@@ -1349,23 +1451,25 @@ const getLedger = async (req, res, next) => {
     const validSort = sort === 'terlama' ? 'terlama' : 'terbaru';
     const validLampiran = lampiran === 'Merah' || lampiran === 'Kuning' || lampiran === 'Hijau' ? lampiran : null;
 
-    const cursor = cursorDate && cursorCreatedAt && cursorId
-      ? { date: String(cursorDate), created_at: String(cursorCreatedAt), id: parseInt(cursorId) }
-      : null;
+    const [pageResult, availableCategories] = await Promise.all([
+      Transaction.findLedgerPage({
+        branchIds: targetBranchIds,
+        startDate: finalStart,
+        endDate: finalEnd,
+        type: validType,
+        fundSource: validFundSource,
+        categories: parsedCategories,
+        excludeCategories: effectiveExcludeCategories,
+        search: search ? String(search) : null,
+        lampiranStatus: validLampiran,
+        sort: validSort,
+        limit: pageLimit,
+        cursor
+      }),
+      !cursor ? loadLedgerAvailableCategories(accessibleIds) : Promise.resolve(undefined)
+    ]);
 
-    const { transactions: pageTransactions, hasMore, nextCursor } = await Transaction.findLedgerPage({
-      branchIds: targetBranchIds,
-      startDate: finalStart,
-      endDate: finalEnd,
-      type: validType,
-      fundSource: validFundSource,
-      categories: parsedCategories,
-      search: search ? String(search) : null,
-      lampiranStatus: validLampiran,
-      sort: validSort,
-      limit: pageLimit,
-      cursor
-    });
+    const { transactions: pageTransactions, hasMore, nextCursor } = pageResult;
 
     // Group transactions by date
     const transactionsByDate = {};
@@ -1385,13 +1489,18 @@ const getLedger = async (req, res, next) => {
     const sortedDates = Object.keys(transactionsByDate).sort((a, b) =>
       validSort === 'terlama' ? a.localeCompare(b) : b.localeCompare(a)
     );
-    const sections = sortedDates.map(d => formatSection(d, transactionsByDate[d], transactionsByDate[d], req));
+    const sections = sortedDates.map(d => ({
+      dateKey: d,
+      ...formatSection(d, transactionsByDate[d], transactionsByDate[d], req)
+    }));
 
     res.json({
       success: true,
       data: {
         branches: accessibleBranches.map(b => ({ id: b.id, name: b.name, code: b.code, group_name: b.group_name })),
         sections,
+        availableCategories,
+        defaultExcludedCategories,
         page: pageNum,
         limit: pageLimit,
         hasMore,
@@ -1411,5 +1520,6 @@ module.exports = {
   getTahunan,
   getGroupDashboard,
   getGlobalBalanceSummary,
-  getLedger
+  getLedger,
+  updateLedgerExcludedCategories
 };

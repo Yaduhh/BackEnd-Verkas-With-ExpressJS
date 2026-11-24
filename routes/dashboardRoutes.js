@@ -8,7 +8,8 @@ const {
   getTahunan,
   getGroupDashboard,
   getGlobalBalanceSummary,
-  getLedger
+  getLedger,
+  updateLedgerExcludedCategories
 } = require('../controllers/dashboardController');
 const { authenticate } = require('../middleware/auth');
 const { getCurrentBranch } = require('../middleware/branchContext');
@@ -26,6 +27,7 @@ router.use(authenticate);
 router.get('/group', getGroupDashboard);
 router.get('/global-summary', getGlobalBalanceSummary);
 router.get('/ledger', getLedger);
+router.put('/ledger/excluded-categories', updateLedgerExcludedCategories);
 
 // Add branch context - REQUIRED for standard single-branch dashboard (admin auto-assign, owner from header)
 router.use(getCurrentBranch);
