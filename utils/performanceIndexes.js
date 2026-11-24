@@ -11,6 +11,7 @@ const PERFORMANCE_INDEXES = [
   { table: 'transaction_refunds', name: 'idx_tref_refund_date_tx', columns: '(refund_date, transaction_id)' },
   { table: 'transaction_refunds', name: 'idx_tref_tx_refund_date', columns: '(transaction_id, refund_date)' },
   { table: 'transaction_income_details', name: 'idx_tid_tx_id', columns: '(transaction_id)' },
+  { table: 'transaction_sales_channels', name: 'idx_tsc_tx_channel', columns: '(transaction_id, sales_channel_id)' },
   { table: 'transaction_savings_details', name: 'idx_tsd_tx_cat', columns: '(transaction_id, category_id)' },
   { table: 'transaction_mitra_details', name: 'idx_tmd_mitra_tx', columns: '(mitra_piutang_id, transaction_id)' },
 ];

@@ -6,9 +6,128 @@ const GroupReport = require('../../models/GroupReport');
 const { query } = require('../../config/database');
 const { computeBranchSystemSalesChannels } = require('../../utils/salesChannelHelper');
 const {
+    getTscAggJoinSql,
+    getTscAggParams,
     getTransactionPb1SubquerySql,
     getTransactionTaxableAmountSubquerySql
 } = require('../../utils/pb1Helper');
+
+const GROUP_INCOME_TSC_SCOPE_WHERE = `t_sub.branch_id = ? AND t_sub.type = 'income' AND t_sub.transaction_date BETWEEN ? AND ? AND t_sub.status_deleted = false AND (t_sub.is_draft = false OR t_sub.is_draft IS NULL) AND t_sub.is_umum = true`;
+
+/**
+ * Fetch and classify a single branch's period income cleanly (matching branchReportCoreController):
+ * - Omzet variations aggregate into 'OMZET PENJUALAN' using full sales gross - PB1 - past refunds
+ * - Non-omzet income excludes debt repayment rows (is_debt_payment = 1) & expense refund categories
+ * - Includes previous-period Piutang repayments collected in this period
+ */
+const fetchBranchGroupIncome = async ({ branchId, startDate, endDate }) => {
+    const [incomeRows, pastIncomeRefundsResult, debtRepaymentResult] = await Promise.all([
+        query(
+            `SELECT 
+                t.category_id,
+                COALESCE(c.name, 'Lain-lain') as category_name,
+                t.is_debt_payment,
+                SUM(t.amount + COALESCE(future_ref.amount, 0)) as total_gross,
+                SUM(
+                    COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
+                ) as taxable_amount,
+                SUM(
+                    ${getTransactionPb1SubquerySql('t', 'tsc_agg')}
+                ) as total_pb1,
+                (SELECT COUNT(*) FROM transactions t2 WHERE t2.category_id = t.category_id AND t2.type = 'expense' AND t2.status_deleted = false AND (t2.is_draft = false OR t2.is_draft IS NULL) AND t2.branch_id = t.branch_id) as has_expense
+             FROM transactions t
+             LEFT JOIN categories c ON t.category_id = c.id
+             LEFT JOIN (
+                 SELECT transaction_id, SUM(amount) as amount 
+                 FROM transaction_refunds 
+                 WHERE refund_date > ? 
+                 GROUP BY transaction_id
+             ) future_ref ON t.id = future_ref.transaction_id
+             ${getTscAggJoinSql('tsc_agg', GROUP_INCOME_TSC_SCOPE_WHERE, 't')}
+             WHERE t.branch_id = ? 
+               AND t.type = 'income' 
+               AND t.transaction_date BETWEEN ? AND ? 
+               AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
+               AND t.is_umum = true
+               AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
+             GROUP BY t.category_id, c.name, t.is_debt_payment`,
+            [endDate, ...getTscAggParams([branchId, startDate, endDate]), branchId, startDate, endDate]
+        ),
+        query(
+            `SELECT COALESCE(SUM(tr.amount), 0) as total_past_refunds
+             FROM transaction_refunds tr
+             JOIN transactions t ON tr.transaction_id = t.id
+             WHERE t.branch_id = ?
+               AND t.type = 'income'
+               AND tr.refund_date BETWEEN ? AND ?
+               AND t.transaction_date < ?
+               AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
+               AND t.is_umum = true`,
+            [branchId, startDate, endDate, startDate]
+        ),
+        query(
+            `SELECT SUM(tr.amount) as total
+             FROM transaction_repayments tr
+             JOIN transactions t ON tr.transaction_id = t.id
+             WHERE tr.payment_date BETWEEN ? AND ?
+               AND tr.deleted_at IS NULL
+               AND t.transaction_date < ?
+               AND t.branch_id = ?
+               AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)`,
+            [startDate, endDate, startDate, branchId]
+        )
+    ]);
+
+    const pastIncomeRefunds = parseFloat(pastIncomeRefundsResult[0]?.total_past_refunds || 0);
+    const branchPelunasan = parseFloat(debtRepaymentResult[0]?.total) || 0;
+
+    const categoryMap = {};
+    let hasOmzetRow = false;
+
+    for (const inc of incomeRows) {
+        const g = parseFloat(inc.total_gross) || 0;
+        const tax = inc.total_pb1 !== undefined && inc.total_pb1 !== null
+            ? parseFloat(inc.total_pb1) || 0
+            : Math.round(((parseFloat(inc.taxable_amount) || 0) * 10) / 110);
+        const net = g - tax;
+        const nameUpper = (inc.category_name || '').toUpperCase();
+        const hasExpense = parseInt(inc.has_expense) > 0;
+        const isOmzet = nameUpper.includes('OMZET') || nameUpper.includes('OMSET');
+
+        if (isOmzet) {
+            hasOmzetRow = true;
+            if (!categoryMap['OMZET PENJUALAN']) {
+                categoryMap['OMZET PENJUALAN'] = { total: 0, total_tax: 0, total_net: 0 };
+            }
+            categoryMap['OMZET PENJUALAN'].total += g;
+            categoryMap['OMZET PENJUALAN'].total_tax += tax;
+            categoryMap['OMZET PENJUALAN'].total_net += net;
+        } else if ((!inc.is_debt_payment || inc.is_debt_payment == 0) && !hasExpense) {
+            const cat = inc.category_name;
+            if (!categoryMap[cat]) {
+                categoryMap[cat] = { total: 0, total_tax: 0, total_net: 0 };
+            }
+            categoryMap[cat].total += g;
+            categoryMap[cat].total_tax += tax;
+            categoryMap[cat].total_net += net;
+        }
+    }
+
+    if (pastIncomeRefunds > 0 && hasOmzetRow) {
+        categoryMap['OMZET PENJUALAN'].total -= pastIncomeRefunds;
+        categoryMap['OMZET PENJUALAN'].total_net -= pastIncomeRefunds;
+    }
+
+    const totalCategoriesNet = Object.values(categoryMap).reduce((sum, item) => sum + item.total_net, 0)
+        - (!hasOmzetRow && pastIncomeRefunds > 0 ? pastIncomeRefunds : 0);
+    const branchOmzet = totalCategoriesNet + branchPelunasan;
+
+    return {
+        branchOmzet,
+        branchPelunasan,
+        categoryMap
+    };
+};
 const { 
     exportFinancialReportToPDF, 
     exportInvestorReportToPDF,
@@ -69,57 +188,8 @@ const getConsolidatedReport = async (req, res, next) => {
         for (const branch of targetBranches) {
             const branchId = branch.id;
 
-            // 1. Omzet
-            const incomeResult = await query(
-                `SELECT 
-                    SUM(
-                        CASE 
-                            WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
-                            ELSE (t.amount + COALESCE(future_ref.amount, 0)) 
-                        END
-                    ) as total_gross,
-                    SUM(
-                        COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
-                    ) as taxable_amount,
-                    SUM(
-                        ${getTransactionPb1SubquerySql('t')}
-                    ) as total_pb1
-                 FROM transactions t
-                 LEFT JOIN categories c ON t.category_id = c.id
-                 LEFT JOIN (
-                     SELECT transaction_id, SUM(amount) as amount 
-                     FROM transaction_refunds 
-                     WHERE refund_date > ? 
-                     GROUP BY transaction_id
-                 ) future_ref ON t.id = future_ref.transaction_id
-                 WHERE t.branch_id = ? 
-                   AND t.type = 'income' 
-                   AND t.transaction_date BETWEEN ? AND ? 
-                   AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-                   AND t.is_umum = true
-                   AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)`,
-                [endDate, branchId, startDate, endDate]
-            );
-
-            const pastIncomeRefundsResult = await query(
-                `SELECT COALESCE(SUM(tr.amount), 0) as total_past_refunds
-                 FROM transaction_refunds tr
-                 JOIN transactions t ON tr.transaction_id = t.id
-                 WHERE t.branch_id = ?
-                   AND t.type = 'income'
-                   AND tr.refund_date BETWEEN ? AND ?
-                   AND t.transaction_date < ?
-                   AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-                   AND t.is_umum = true`,
-                [branchId, startDate, endDate, startDate]
-            );
-            const pastIncomeRefunds = parseFloat(pastIncomeRefundsResult[0]?.total_past_refunds || 0);
-            const systemOmzetGross = (parseFloat(incomeResult[0]?.total_gross) || 0) - pastIncomeRefunds;
-            const systemTaxable = parseFloat(incomeResult[0]?.taxable_amount) || 0;
-            const systemPb1 = incomeResult[0]?.total_pb1 !== undefined && incomeResult[0]?.total_pb1 !== null
-                ? parseFloat(incomeResult[0].total_pb1) || 0
-                : Math.round((systemTaxable * 10) / 110);
-            const branchOmzet = systemOmzetGross - systemPb1;
+            // 1. Omzet (aligned with branchReportCoreController: excludes debt repayment notifications & expense categories)
+            const { branchOmzet } = await fetchBranchGroupIncome({ branchId, startDate, endDate });
 
             // 2. Pengeluaran
             const expenseBreakdown = await query(
@@ -147,8 +217,8 @@ const getConsolidatedReport = async (req, res, next) => {
                       AND (t.is_savings = 0 OR t.is_savings IS NULL)
                       AND (
                         t.type = 'expense' 
-                        OR (t.type = 'income' AND t.category_id IN (
-                           SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false
+                        OR (t.type = 'income' AND c.name IS NOT NULL AND UPPER(c.name) NOT LIKE '%OMZET%' AND UPPER(c.name) NOT LIKE '%OMSET%' AND t.category_id IN (
+                           SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false AND (is_draft = false OR is_draft IS NULL) AND category_id IS NOT NULL
                         ))
                       )
 
@@ -364,57 +434,12 @@ const getGroupFinancialReport = async (req, res, next) => {
         for (const branch of targetBranches) {
             const branchId = branch.id;
 
-            // 1. Omzet
-            const incomeResult = await query(
-                `SELECT 
-                    SUM(
-                        CASE 
-                            WHEN (t.is_debt_payment = 1 OR t.is_debt_payment = true) THEN COALESCE(t.paid_amount, 0) 
-                            ELSE (t.amount + COALESCE(future_ref.amount, 0)) 
-                        END
-                    ) as total_gross,
-                    SUM(
-                        COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
-                    ) as taxable_amount,
-                    SUM(
-                        ${getTransactionPb1SubquerySql('t')}
-                    ) as total_pb1
-                 FROM transactions t
-                 LEFT JOIN categories c ON t.category_id = c.id
-                 LEFT JOIN (
-                     SELECT transaction_id, SUM(amount) as amount 
-                     FROM transaction_refunds 
-                     WHERE refund_date > ? 
-                     GROUP BY transaction_id
-                 ) future_ref ON t.id = future_ref.transaction_id
-                 WHERE t.branch_id = ? 
-                   AND t.type = 'income' 
-                   AND t.transaction_date BETWEEN ? AND ? 
-                   AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-                   AND t.is_umum = true
-                   AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)`,
-                [endDate, branchId, startDate, endDate]
-            );
-
-            const pastIncomeRefundsResult = await query(
-                `SELECT COALESCE(SUM(tr.amount), 0) as total_past_refunds
-                 FROM transaction_refunds tr
-                 JOIN transactions t ON tr.transaction_id = t.id
-                 WHERE t.branch_id = ?
-                   AND t.type = 'income'
-                   AND tr.refund_date BETWEEN ? AND ?
-                   AND t.transaction_date < ?
-                   AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-                   AND t.is_umum = true`,
-                [branchId, startDate, endDate, startDate]
-            );
-            const pastIncomeRefunds = parseFloat(pastIncomeRefundsResult[0]?.total_past_refunds || 0);
-            const systemOmzetGross = (parseFloat(incomeResult[0]?.total_gross) || 0) - pastIncomeRefunds;
-            const systemTaxable = parseFloat(incomeResult[0]?.taxable_amount) || 0;
-            const systemPb1 = incomeResult[0]?.total_pb1 !== undefined && incomeResult[0]?.total_pb1 !== null
-                ? parseFloat(incomeResult[0].total_pb1) || 0
-                : Math.round((systemTaxable * 10) / 110);
-            const branchOmzet = systemOmzetGross - systemPb1;
+            // 1. Omzet & categorized income breakdown (single source of truth matching branchReportCoreController)
+            const {
+                branchOmzet,
+                branchPelunasan,
+                categoryMap: branchIncomeMap
+            } = await fetchBranchGroupIncome({ branchId, startDate, endDate });
 
             // 2. Expense breakdown
             const expenseBreakdown = await query(
@@ -442,8 +467,8 @@ const getGroupFinancialReport = async (req, res, next) => {
                       AND (t.is_savings = 0 OR t.is_savings IS NULL)
                       AND (
                         t.type = 'expense' 
-                        OR (t.type = 'income' AND t.category_id IN (
-                           SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false
+                        OR (t.type = 'income' AND c.name IS NOT NULL AND UPPER(c.name) NOT LIKE '%OMZET%' AND UPPER(c.name) NOT LIKE '%OMSET%' AND t.category_id IN (
+                           SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false AND (is_draft = false OR is_draft IS NULL) AND category_id IS NOT NULL
                         ))
                       )
 
@@ -521,51 +546,7 @@ const getGroupFinancialReport = async (req, res, next) => {
             const branchPengeluaran = folderPengeluaran + totalPiutangMitra;
             const branchSaldo = branchOmzet - branchPengeluaran;
 
-            // 4. Debt repayments (Pelunasan Piutang Bulan Lalu)
-            const debtRepaymentResult = await query(
-                `SELECT SUM(tr.amount) as total
-                 FROM transaction_repayments tr
-                 JOIN transactions t ON tr.transaction_id = t.id
-                 WHERE tr.payment_date BETWEEN ? AND ?
-                   AND tr.deleted_at IS NULL
-                   AND t.transaction_date < ?
-                   AND t.branch_id = ?
-                   AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)`,
-                [startDate, endDate, startDate, branchId]
-            );
-            const branchPelunasan = parseFloat(debtRepaymentResult[0]?.total) || 0;
-
-            // 5. Income Breakdown
-            const incomeBreakdownResult = await query(
-                `SELECT 
-                    t.category_id,
-                    COALESCE(c.name, 'Lain-lain') as category_name,
-                    SUM(t.amount + COALESCE(future_ref.amount, 0)) as total_gross,
-                    SUM(
-                        COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
-                    ) as taxable_amount,
-                    SUM(
-                        ${getTransactionPb1SubquerySql('t')}
-                    ) as total_pb1
-                 FROM transactions t
-                 LEFT JOIN categories c ON t.category_id = c.id
-                 LEFT JOIN (
-                     SELECT transaction_id, SUM(amount) as amount 
-                     FROM transaction_refunds 
-                     WHERE refund_date > ? 
-                     GROUP BY transaction_id
-                 ) future_ref ON t.id = future_ref.transaction_id
-                 WHERE t.branch_id = ? 
-                   AND t.type = 'income' 
-                   AND t.transaction_date BETWEEN ? AND ? 
-                   AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
-                   AND t.is_umum = true
-                   AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
-                 GROUP BY t.category_id, c.name`,
-                [endDate, branchId, startDate, endDate]
-            );
-
-            // 6. Sales Channels (per-transaction PB1 reconciled)
+            // 4. Sales Channels (per-transaction PB1 reconciled)
             const systemSalesChannelsResult = await computeBranchSystemSalesChannels(branchId, startDate, endDate);
 
             const masterSalesChannelsResult = await query(
@@ -673,18 +654,13 @@ const getGroupFinancialReport = async (req, res, next) => {
             }
 
             // Aggregated income map
-            for (const inc of incomeBreakdownResult) {
-                const cat = inc.category_name;
-                const g = parseFloat(inc.total_gross) || 0;
-                const tax = inc.total_pb1 !== undefined && inc.total_pb1 !== null
-                    ? parseFloat(inc.total_pb1) || 0
-                    : Math.round(((parseFloat(inc.taxable_amount) || 0) * 10) / 110);
+            for (const [cat, data] of Object.entries(branchIncomeMap)) {
                 if (!aggregatedIncomeMap[cat]) {
                     aggregatedIncomeMap[cat] = { total: 0, total_tax: 0, total_net: 0 };
                 }
-                aggregatedIncomeMap[cat].total += g;
-                aggregatedIncomeMap[cat].total_tax += tax;
-                aggregatedIncomeMap[cat].total_net += (g - tax);
+                aggregatedIncomeMap[cat].total += data.total;
+                aggregatedIncomeMap[cat].total_tax += data.total_tax;
+                aggregatedIncomeMap[cat].total_net += data.total_net;
             }
 
             // Aggregated sales channels map
@@ -841,7 +817,7 @@ const getGroupFinancialReport = async (req, res, next) => {
         // Active Omzet (if any income breakdown category is disabled)
         const hasDisabledIncome = disabledList.some(d => incomeBreakdown.some(i => i.category_name === d));
         const activeOmzetTotal = hasDisabledIncome
-            ? processedIncomeBreakdown.filter(item => item.is_active).reduce((sum, item) => sum + (parseFloat(item.total_net) || parseFloat(item.total) || 0), 0)
+            ? processedIncomeBreakdown.filter(item => item.is_active).reduce((sum, item) => sum + (parseFloat(item.total_net) || parseFloat(item.total) || 0), 0) + totalPelunasanPiutang
             : totalSystemOmzet;
 
         const activeProfit = activeOmzetTotal - activePengeluaranTotal;

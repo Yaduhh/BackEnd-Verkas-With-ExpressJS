@@ -7,9 +7,13 @@ const User = require('../../models/User');
 const { query } = require('../../config/database');
 const { computeBranchSystemSalesChannels } = require('../../utils/salesChannelHelper');
 const {
+    getTscAggJoinSql,
+    getTscAggParams,
     getTransactionPb1SubquerySql,
     getTransactionTaxableAmountSubquerySql
 } = require('../../utils/pb1Helper');
+
+const INCOME_TSC_SCOPE_WHERE = `t_sub.branch_id = ? AND t_sub.type = 'income' AND t_sub.transaction_date BETWEEN ? AND ? AND t_sub.status_deleted = false AND (t_sub.is_draft = false OR t_sub.is_draft IS NULL) AND t_sub.is_umum = true`;
 
 const normalizeBagiHasilArray = (arr) =>
     JSON.stringify(
@@ -179,7 +183,7 @@ const getReport = async (req, res, next) => {
                     COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
                 ) as taxable_amount,
                 SUM(
-                    ${getTransactionPb1SubquerySql('t')}
+                    ${getTransactionPb1SubquerySql('t', 'tsc_agg')}
                 ) as total_pb1
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
@@ -189,13 +193,14 @@ const getReport = async (req, res, next) => {
                  WHERE refund_date > ? 
                  GROUP BY transaction_id
              ) future_ref ON t.id = future_ref.transaction_id
+             ${getTscAggJoinSql('tsc_agg', INCOME_TSC_SCOPE_WHERE, 't')}
              WHERE t.branch_id = ? 
                AND t.type = 'income' 
                AND t.transaction_date BETWEEN ? AND ? 
                AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
                AND t.is_umum = true
                AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)`,
-            [endDate, branchId, startDate, endDate]
+            [endDate, ...getTscAggParams([branchId, startDate, endDate]), branchId, startDate, endDate]
         );
 
         const pastIncomeRefundsResult = await query(
@@ -247,8 +252,8 @@ const getReport = async (req, res, next) => {
                   AND (t.is_savings = 0 OR t.is_savings IS NULL)
                   AND (
                     t.type = 'expense' 
-                    OR (t.type = 'income' AND t.category_id IN (
-                       SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false
+                    OR (t.type = 'income' AND c.name IS NOT NULL AND UPPER(c.name) NOT LIKE '%OMZET%' AND UPPER(c.name) NOT LIKE '%OMSET%' AND t.category_id IN (
+                       SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false AND (is_draft = false OR is_draft IS NULL) AND category_id IS NOT NULL
                     ))
                   )
 
@@ -450,7 +455,7 @@ const getReport = async (req, res, next) => {
                     COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
                 ) as taxable_amount,
                 SUM(
-                    ${getTransactionPb1SubquerySql('t')}
+                    ${getTransactionPb1SubquerySql('t', 'tsc_agg')}
                 ) as total_pb1,
                 (SELECT COUNT(*) FROM transactions t2 WHERE t2.category_id = t.category_id AND t2.type = 'expense' AND t2.status_deleted = false AND t2.branch_id = t.branch_id) as has_expense
              FROM transactions t
@@ -461,6 +466,7 @@ const getReport = async (req, res, next) => {
                  WHERE refund_date > ? 
                  GROUP BY transaction_id
              ) future_ref ON t.id = future_ref.transaction_id
+             ${getTscAggJoinSql('tsc_agg', INCOME_TSC_SCOPE_WHERE, 't')}
              WHERE t.branch_id = ?
                AND t.type = 'income'
                AND t.transaction_date BETWEEN ? AND ?
@@ -468,7 +474,7 @@ const getReport = async (req, res, next) => {
                AND t.is_umum = true
                AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
              GROUP BY category_name, t.is_debt_payment, t.category_id`,
-            [endDate, branchId, startDate, endDate]
+            [endDate, ...getTscAggParams([branchId, startDate, endDate]), branchId, startDate, endDate]
         );
 
         // Group them into the display format
@@ -894,7 +900,7 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                     COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
                 ) as taxable_amount,
                 SUM(
-                    ${getTransactionPb1SubquerySql('t')}
+                    ${getTransactionPb1SubquerySql('t', 'tsc_agg')}
                 ) as total_pb1
              FROM transactions t
              LEFT JOIN categories c ON t.category_id = c.id
@@ -904,13 +910,14 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                  WHERE refund_date > ? 
                  GROUP BY transaction_id
              ) future_ref ON t.id = future_ref.transaction_id
+             ${getTscAggJoinSql('tsc_agg', INCOME_TSC_SCOPE_WHERE, 't')}
              WHERE t.branch_id = ? 
                AND t.type = 'income' 
                AND t.transaction_date BETWEEN ? AND ? 
                AND t.status_deleted = false AND (t.is_draft = false OR t.is_draft IS NULL)
                AND t.is_umum = true
                AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)`,
-            [endDate, branchId, startDate, endDate]
+            [endDate, ...getTscAggParams([branchId, startDate, endDate]), branchId, startDate, endDate]
         );
 
         const pastIncomeRefundsResult = await query(
@@ -960,8 +967,8 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                   AND (t.is_savings = 0 OR t.is_savings IS NULL)
                   AND (
                     t.type = 'expense' 
-                    OR (t.type = 'income' AND t.category_id IN (
-                       SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false
+                    OR (t.type = 'income' AND c.name IS NOT NULL AND UPPER(c.name) NOT LIKE '%OMZET%' AND UPPER(c.name) NOT LIKE '%OMSET%' AND t.category_id IN (
+                       SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false AND (is_draft = false OR is_draft IS NULL) AND category_id IS NOT NULL
                     ))
                   )
 
@@ -1115,7 +1122,7 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                     COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
                 ) as taxable_amount,
                 SUM(
-                    ${getTransactionPb1SubquerySql('t')}
+                    ${getTransactionPb1SubquerySql('t', 'tsc_agg')}
                 ) as total_pb1,
                 t.is_debt_payment,
                 (SELECT COUNT(*) FROM transactions WHERE category_id = t.category_id AND type = 'expense' AND status_deleted = false) as has_expense
@@ -1127,6 +1134,7 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                  WHERE refund_date > ? 
                  GROUP BY transaction_id
              ) future_ref ON t.id = future_ref.transaction_id
+             ${getTscAggJoinSql('tsc_agg', INCOME_TSC_SCOPE_WHERE, 't')}
              WHERE t.branch_id = ? 
                AND t.type = 'income' 
                AND t.transaction_date BETWEEN ? AND ? 
@@ -1134,7 +1142,7 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                AND t.is_umum = true
                AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
              GROUP BY category_name, t.is_debt_payment, t.category_id`,
-            [endDate, branchId, startDate, endDate]
+            [endDate, ...getTscAggParams([branchId, startDate, endDate]), branchId, startDate, endDate]
         );
 
         const groupedIncome = {

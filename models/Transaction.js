@@ -1,6 +1,8 @@
 const { query, transaction: dbTransaction } = require('../config/database');
 const {
   getTidAggPb1SelectSql,
+  getTscAggJoinSql,
+  getTscAggParams,
   getOuterAggPb1SelectSql,
   getTransactionPb1SubquerySql,
   getTransactionTaxableAmountSubquerySql
@@ -127,6 +129,61 @@ class Transaction {
     );
     transaction.sales_channel_details = salesChannelDetails;
 
+    // Align transaction.pb1 & apc with Sales Channel breakdown when sales_channel_details exist
+    if (transaction.type === 'income' && salesChannelDetails.length > 0) {
+      const groupedScMap = new Map();
+      const singleTidPmTaxable =
+        incomeDetails.length === 1
+          ? (incomeDetails[0].is_taxable === 1 || incomeDetails[0].is_taxable === true)
+          : false;
+
+      for (const sc of salesChannelDetails) {
+        const chId = sc.sales_channel_id;
+        const rawAmount = parseFloat(sc.amount || 0) || 0;
+        const hasExact = sc.pb1_amount !== null && sc.pb1_amount !== undefined && sc.pb1_amount !== '';
+        const exactPb1 = hasExact ? (parseFloat(sc.pb1_amount) || 0) : 0;
+        const isTax =
+          sc.payment_method_id || sc.transaction_income_detail_id
+            ? (sc.payment_method_is_taxable === 1 || sc.payment_method_is_taxable === true)
+            : singleTidPmTaxable;
+
+        if (!groupedScMap.has(chId)) {
+          groupedScMap.set(chId, {
+            has_exact_pb1: false,
+            exact_pb1_sum: 0,
+            taxable_gross: 0
+          });
+        }
+        const g = groupedScMap.get(chId);
+        if (hasExact) {
+          g.has_exact_pb1 = true;
+          g.exact_pb1_sum += exactPb1;
+          if (exactPb1 > 0 || isTax) g.taxable_gross += rawAmount;
+        } else if (isTax) {
+          g.taxable_gross += rawAmount;
+          g.exact_pb1_sum += Math.round((rawAmount * 10) / 110);
+        }
+      }
+
+      const scGroups = Array.from(groupedScMap.values());
+      const txHasAnyExactPb1 = scGroups.some((g) => g.has_exact_pb1);
+      const scPb1Sum = scGroups.reduce((sum, g) => {
+        if (txHasAnyExactPb1) return sum + Math.round(g.exact_pb1_sum);
+        return sum + (g.taxable_gross > 0 ? Math.round((g.taxable_gross * 10) / 110) : 0);
+      }, 0);
+
+      const curPb1 = parseFloat(transaction.pb1 || 0) || 0;
+      if (txHasAnyExactPb1 || !(curPb1 > 0) || Math.abs(curPb1 - scPb1Sum) > 5) {
+        transaction.pb1 = scPb1Sum;
+      }
+
+      if (transaction.total_customer && Number(transaction.total_customer) > 0) {
+        const effPb1 = parseFloat(transaction.pb1 || 0);
+        const netAmt = Math.max(0, Math.abs(parseFloat(transaction.amount || 0)) - effPb1);
+        transaction.apc = Math.round(netAmt / Number(transaction.total_customer));
+      }
+    }
+
     // Fetch product items
     const productItems = await query(
       `SELECT tpi.*, p.name as product_name, pb.name as brand_name
@@ -250,8 +307,8 @@ class Transaction {
              COALESCE(t_future_ref.total_future_refund, 0) as future_refund,
              (ABS(t.amount) + COALESCE(t_ref.total_refund, 0)) as original_amount,
              (ABS(t.amount) + COALESCE(t_future_ref.total_future_refund, 0)) as net_amount,
-             /* Standardized dynamic PB1 calculation (exact pb1_amount > 0 if recorded, else t.pb1 > 0, else 10/110) */
-             ${getOuterAggPb1SelectSql('t', 'tid_agg')}
+             /* Standardized dynamic PB1 calculation (matches Sales Channel rules when tsc exists) */
+             ${getOuterAggPb1SelectSql('t', 'tid_agg', 'tsc_agg')}
     `;
     let joinDetails = '';
     const joinDetailsParams = [];
@@ -361,8 +418,12 @@ class Transaction {
       `;
     }
 
+    const tscScopeWhere = `${subBranchClause}${subExtraClause}`;
+    const tscParams = getTscAggParams([...validBranchParams, ...subExtraParams]);
+
     const params = [
       ...validBranchParams, ...subExtraParams, // tid_agg
+      ...tscParams, // tsc_agg
       ...validBranchParams, ...subExtraParams, // tr_sum
       ...validBranchParams, ...subExtraParams, // t_ref
       ...joinDetailsParams, // joinDetails
@@ -390,6 +451,7 @@ class Transaction {
         WHERE ${subBranchClause}${subExtraClause}
         GROUP BY tid.transaction_id
       ) tid_agg ON t.id = tid_agg.transaction_id
+      ${getTscAggJoinSql('tsc_agg', tscScopeWhere, 't')}
       LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id AND tr_notif.deleted_at IS NULL
       LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
       LEFT JOIN (
@@ -798,9 +860,18 @@ class Transaction {
     // Phase 2: Hydrate full details ONLY for the <= 100 matched IDs
     const pageIds = pageIdRows.map(r => r.id);
     const idPlaceholders = pageIds.map(() => '?').join(',');
+    const tscScopeWhere = `t_sub.id IN (${idPlaceholders})`;
+    const tscParams = getTscAggParams(pageIds);
 
     let futureRefundJoin = `LEFT JOIN (SELECT NULL as transaction_id, 0 as total_future_refund) t_future_ref ON 1=0`;
-    const hydrateParams = [...pageIds, ...pageIds, ...pageIds, ...pageIds, ...pageIds];
+    const hydrateParams = [
+      ...pageIds,     // tid_agg
+      ...tscParams,   // tsc_agg
+      ...pageIds,     // tr_sum
+      ...pageIds,     // t_ref
+      ...pageIds,     // tsd_agg
+      ...pageIds      // pct_agg
+    ];
     if (endDate && typeof endDate === 'string' && endDate.trim() !== '') {
       const parsedEnd = endDate.trim().split(' ')[0].split('T')[0];
       futureRefundJoin = `
@@ -831,7 +902,7 @@ class Transaction {
              pct_agg.petty_cash_names,
              (ABS(t.amount) + COALESCE(t_ref.total_refund, 0)) as original_amount,
              (ABS(t.amount) + COALESCE(t_future_ref.total_future_refund, 0)) as net_amount,
-             ${getOuterAggPb1SelectSql('t', 'tid_agg')}
+             ${getOuterAggPb1SelectSql('t', 'tid_agg', 'tsc_agg')}
       FROM transactions t
       LEFT JOIN branches b ON t.branch_id = b.id
       LEFT JOIN categories c ON t.category_id = c.id
@@ -849,6 +920,7 @@ class Transaction {
         WHERE tid.transaction_id IN (${idPlaceholders})
         GROUP BY tid.transaction_id
       ) tid_agg ON t.id = tid_agg.transaction_id
+      ${getTscAggJoinSql('tsc_agg', tscScopeWhere, 't')}
       LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id AND tr_notif.deleted_at IS NULL
       LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
       LEFT JOIN (
@@ -1856,11 +1928,15 @@ class Transaction {
         `;
       }
 
+      const legacyTscWhere = subScopeClause.replace(/^WHERE\s+/i, '');
+      const legacyTscParams = getTscAggParams(subScopeParams);
+
       const preJoinParams = [
-        ...subScopeParams, // tr_sum
-        ...subScopeParams, // t_ref
-        ...params,         // tsd_active (if categoryId)
-        ...futureRefundParams
+        ...subScopeParams,  // tr_sum
+        ...subScopeParams,  // t_ref
+        ...params,          // tsd_active (if categoryId)
+        ...futureRefundParams,
+        ...legacyTscParams  // tsc_agg
       ];
       params.length = 0;
       params.push(...preJoinParams);
@@ -1884,7 +1960,7 @@ class Transaction {
 
           COALESCE(SUM(CASE 
             WHEN t.type = 'income' AND (c.name LIKE '%omzet%' OR c.name LIKE '%omset%') AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-              ${getTransactionPb1SubquerySql('t')}
+              ${getTransactionPb1SubquerySql('t', 'tsc_agg')}
             ELSE 0 
           END), 0) as omzet_pb1,
 
@@ -1905,7 +1981,7 @@ class Transaction {
 
           COALESCE(SUM(CASE 
             WHEN t.type = 'income' AND (c.name NOT LIKE '%omzet%' AND c.name NOT LIKE '%omset%') AND (t.is_debt_payment IS NULL OR t.is_debt_payment = 0 OR t.category_id IS NOT NULL) AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL) THEN
-              ${getTransactionPb1SubquerySql('t')}
+              ${getTransactionPb1SubquerySql('t', 'tsc_agg')}
             ELSE 0 
           END), 0) as lain_pb1,
 
@@ -1951,6 +2027,7 @@ class Transaction {
         ) t_ref ON t.id = t_ref.transaction_id
         ${joinDetails}
         ${joinFutureRefund}
+        ${getTscAggJoinSql('tsc_agg', legacyTscWhere, 't')}
         WHERE 1=1
       `;
 
@@ -2020,20 +2097,31 @@ class Transaction {
       const {
         omzet_gross,
         omzet_taxable,
+        omzet_pb1,
         lain_gross,
         lain_taxable,
+        lain_pb1,
         pelunasan_piutang_lalu,
         pengeluaran,
         total_taxable,
         total_pb1_paid
       } = row;
       const totalPb1Paid = Number(total_pb1_paid);
-      const fallbackOmzetTax = Math.round((Number(omzet_taxable) * 10) / 110);
+      const fallbackOmzetTax =
+        omzet_pb1 !== undefined && omzet_pb1 !== null
+          ? Number(omzet_pb1)
+          : Math.round((Number(omzet_taxable) * 10) / 110);
       const fallbackTotalOmzetNet = Number(omzet_gross) - fallbackOmzetTax;
-      const fallbackLainTax = Math.round((Number(lain_taxable) * 10) / 110);
+      const fallbackLainTax =
+        lain_pb1 !== undefined && lain_pb1 !== null
+          ? Number(lain_pb1)
+          : Math.round((Number(lain_taxable) * 10) / 110);
       const fallbackTotalPemasukanLainNet = Number(lain_gross) - fallbackLainTax;
       const fallbackTotalPelunasanLalu = Number(pelunasan_piutang_lalu);
-      const fallbackTotalPb1 = Math.round((Number(total_taxable) * 10) / 110);
+      const fallbackTotalPb1 =
+        omzet_pb1 !== undefined && lain_pb1 !== undefined
+          ? fallbackOmzetTax + fallbackLainTax
+          : Math.round((Number(total_taxable) * 10) / 110);
       const fallbackSaldoPb1 = fallbackTotalPb1 - totalPb1Paid;
       const fallbackTotalPemasukan = fallbackTotalOmzetNet + fallbackTotalPemasukanLainNet + fallbackTotalPelunasanLalu;
       const fallbackTotalPengeluaran = Number(pengeluaran);
@@ -2120,7 +2208,8 @@ class Transaction {
           [startDateOnly, endDateOnly, startDateOnly, branchId]
         );
 
-        // 2. Income Breakdown & Net Calculation (exact match with branchReportController.js)
+        // 2. Income Breakdown & Net Calculation (exact match with branchReportController.js & salesChannelController.js)
+        const incomeTscScopeWhere = `t_sub.branch_id = ? AND t_sub.type = 'income' AND t_sub.transaction_date BETWEEN ? AND ? AND t_sub.status_deleted = false AND (t_sub.is_draft = false OR t_sub.is_draft IS NULL) AND t_sub.is_umum = true`;
         const incomeBreakdownPromise = query(
           `SELECT 
               t.category_id,
@@ -2131,7 +2220,7 @@ class Transaction {
                   COALESCE(${getTransactionTaxableAmountSubquerySql('t')}, 0)
               ) as taxable_amount,
               SUM(
-                  ${getTransactionPb1SubquerySql('t')}
+                  ${getTransactionPb1SubquerySql('t', 'tsc_agg')}
               ) as total_pb1
            FROM transactions t
            LEFT JOIN categories c ON t.category_id = c.id
@@ -2148,6 +2237,7 @@ class Transaction {
                  AND t_sub.is_umum = true
                GROUP BY tref.transaction_id
            ) future_ref ON t.id = future_ref.transaction_id
+           ${getTscAggJoinSql('tsc_agg', incomeTscScopeWhere, 't')}
            WHERE t.branch_id = ?
              AND t.type = 'income'
              AND t.transaction_date BETWEEN ? AND ?
@@ -2156,7 +2246,11 @@ class Transaction {
              AND t.is_umum = true
              AND (c.name NOT LIKE '%Kas Simpanan%' OR c.name IS NULL)
            GROUP BY category_name, t.is_debt_payment, t.category_id`,
-          [endDateOnly, branchId, startDateOnly, endDateOnly, branchId, startDateOnly, endDateOnly]
+          [
+            endDateOnly, branchId, startDateOnly, endDateOnly,
+            ...getTscAggParams([branchId, startDateOnly, endDateOnly]),
+            branchId, startDateOnly, endDateOnly
+          ]
         );
 
         const pastIncomeRefundsPromise = query(

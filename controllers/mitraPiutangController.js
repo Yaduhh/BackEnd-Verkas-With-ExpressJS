@@ -5,27 +5,60 @@ const Branch = require('../models/Branch');
 // Get all mitra piutang
 const getAll = async (req, res, next) => {
   try {
-    const { include_deleted = false, startDate, endDate } = req.query;
-    const branchId = req.branchId || req.headers['x-branch-id'];
+    const { include_deleted = false, startDate, endDate, group_name, branch_ids } = req.query;
 
-    if (!branchId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Branch ID is required. Please provide X-Branch-Id header.'
-      });
-    }
+    let validBranchId;
+    let targetBranchIds = null;
 
-    // Verify branch access
-    const hasAccess = await Branch.userHasAccess(req.userId, parseInt(branchId), req.user.role);
-    if (!hasAccess) {
-      return res.status(403).json({
-        success: false,
-        message: 'No access to this branch'
-      });
+    if (group_name || branch_ids) {
+      const accessibleBranches = await Branch.findByUserAccess(req.userId, req.user.role);
+      const accessibleIds = accessibleBranches.map(b => b.id);
+      let targetBranches = [];
+
+      if (branch_ids) {
+        const ids = (typeof branch_ids === 'string' ? branch_ids.split(',') : branch_ids)
+          .map(id => parseInt(String(id).trim(), 10))
+          .filter(id => !isNaN(id) && accessibleIds.includes(id));
+        targetBranches = accessibleBranches.filter(b => ids.includes(b.id));
+      } else if (group_name && group_name !== 'Semua' && group_name !== 'ALL') {
+        targetBranches = accessibleBranches.filter(
+          b => b.group_name && b.group_name.toLowerCase() === String(group_name).toLowerCase()
+        );
+      } else {
+        targetBranches = accessibleBranches;
+      }
+
+      targetBranchIds = targetBranches.map(b => b.id);
+      if (targetBranchIds.length === 0) {
+        return res.json({
+          success: true,
+          data: { mitra_piutang: [] }
+        });
+      }
+    } else {
+      const branchId = req.branchId || req.headers['x-branch-id'];
+
+      if (!branchId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Branch ID is required. Please provide X-Branch-Id header.'
+        });
+      }
+
+      validBranchId = parseInt(branchId, 10);
+      // Verify branch access
+      const hasAccess = await Branch.userHasAccess(req.userId, validBranchId, req.user.role);
+      if (!hasAccess) {
+        return res.status(403).json({
+          success: false,
+          message: 'No access to this branch'
+        });
+      }
     }
 
     const mitraPiutang = await MitraPiutang.findAll({
-      branchId: parseInt(branchId),
+      branchId: validBranchId,
+      branchIds: targetBranchIds,
       includeDeleted: include_deleted === 'true',
       startDate,
       endDate

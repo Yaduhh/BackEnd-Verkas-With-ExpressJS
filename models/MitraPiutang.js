@@ -29,9 +29,13 @@ class MitraPiutang {
     return results[0] || null;
   }
 
-  // Find all (with branch isolation, cumulative remaining debt as of endDate, and period mutation breakdown)
-  static async findAll({ branchId, includeDeleted = false, startDate, endDate }) {
-    if (!branchId) {
+  // Find all (with branch isolation or group branchIds, cumulative remaining debt as of endDate, and period mutation breakdown)
+  static async findAll({ branchId, branchIds, includeDeleted = false, startDate, endDate }) {
+    const normalizedBranchIds = Array.isArray(branchIds)
+      ? branchIds.map(id => parseInt(id, 10)).filter(id => !isNaN(id))
+      : [];
+
+    if (!branchId && normalizedBranchIds.length === 0) {
       throw new Error('Branch ID is required for MitraPiutang.findAll');
     }
 
@@ -110,8 +114,12 @@ class MitraPiutang {
       params.push(endDate);
       params.push(endDate);
     }
-    // branch_id
-    params.push(branchId);
+    // branch_id filter
+    if (normalizedBranchIds.length > 0) {
+      params.push(...normalizedBranchIds);
+    } else {
+      params.push(branchId);
+    }
 
     let sql = `
       SELECT mp.*,
@@ -200,7 +208,7 @@ class MitraPiutang {
              ) as initial_balance_remaining
       FROM mitra_piutang mp
       LEFT JOIN users u ON mp.created_by = u.id
-      WHERE mp.branch_id = ?
+      WHERE ${normalizedBranchIds.length > 0 ? `mp.branch_id IN (${normalizedBranchIds.map(() => '?').join(', ')})` : 'mp.branch_id = ?'}
     `;
 
     if (!includeDeleted) {
