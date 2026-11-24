@@ -895,10 +895,11 @@ const cashierReportController = {
       const fullData = await CashierReport.getDailyReport(branchId, created.report_date || dateOnly);
       return res.status(201).json({
         success: true,
-        message:
-          created.count > 1
-            ? `${created.count} Piutang Mitra berhasil dicatat ke Transaksi dan saldo Mitra Piutang.`
-            : `Piutang Mitra berhasil dicatat ke Transaksi #${created.transaction_id} dan saldo Mitra Piutang.`,
+        message: created.attached_to_omzet
+          ? created.count > 1
+            ? `${created.count} Alokasi Piutang Mitra berhasil ditempelkan ke Omzet #${created.transaction_id} dan saldo Mitra Piutang.`
+            : `Alokasi Piutang Mitra berhasil ditempelkan ke Omzet #${created.transaction_id} dan saldo Mitra Piutang.`
+          : 'Piutang Mitra tersimpan di laporan kasir dan akan otomatis masuk ke Alokasi Piutang Mitra setelah Transaksi Omzet tanggal ini dibuat.',
         data: fullData
       });
     } catch (error) {

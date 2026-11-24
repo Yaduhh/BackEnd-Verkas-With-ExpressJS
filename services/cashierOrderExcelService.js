@@ -1,6 +1,7 @@
 const xlsx = require('xlsx');
 const ExcelJS = require('exceljs');
 const { query } = require('../config/database');
+const { resolveOrderPaymentMethod } = require('../utils/cashierOrderPaymentMethodHelper');
 
 const VALID_TABLE_TYPES = new Set([
   'offline_sales',
@@ -303,26 +304,6 @@ function detectBestHeaderInMatrix(matrix, spec) {
   return best && best.matchedCount >= 2 ? best : null;
 }
 
-function resolveBankAccountMatch(rawText, bankAccounts) {
-  const clean = String(rawText || '').trim();
-  if (!clean) return { id: null, name: '' };
-
-  const norm = normalizeText(clean);
-  const exact = bankAccounts.find((b) => normalizeText(b.name) === norm);
-  if (exact) return { id: Number(exact.id), name: exact.name };
-
-  // Token-stripped match (e.g. "BCA CV" vs "Bank BCA CV")
-  const partialMatches = bankAccounts.filter((b) => {
-    const bn = normalizeText(b.name);
-    return bn.includes(norm) || norm.includes(bn);
-  });
-  if (partialMatches.length === 1) {
-    return { id: Number(partialMatches[0].id), name: partialMatches[0].name };
-  }
-
-  return { id: null, name: clean };
-}
-
 function isTotalOrNextSectionRow(rowCells, noColIdx, customerColIdx) {
   const firstFew = rowCells.slice(0, 4).map(normalizeText).filter(Boolean);
   if (firstFew.some((t) => t === 'total' || t === 'grand total' || t === 'jumlah total')) {
@@ -347,7 +328,7 @@ function isTotalOrNextSectionRow(rowCells, noColIdx, customerColIdx) {
   return false;
 }
 
-function parseRowsFromMatrix(matrix, detected, spec, bankAccounts) {
+function parseRowsFromMatrix(matrix, detected, spec, paymentMethods, bankAccounts) {
   const { headerRowIdx, colMap, noColIdx } = detected;
   const rows = [];
   let skippedRows = 0;
@@ -394,8 +375,20 @@ function parseRowsFromMatrix(matrix, detected, spec, bankAccounts) {
     const dpChannelRaw = String(getCell(rawRow, 'dp_channel') || caraBayarRaw || '').trim();
     const settlementChannelRaw = String(getCell(rawRow, 'settlement_channel') || '').trim();
 
-    const dpBank = resolveBankAccountMatch(dpChannelRaw, bankAccounts);
-    const settlementBank = resolveBankAccountMatch(settlementChannelRaw, bankAccounts);
+    const dpResolved = resolveOrderPaymentMethod({
+      rawChannelText: dpChannelRaw,
+      paymentMethods,
+      bankAccounts,
+      context: spec.orderSection === 'offline_sales' ? 'general' : 'dp',
+      allowKeywordFallback: true
+    });
+    const settlementResolved = resolveOrderPaymentMethod({
+      rawChannelText: settlementChannelRaw,
+      paymentMethods,
+      bankAccounts,
+      context: 'settlement',
+      allowKeywordFallback: true
+    });
 
     let totalAmount = rawTotal;
     if (spec.orderSection === 'dp_deposit' && !totalAmount) {
@@ -449,14 +442,18 @@ function parseRowsFromMatrix(matrix, detected, spec, bankAccounts) {
       tf_mandiri_amount: tfMandiri,
       dp_amount: dpAmount,
       dp_transfer_date: dpTransferDate,
-      dp_channel: dpBank.name,
-      bank_account_id: dpBank.id,
-      bank_account_name: dpBank.name || null,
+      dp_channel: dpResolved.channel_name || '',
+      dp_payment_method_id: dpResolved.payment_method_id,
+      dp_payment_method_name: dpResolved.payment_method_name,
+      bank_account_id: dpResolved.bank_account_id,
+      bank_account_name: dpResolved.bank_account_name || null,
       settlement_amount: settlementAmount,
       settlement_transfer_date: settlementTransferDate,
-      settlement_channel: settlementBank.name,
-      settlement_bank_account_id: settlementBank.id,
-      settlement_bank_account_name: settlementBank.name || null,
+      settlement_channel: settlementResolved.channel_name || '',
+      settlement_payment_method_id: settlementResolved.payment_method_id,
+      settlement_payment_method_name: settlementResolved.payment_method_name,
+      settlement_bank_account_id: settlementResolved.bank_account_id,
+      settlement_bank_account_name: settlementResolved.bank_account_name || null,
       ongkir_bca_amount: ongkirBca,
       ongkir_mandiri_amount: ongkirMandiri,
       ongkir_amount: rawOngkir || (ongkirBca + ongkirMandiri),
@@ -468,6 +465,18 @@ function parseRowsFromMatrix(matrix, detected, spec, bankAccounts) {
   }
 
   return { rows, skippedRows };
+}
+
+async function getBranchActivePaymentMethods(branchId) {
+  if (!branchId) return [];
+  return await query(
+    `SELECT pm.id, pm.name, pm.parent_id, pm.default_bank_account_id, ba.name as default_bank_account_name
+     FROM payment_methods pm
+     LEFT JOIN bank_accounts ba ON pm.default_bank_account_id = ba.id
+     WHERE (pm.branch_id = ? OR pm.branch_id IS NULL) AND pm.is_active = 1
+     ORDER BY pm.sort_order ASC, pm.name ASC, pm.id ASC`,
+    [branchId]
+  );
 }
 
 async function getBranchActiveBankAccounts(branchId) {
@@ -538,8 +547,11 @@ async function parseOrderExcelPreview({ buffer, branchId, tableType, requestedSh
   }
 
   const matrix = xlsx.utils.sheet_to_json(workbook.Sheets[selectedSheet], { header: 1, defval: '' });
-  const bankAccounts = await getBranchActiveBankAccounts(branchId);
-  const { rows, skippedRows } = parseRowsFromMatrix(matrix, bestDetection, spec, bankAccounts);
+  const [paymentMethods, bankAccounts] = await Promise.all([
+    getBranchActivePaymentMethods(branchId),
+    getBranchActiveBankAccounts(branchId)
+  ]);
+  const { rows, skippedRows } = parseRowsFromMatrix(matrix, bestDetection, spec, paymentMethods, bankAccounts);
 
   const detectedHeaders = spec.fields
     .filter((f) => bestDetection.colMap[f.key] !== undefined)

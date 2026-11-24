@@ -1,4 +1,37 @@
 const { query, transaction: dbTransaction } = require('../config/database');
+const {
+  ensureOrderPaymentMethodColumns,
+  detectBankFamily,
+  resolveOrderPaymentMethod
+} = require('../utils/cashierOrderPaymentMethodHelper');
+
+let ensurePiutangDetailColPromise = null;
+async function ensurePiutangDetailIdColumn() {
+  if (!ensurePiutangDetailColPromise) {
+    ensurePiutangDetailColPromise = (async () => {
+      try {
+        const cols = await query(
+          `SELECT COLUMN_NAME
+           FROM INFORMATION_SCHEMA.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE()
+             AND TABLE_NAME = 'cashier_report_piutang_items'
+             AND COLUMN_NAME = 'transaction_mitra_detail_id'`
+        );
+        if (!cols || cols.length === 0) {
+          await query(`
+            ALTER TABLE cashier_report_piutang_items
+            ADD COLUMN transaction_mitra_detail_id INT NULL DEFAULT NULL AFTER transaction_id,
+            ADD INDEX idx_crpi_tmd_id (transaction_mitra_detail_id)
+          `);
+        }
+      } catch (err) {
+        ensurePiutangDetailColPromise = null;
+        throw err;
+      }
+    })();
+  }
+  return ensurePiutangDetailColPromise;
+}
 
 const toNum = (val) => {
   if (val === null || val === undefined || val === '') return 0;
@@ -864,6 +897,10 @@ class CashierReport {
   }
 
   static async getReportSnapshotById(reportId, conn = null) {
+    if (!conn) {
+      await ensureOrderPaymentMethodColumns();
+      await ensurePiutangDetailIdColumn();
+    }
     const exec = conn ? (sql, p) => conn.execute(sql, p).then(([r]) => r) : query;
 
     const reports = await exec(
@@ -976,11 +1013,17 @@ class CashierReport {
     );
 
     const orders = await exec(
-      `SELECT cro.*, ba.name as bank_account_name, ba_set.name as settlement_bank_account_name,
+      `SELECT cro.*,
+              ba.name as bank_account_name,
+              ba_set.name as settlement_bank_account_name,
+              pm_dp.name as dp_payment_method_name,
+              pm_set.name as settlement_payment_method_name,
               COALESCE(uv.name, uv.email) as verified_by_name
        FROM cashier_report_orders cro
        LEFT JOIN bank_accounts ba ON cro.bank_account_id = ba.id
        LEFT JOIN bank_accounts ba_set ON cro.settlement_bank_account_id = ba_set.id
+       LEFT JOIN payment_methods pm_dp ON cro.dp_payment_method_id = pm_dp.id
+       LEFT JOIN payment_methods pm_set ON cro.settlement_payment_method_id = pm_set.id
        LEFT JOIN users uv ON cro.verified_by = uv.id
        WHERE cro.report_id = ?
        ORDER BY cro.sort_order ASC, cro.id ASC`,
@@ -1003,10 +1046,16 @@ class CashierReport {
       const accountHolderName = extra.account_holder_name ? String(extra.account_holder_name).trim() : '';
       return {
         ...o,
+        dp_payment_method_id: o.dp_payment_method_id ? Number(o.dp_payment_method_id) : null,
+        dp_payment_method_name: o.dp_payment_method_name || null,
+        dp_channel: o.dp_payment_method_name || o.dp_channel || '',
         bank_account_id: o.bank_account_id ? Number(o.bank_account_id) : null,
-        bank_account_name: o.bank_account_name || o.dp_channel || null,
+        bank_account_name: o.bank_account_name || null,
+        settlement_payment_method_id: o.settlement_payment_method_id ? Number(o.settlement_payment_method_id) : null,
+        settlement_payment_method_name: o.settlement_payment_method_name || null,
+        settlement_channel: o.settlement_payment_method_name || o.settlement_channel || '',
         settlement_bank_account_id: o.settlement_bank_account_id ? Number(o.settlement_bank_account_id) : null,
-        settlement_bank_account_name: o.settlement_bank_account_name || o.settlement_channel || null,
+        settlement_bank_account_name: o.settlement_bank_account_name || null,
         product_total_amount: toNum(o.product_total_amount),
         tf_bca_amount: toNum(o.tf_bca_amount),
         tf_mandiri_amount: toNum(o.tf_mandiri_amount),
@@ -1044,13 +1093,18 @@ class CashierReport {
               COALESCE(uv.name, uv.email) as verified_by_name,
               t.id as live_tx_id,
               t.paid_amount as live_paid_amount,
-              t.remaining_debt as live_remaining_debt
+              t.remaining_debt as live_remaining_debt,
+              t.external_reference_id as live_tx_ext_ref,
+              tmd.id as live_tmd_id,
+              tmd.paid_amount as live_tmd_paid_amount,
+              tmd.remaining_debt as live_tmd_remaining_debt
        FROM cashier_report_piutang_items crpi
        LEFT JOIN mitra_piutang mp ON crpi.mitra_piutang_id = mp.id
        LEFT JOIN categories c ON crpi.category_id = c.id
        LEFT JOIN bank_accounts ba ON crpi.bank_account_id = ba.id
        LEFT JOIN users uv ON crpi.verified_by = uv.id
        LEFT JOIN transactions t ON crpi.transaction_id = t.id AND t.status_deleted = false
+       LEFT JOIN transaction_mitra_details tmd ON crpi.transaction_mitra_detail_id = tmd.id
        WHERE crpi.report_id = ?
        ORDER BY crpi.id ASC`,
       [reportId]
@@ -1133,12 +1187,22 @@ class CashierReport {
         .map(formatOrderRow),
       piutang_items: piutangRows.map((p) => {
         const amt = toNum(p.amount);
-        const paid = p.live_tx_id && p.live_paid_amount !== null && p.live_paid_amount !== undefined
-          ? toNum(p.live_paid_amount)
-          : toNum(p.paid_amount);
-        const remaining = p.live_tx_id && p.live_remaining_debt !== null && p.live_remaining_debt !== undefined
-          ? toNum(p.live_remaining_debt)
-          : Math.max(0, round2(amt - paid));
+        const isLegacyStandaloneTx =
+          Boolean(p.live_tx_id) &&
+          !p.live_tmd_id &&
+          String(p.live_tx_ext_ref || '') === `cashier_report_piutang_${p.id}`;
+        const paid =
+          p.live_tmd_id && p.live_tmd_paid_amount !== null && p.live_tmd_paid_amount !== undefined
+            ? toNum(p.live_tmd_paid_amount)
+            : isLegacyStandaloneTx && p.live_paid_amount !== null && p.live_paid_amount !== undefined
+              ? toNum(p.live_paid_amount)
+              : toNum(p.paid_amount);
+        const remaining =
+          p.live_tmd_id && p.live_tmd_remaining_debt !== null && p.live_tmd_remaining_debt !== undefined
+            ? toNum(p.live_tmd_remaining_debt)
+            : isLegacyStandaloneTx && p.live_remaining_debt !== null && p.live_remaining_debt !== undefined
+              ? toNum(p.live_remaining_debt)
+              : Math.max(0, round2(amt - paid));
         return {
           id: Number(p.id),
           report_id: Number(p.report_id),
@@ -1146,10 +1210,11 @@ class CashierReport {
           mitra_piutang_id: Number(p.mitra_piutang_id),
           mitra_nama: p.mitra_nama || '-',
           category_id: p.category_id ? Number(p.category_id) : null,
-          category_name: p.category_name || 'Pendapatan Lainnya',
+          category_name: p.category_name || '',
           bank_account_id: p.bank_account_id ? Number(p.bank_account_id) : null,
           bank_account_name: p.bank_account_name || null,
           transaction_id: p.live_tx_id ? Number(p.live_tx_id) : (p.transaction_id ? Number(p.transaction_id) : null),
+          transaction_mitra_detail_id: p.transaction_mitra_detail_id ? Number(p.transaction_mitra_detail_id) : null,
           amount: amt,
           paid_amount: paid,
           remaining_debt: remaining,
@@ -1643,6 +1708,9 @@ class CashierReport {
       throw new Error('Tanggal laporan tidak valid');
     }
 
+    await ensureOrderPaymentMethodColumns();
+    await ensurePiutangDetailIdColumn();
+
     const resultId = await dbTransaction(async (conn) => {
       const [existingRows] = await conn.execute(
         `SELECT id, omzet_transaction_id, status FROM cashier_daily_reports WHERE branch_id = ? AND report_date = ? LIMIT 1`,
@@ -1691,21 +1759,14 @@ class CashierReport {
            )`,
         [branchId, branchId]
       );
-      const bankById = new Map(branchBankRows.map((b) => [Number(b.id), b]));
-      const bankByName = new Map(branchBankRows.map((b) => [String(b.name || '').trim().toLowerCase(), b]));
-
-      const resolveBankChannel = (rawIdVal, rawTextVal) => {
-        const parsedId = rawIdVal ? parseInt(rawIdVal, 10) : null;
-        const text = rawTextVal ? String(rawTextVal).trim() : null;
-        const matched =
-          (parsedId ? bankById.get(parsedId) : null) ||
-          (text ? bankByName.get(text.toLowerCase()) : null) ||
-          null;
-        return {
-          id: matched ? Number(matched.id) : null,
-          name: matched ? String(matched.name).trim() : text
-        };
-      };
+      const [branchOrderPmRows] = await conn.execute(
+        `SELECT pm.id, pm.name, pm.parent_id, pm.default_bank_account_id, ba.name as default_bank_account_name
+         FROM payment_methods pm
+         LEFT JOIN bank_accounts ba ON pm.default_bank_account_id = ba.id
+         WHERE (pm.branch_id = ? OR pm.branch_id IS NULL) AND pm.is_active = 1
+         ORDER BY pm.sort_order ASC, pm.name ASC, pm.id ASC`,
+        [branchId]
+      );
 
       const branchConfig = await this.getBranchConfig(branchId, conn);
 
@@ -1729,9 +1790,11 @@ class CashierReport {
               toNum(o.dp_amount) > 0 ||
               o.dp_transfer_date ||
               o.dp_channel ||
+              o.dp_payment_method_id ||
               o.bank_account_id ||
               o.settlement_transfer_date ||
               o.settlement_channel ||
+              o.settlement_payment_method_id ||
               o.settlement_bank_account_id ||
               toNum(o.settlement_amount) > 0 ||
               toNum(o.ongkir_amount) > 0 ||
@@ -1792,8 +1855,24 @@ class CashierReport {
                 ? round2(o.settlement_amount)
                 : autoSettlement;
 
-            const dpBank = resolveBankChannel(o.bank_account_id, o.dp_channel);
-            const settlementBank = resolveBankChannel(o.settlement_bank_account_id, o.settlement_channel);
+            const dpResolved = resolveOrderPaymentMethod({
+              rawPaymentMethodId: o.dp_payment_method_id,
+              rawBankAccountId: o.bank_account_id,
+              rawChannelText: o.dp_channel,
+              paymentMethods: branchOrderPmRows,
+              bankAccounts: branchBankRows,
+              context: section === 'offline_sales' ? 'general' : 'dp',
+              allowKeywordFallback: false
+            });
+            const settlementResolved = resolveOrderPaymentMethod({
+              rawPaymentMethodId: o.settlement_payment_method_id,
+              rawBankAccountId: o.settlement_bank_account_id,
+              rawChannelText: o.settlement_channel,
+              paymentMethods: branchOrderPmRows,
+              bankAccounts: branchBankRows,
+              context: 'settlement',
+              allowKeywordFallback: false
+            });
 
             return {
               id: o.id ? Number(o.id) : null,
@@ -1806,12 +1885,14 @@ class CashierReport {
               tf_mandiri_amount: mandiri,
               dp_amount: dpAmt,
               dp_transfer_date: o.dp_transfer_date ? String(o.dp_transfer_date).trim() : null,
-              dp_channel: dpBank.name,
-              bank_account_id: dpBank.id,
+              dp_channel: dpResolved.channel_name,
+              dp_payment_method_id: dpResolved.payment_method_id,
+              bank_account_id: dpResolved.bank_account_id,
               settlement_amount: settlementAmt,
               settlement_transfer_date: o.settlement_transfer_date ? String(o.settlement_transfer_date).trim() : null,
-              settlement_channel: settlementBank.name,
-              settlement_bank_account_id: settlementBank.id,
+              settlement_channel: settlementResolved.channel_name,
+              settlement_payment_method_id: settlementResolved.payment_method_id,
+              settlement_bank_account_id: settlementResolved.bank_account_id,
               ongkir_bca_amount: ongkirBca,
               ongkir_mandiri_amount: ongkirMandiri,
               ongkir_amount: ongkirAmt,
@@ -2200,14 +2281,14 @@ class CashierReport {
 
         await conn.execute(
           `INSERT INTO cashier_report_orders
-           (report_id, order_section, customer_name, planned_pickup_date, product_total_amount, tf_bca_amount, tf_mandiri_amount, dp_amount, dp_transfer_date, dp_channel, bank_account_id,
-            settlement_amount, settlement_transfer_date, settlement_channel, settlement_bank_account_id, ongkir_bca_amount, ongkir_mandiri_amount, ongkir_amount, total_amount, pickup_date, notes, extra_data, external_reference_id, external_source, sort_order, is_verified, verified_by, verified_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (report_id, order_section, customer_name, planned_pickup_date, product_total_amount, tf_bca_amount, tf_mandiri_amount, dp_amount, dp_transfer_date, dp_channel, dp_payment_method_id, bank_account_id,
+            settlement_amount, settlement_transfer_date, settlement_channel, settlement_payment_method_id, settlement_bank_account_id, ongkir_bca_amount, ongkir_mandiri_amount, ongkir_amount, total_amount, pickup_date, notes, extra_data, external_reference_id, external_source, sort_order, is_verified, verified_by, verified_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             reportId, o.order_section, o.customer_name, o.planned_pickup_date, o.product_total_amount,
             o.tf_bca_amount, o.tf_mandiri_amount,
-            o.dp_amount, o.dp_transfer_date, o.dp_channel, o.bank_account_id, o.settlement_amount, o.settlement_transfer_date,
-            o.settlement_channel, o.settlement_bank_account_id, o.ongkir_bca_amount, o.ongkir_mandiri_amount, o.ongkir_amount, o.total_amount,
+            o.dp_amount, o.dp_transfer_date, o.dp_channel, o.dp_payment_method_id, o.bank_account_id, o.settlement_amount, o.settlement_transfer_date,
+            o.settlement_channel, o.settlement_payment_method_id, o.settlement_bank_account_id, o.ongkir_bca_amount, o.ongkir_mandiri_amount, o.ongkir_amount, o.total_amount,
             o.pickup_date, o.notes, o.extra_data, o.external_reference_id, o.external_source, o.sort_order,
             isVerifiedVal, verifiedByVal || null, verifiedAtVal || null
           ]
@@ -2311,6 +2392,12 @@ class CashierReport {
               `UPDATE cashier_daily_reports SET omzet_transaction_id = ?, last_synced_at = NOW() WHERE id = ?`,
               [linkedTxId, reportId]
             );
+
+            // Attach any pending Input Piutang Mitra rows for this report onto the Omzet transaction
+            await this._attachPendingPiutangItemsToOmzetTx(conn, {
+              reportId,
+              omzetTxId: linkedTxId
+            });
           }
         }
       }
@@ -2777,6 +2864,8 @@ class CashierReport {
       throw err;
     }
 
+    await ensureOrderPaymentMethodColumns();
+
     return await dbTransaction(async (conn) => {
       const [existingRows] = await conn.execute(
         `SELECT id, status FROM cashier_daily_reports WHERE branch_id = ? AND report_date = ? LIMIT 1`,
@@ -2906,43 +2995,15 @@ class CashierReport {
          ORDER BY ba.id ASC`,
         [branchId, branchId]
       );
-      const bankById = new Map(branchBankRows.map((b) => [Number(b.id), b]));
-      const bankByName = new Map(branchBankRows.map((b) => [String(b.name || '').trim().toLowerCase(), b]));
-
-      const resolveBank = (rawIdVal, rawTextVal) => {
-        const parsedId = rawIdVal ? parseInt(rawIdVal, 10) : null;
-        const text = rawTextVal ? String(rawTextVal).trim() : null;
-        let matched =
-          (parsedId ? bankById.get(parsedId) : null) ||
-          (text ? bankByName.get(text.toLowerCase()) : null) ||
-          null;
-
-        if (!matched && text) {
-          const lower = text.toLowerCase();
-          if (lower.includes('bca')) {
-            matched =
-              branchBankRows.find((b) => b.name.toLowerCase().includes('bca') && b.name.toLowerCase().includes('cv')) ||
-              branchBankRows.find((b) => b.name.toLowerCase().includes('bca')) ||
-              null;
-          } else if (lower.includes('mandiri')) {
-            matched =
-              branchBankRows.find((b) => b.name.toLowerCase().includes('mandiri') && b.name.toLowerCase().includes('cv')) ||
-              branchBankRows.find((b) => b.name.toLowerCase().includes('mandiri')) ||
-              null;
-          } else if (lower.includes('bri')) {
-            matched = branchBankRows.find((b) => b.name.toLowerCase().includes('bri')) || null;
-          } else if (lower.includes('cash') || lower.includes('tunai')) {
-            matched =
-              branchBankRows.find((b) => b.name.toLowerCase().includes('cash') || b.name.toLowerCase().includes('tunai')) ||
-              null;
-          }
-        }
-
-        return {
-          id: matched ? Number(matched.id) : null,
-          name: matched ? String(matched.name).trim() : text
-        };
-      };
+      const [branchPaymentMethodRows] = await conn.execute(
+        `SELECT pm.id, pm.name, pm.parent_id, pm.default_bank_account_id, ba.name as default_bank_account_name
+         FROM payment_methods pm
+         LEFT JOIN bank_accounts ba ON pm.default_bank_account_id = ba.id
+         WHERE (pm.branch_id = ? OR pm.branch_id IS NULL) AND pm.is_active = 1
+         ORDER BY pm.sort_order ASC, pm.name ASC, pm.id ASC`,
+        [branchId]
+      );
+      const pmById = new Map(branchPaymentMethodRows.map((pm) => [Number(pm.id), pm]));
 
       let deletedCount = 0;
       const cleanDeleteRefs = (Array.isArray(deleteExternalRefs) ? deleteExternalRefs : [])
@@ -2988,8 +3049,68 @@ class CashierReport {
           : (bca + mandiri + ongkirBca + ongkirMandiri);
         const totalAmt = toNum(raw.total_amount) > 0 ? round2(raw.total_amount) : computedTotal;
 
-        const dpBank = resolveBank(raw.bank_account_id, raw.dp_channel);
-        const settlementBank = resolveBank(raw.settlement_bank_account_id, raw.settlement_channel);
+        let dpResolved = resolveOrderPaymentMethod({
+          rawPaymentMethodId: raw.dp_payment_method_id,
+          rawBankAccountId: raw.bank_account_id,
+          rawChannelText: raw.dp_channel,
+          paymentMethods: branchPaymentMethodRows,
+          bankAccounts: branchBankRows,
+          context: 'dp',
+          allowKeywordFallback: true
+        });
+        let settlementResolved = resolveOrderPaymentMethod({
+          rawPaymentMethodId: raw.settlement_payment_method_id,
+          rawBankAccountId: raw.settlement_bank_account_id,
+          rawChannelText: raw.settlement_channel,
+          paymentMethods: branchPaymentMethodRows,
+          bankAccounts: branchBankRows,
+          context: 'settlement',
+          allowKeywordFallback: true
+        });
+
+        const [existingOrder] = await conn.execute(
+          `SELECT id, dp_payment_method_id, settlement_payment_method_id
+           FROM cashier_report_orders
+           WHERE report_id = ? AND order_section = ? AND external_source = ? AND external_reference_id = ?
+           LIMIT 1`,
+          [reportId, section, externalSource, extRef]
+        );
+
+        // Preserve manual Cara Pembayaran chosen by kasir if still in the same bank family
+        if (existingOrder.length > 0) {
+          const ex = existingOrder[0];
+          const existingDpPmId = ex.dp_payment_method_id ? Number(ex.dp_payment_method_id) : null;
+          if (existingDpPmId && pmById.has(existingDpPmId)) {
+            const existingDpPm = pmById.get(existingDpPmId);
+            const incomingFamily = detectBankFamily(raw.dp_channel);
+            const existingFamily = detectBankFamily(existingDpPm.name);
+            if (incomingFamily && existingFamily && incomingFamily === existingFamily) {
+              dpResolved = resolveOrderPaymentMethod({
+                rawPaymentMethodId: existingDpPmId,
+                paymentMethods: branchPaymentMethodRows,
+                bankAccounts: branchBankRows,
+                context: 'dp',
+                allowKeywordFallback: false
+              });
+            }
+          }
+
+          const existingSetPmId = ex.settlement_payment_method_id ? Number(ex.settlement_payment_method_id) : null;
+          if (existingSetPmId && pmById.has(existingSetPmId)) {
+            const existingSetPm = pmById.get(existingSetPmId);
+            const incomingSetFamily = detectBankFamily(raw.settlement_channel);
+            const existingSetFamily = detectBankFamily(existingSetPm.name);
+            if (incomingSetFamily && existingSetFamily && incomingSetFamily === existingSetFamily) {
+              settlementResolved = resolveOrderPaymentMethod({
+                rawPaymentMethodId: existingSetPmId,
+                paymentMethods: branchPaymentMethodRows,
+                bankAccounts: branchBankRows,
+                context: 'settlement',
+                allowKeywordFallback: false
+              });
+            }
+          }
+        }
 
         const rawExtra = raw.extra_data && typeof raw.extra_data === 'object' ? raw.extra_data : {};
         const accountHolderName = String(
@@ -3013,12 +3134,14 @@ class CashierReport {
           mandiri,
           dpAmt,
           raw.dp_transfer_date ? String(raw.dp_transfer_date).trim() : null,
-          dpBank.name,
-          dpBank.id,
+          dpResolved.channel_name,
+          dpResolved.payment_method_id,
+          dpResolved.bank_account_id,
           settlementAmt,
           raw.settlement_transfer_date ? String(raw.settlement_transfer_date).trim() : null,
-          settlementBank.name,
-          settlementBank.id,
+          settlementResolved.channel_name,
+          settlementResolved.payment_method_id,
+          settlementResolved.bank_account_id,
           ongkirBca,
           ongkirMandiri,
           ongkirAmt,
@@ -3028,19 +3151,12 @@ class CashierReport {
           extraDataJson
         ];
 
-        const [existingOrder] = await conn.execute(
-          `SELECT id FROM cashier_report_orders
-           WHERE report_id = ? AND order_section = ? AND external_source = ? AND external_reference_id = ?
-           LIMIT 1`,
-          [reportId, section, externalSource, extRef]
-        );
-
         if (existingOrder.length > 0) {
           await conn.execute(
             `UPDATE cashier_report_orders SET
                customer_name = ?, planned_pickup_date = ?, product_total_amount = ?,
-               tf_bca_amount = ?, tf_mandiri_amount = ?, dp_amount = ?, dp_transfer_date = ?, dp_channel = ?, bank_account_id = ?,
-               settlement_amount = ?, settlement_transfer_date = ?, settlement_channel = ?, settlement_bank_account_id = ?,
+               tf_bca_amount = ?, tf_mandiri_amount = ?, dp_amount = ?, dp_transfer_date = ?, dp_channel = ?, dp_payment_method_id = ?, bank_account_id = ?,
+               settlement_amount = ?, settlement_transfer_date = ?, settlement_channel = ?, settlement_payment_method_id = ?, settlement_bank_account_id = ?,
                ongkir_bca_amount = ?, ongkir_mandiri_amount = ?, ongkir_amount = ?, total_amount = ?, pickup_date = ?, notes = ?,
                extra_data = ?
              WHERE id = ?`,
@@ -3050,11 +3166,11 @@ class CashierReport {
           await conn.execute(
             `INSERT INTO cashier_report_orders
              (report_id, order_section, customer_name, planned_pickup_date, product_total_amount,
-              tf_bca_amount, tf_mandiri_amount, dp_amount, dp_transfer_date, dp_channel, bank_account_id,
-              settlement_amount, settlement_transfer_date, settlement_channel, settlement_bank_account_id,
+              tf_bca_amount, tf_mandiri_amount, dp_amount, dp_transfer_date, dp_channel, dp_payment_method_id, bank_account_id,
+              settlement_amount, settlement_transfer_date, settlement_channel, settlement_payment_method_id, settlement_bank_account_id,
               ongkir_bca_amount, ongkir_mandiri_amount, ongkir_amount, total_amount, pickup_date, notes, extra_data,
               external_reference_id, external_source, sort_order)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [reportId, section, ...rowParams, extRef, externalSource, nextSortOrder++]
           );
         }
@@ -3249,11 +3365,20 @@ class CashierReport {
        WHERE branch_id = ? AND type IN ('income', 'both') AND status_deleted = false
          AND LOWER(name) NOT LIKE '%kas simpanan%'
          AND LOWER(name) != 'pajak pb1'
-       ORDER BY (LOWER(name) LIKE '%pendapatan lainnya%') DESC, (LOWER(name) LIKE '%omzet%') DESC, id ASC
+       ORDER BY (LOWER(name) LIKE '%piutang%') DESC, (LOWER(name) LIKE '%pendapatan lainnya%') DESC, (LOWER(name) LIKE '%omzet%') DESC, id ASC
        LIMIT 1`,
       [branchId]
     );
-    return fallbackRows[0] || null;
+    if (fallbackRows[0]) return fallbackRows[0];
+
+    const [anyCategoryRows] = await conn.execute(
+      `SELECT id, name FROM categories
+       WHERE branch_id = ? AND status_deleted = false
+       ORDER BY id ASC
+       LIMIT 1`,
+      [branchId]
+    );
+    return anyCategoryRows[0] || null;
   }
 
   static async _ensureReportRowForDate(conn, { reportId, branchId, reportDate, user }) {
@@ -3358,7 +3483,124 @@ class CashierReport {
     return { id: insEmpty.insertId, branch_id: branchId, report_date: dateStr };
   }
 
+  static async _resolveOmzetTransactionForReport(conn, { reportId, branchId, dateStr }) {
+    if (reportId > 0) {
+      const [repRows] = await conn.execute(
+        `SELECT omzet_transaction_id FROM cashier_daily_reports WHERE id = ? LIMIT 1`,
+        [reportId]
+      );
+      const linkedId = repRows[0]?.omzet_transaction_id ? Number(repRows[0].omzet_transaction_id) : null;
+      if (linkedId) {
+        const [txRows] = await conn.execute(
+          `SELECT id FROM transactions WHERE id = ? AND status_deleted = false LIMIT 1`,
+          [linkedId]
+        );
+        if (txRows[0]) return Number(txRows[0].id);
+      }
+    }
+
+    if (!dateStr) return null;
+    const expectedExtRef = `cashier_report_${branchId}_${dateStr}`;
+    const [foundRows] = await conn.execute(
+      `SELECT t.id
+       FROM transactions t
+       LEFT JOIN categories c ON t.category_id = c.id
+       WHERE t.branch_id = ?
+         AND t.type = 'income'
+         AND t.status_deleted = false
+         AND DATE(t.transaction_date) = ?
+         AND (
+           t.external_reference_id = ?
+           OR (LOWER(COALESCE(c.name, '')) LIKE '%omzet%' OR LOWER(COALESCE(c.name, '')) LIKE '%omset%')
+         )
+       ORDER BY (t.external_reference_id = ?) DESC, t.id DESC
+       LIMIT 1`,
+      [branchId, dateStr, expectedExtRef, expectedExtRef]
+    );
+    const matchedTxId = foundRows[0]?.id ? Number(foundRows[0].id) : null;
+    if (matchedTxId && reportId > 0) {
+      await conn.execute(
+        `UPDATE cashier_daily_reports SET omzet_transaction_id = ? WHERE id = ? AND omzet_transaction_id IS NULL`,
+        [matchedTxId, reportId]
+      );
+    }
+    return matchedTxId;
+  }
+
+  static async _recalculateTransactionMitraSummary(conn, transactionId) {
+    if (!transactionId) return;
+    const [rows] = await conn.execute(
+      `SELECT id, mitra_piutang_id, amount, paid_amount, remaining_debt
+       FROM transaction_mitra_details
+       WHERE transaction_id = ?
+       ORDER BY id ASC`,
+      [transactionId]
+    );
+    if (rows && rows.length > 0) {
+      const totalPaid = round2(rows.reduce((s, r) => s + toNum(r.paid_amount), 0));
+      const totalRemaining = round2(rows.reduce((s, r) => s + toNum(r.remaining_debt), 0));
+      const firstMitraId = Number(rows[0].mitra_piutang_id) || null;
+      await conn.execute(
+        `UPDATE transactions
+         SET is_debt_payment = true, mitra_piutang_id = ?, paid_amount = ?, remaining_debt = ?
+         WHERE id = ? AND status_deleted = false`,
+        [firstMitraId, totalPaid, totalRemaining, transactionId]
+      );
+    } else {
+      await conn.execute(
+        `UPDATE transactions
+         SET is_debt_payment = false, mitra_piutang_id = NULL, paid_amount = 0, remaining_debt = 0
+         WHERE id = ? AND status_deleted = false`,
+        [transactionId]
+      );
+    }
+  }
+
+  static async _attachPendingPiutangItemsToOmzetTx(conn, { reportId, omzetTxId }) {
+    if (!reportId || !omzetTxId) return;
+    const [pendingRows] = await conn.execute(
+      `SELECT crpi.id, crpi.mitra_piutang_id, crpi.amount, crpi.paid_amount, crpi.remaining_debt,
+              crpi.transaction_id, crpi.transaction_mitra_detail_id, t.external_reference_id as tx_ext_ref
+       FROM cashier_report_piutang_items crpi
+       LEFT JOIN transactions t ON crpi.transaction_id = t.id AND t.status_deleted = false
+       WHERE crpi.report_id = ?
+         AND crpi.transaction_mitra_detail_id IS NULL
+       ORDER BY crpi.id ASC`,
+      [reportId]
+    );
+
+    let attachedAny = false;
+    for (const row of pendingRows || []) {
+      const isLegacyStandalone =
+        Boolean(row.transaction_id) &&
+        String(row.tx_ext_ref || '') === `cashier_report_piutang_${row.id}`;
+      if (isLegacyStandalone) continue;
+
+      const amt = round2(row.amount);
+      const paid = round2(row.paid_amount);
+      const rem = Math.max(0, round2(amt - paid));
+      const [insTmd] = await conn.execute(
+        `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
+         VALUES (?, ?, ?, ?, ?)`,
+        [omzetTxId, row.mitra_piutang_id, amt, paid, rem]
+      );
+      await conn.execute(
+        `UPDATE cashier_report_piutang_items
+         SET transaction_id = ?, transaction_mitra_detail_id = ?
+         WHERE id = ?`,
+        [omzetTxId, insTmd.insertId, row.id]
+      );
+      attachedAny = true;
+    }
+
+    if (attachedAny) {
+      await this._recalculateTransactionMitraSummary(conn, omzetTxId);
+    }
+  }
+
   static async createPiutangItem({ reportId, reportDate, branchId, payload, user }) {
+    await ensurePiutangDetailIdColumn();
+
     const rawEntries = Array.isArray(payload?.items) ? payload.items : [payload];
     if (rawEntries.length === 0) {
       const err = new Error('Minimal 1 item Piutang Mitra wajib diisi.');
@@ -3393,8 +3635,6 @@ class CashierReport {
         amount,
         paidAmount,
         remainingDebt: Math.max(0, round2(amount - paidAmount)),
-        categoryIdInput: entry?.category_id ? parseInt(entry.category_id, 10) : null,
-        bankAccountId: paidAmount > 0 && entry?.bank_account_id ? parseInt(entry.bank_account_id, 10) : null,
         notesText: String(entry?.notes || '').trim()
       };
     });
@@ -3414,6 +3654,13 @@ class CashierReport {
       const targetReportId = Number(report.id);
       const dateStr = sanitizeDateOnly(report.report_date);
 
+      // Attach directly to the day's Omzet Penjualan transaction (never create an extra Kas Berjalan transaction)
+      const omzetTxId = await this._resolveOmzetTransactionForReport(conn, {
+        reportId: targetReportId,
+        branchId,
+        dateStr
+      });
+
       const createdItems = [];
       const logSummaries = [];
 
@@ -3429,19 +3676,26 @@ class CashierReport {
           throw err;
         }
 
-        const category = await this._resolvePiutangCategory(conn, branchId, item.categoryIdInput);
-        const txNote = item.notesText || `Piutang Mitra - ${mitra.nama} (Laporan Kasir ${dateStr})`;
+        let tmdId = null;
+        if (omzetTxId) {
+          const [insTmd] = await conn.execute(
+            `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
+             VALUES (?, ?, ?, ?, ?)`,
+            [omzetTxId, item.mitraId, item.amount, item.paidAmount, item.remainingDebt]
+          );
+          tmdId = insTmd.insertId;
+        }
 
         const [insItem] = await conn.execute(
           `INSERT INTO cashier_report_piutang_items
-           (report_id, branch_id, mitra_piutang_id, category_id, bank_account_id, amount, paid_amount, remaining_debt, notes, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (report_id, branch_id, mitra_piutang_id, category_id, bank_account_id, transaction_id, transaction_mitra_detail_id, amount, paid_amount, remaining_debt, notes, created_by)
+           VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`,
           [
             targetReportId,
             branchId,
             item.mitraId,
-            category ? category.id : null,
-            item.bankAccountId,
+            omzetTxId || null,
+            tmdId,
             item.amount,
             item.paidAmount,
             item.remainingDebt,
@@ -3451,42 +3705,18 @@ class CashierReport {
         );
         const itemId = insItem.insertId;
 
-        const extRef = `cashier_report_piutang_${itemId}`;
-        const [insTx] = await conn.execute(
-          `INSERT INTO transactions
-           (user_id, branch_id, type, category_id, amount, note, transaction_date, is_umum, is_debt_payment, paid_amount, remaining_debt, mitra_piutang_id, bank_account_id, is_draft, external_reference_id, status_deleted)
-           VALUES (?, ?, 'income', ?, ?, ?, ?, true, true, ?, ?, ?, ?, false, ?, false)`,
-          [
-            user?.id || null,
-            branchId,
-            category ? category.id : null,
-            item.amount,
-            txNote,
-            dateStr,
-            item.paidAmount,
-            item.remainingDebt,
-            item.mitraId,
-            item.bankAccountId,
-            extRef
-          ]
-        );
-        const txId = insTx.insertId;
-
-        await conn.execute(
-          `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
-           VALUES (?, ?, ?, ?, ?)`,
-          [txId, item.mitraId, item.amount, item.paidAmount, item.remainingDebt]
-        );
-
-        await conn.execute(
-          `UPDATE cashier_report_piutang_items SET transaction_id = ? WHERE id = ?`,
-          [txId, itemId]
-        );
-
-        createdItems.push({ id: itemId, transaction_id: txId });
+        createdItems.push({
+          id: itemId,
+          transaction_id: omzetTxId || null,
+          transaction_mitra_detail_id: tmdId
+        });
         logSummaries.push(
-          `Piutang Mitra "${mitra.nama}" ${formatCurrencySimple(item.amount)} (Sisa: ${formatCurrencySimple(item.remainingDebt)}, #${txId})`
+          `Piutang Mitra "${mitra.nama}" ${formatCurrencySimple(item.amount)} (Sisa: ${formatCurrencySimple(item.remainingDebt)}${omzetTxId ? `, Omzet #${omzetTxId}` : ', menunggu Omzet'})`
         );
+      }
+
+      if (omzetTxId) {
+        await this._recalculateTransactionMitraSummary(conn, omzetTxId);
       }
 
       const logText =
@@ -3495,10 +3725,12 @@ class CashierReport {
           : `Menambahkan ${createdItems.length} Piutang Mitra: ${logSummaries.join('; ')}`;
 
       await conn.execute(
-        `INSERT INTO cashier_report_logs (report_id, user_id, user_name, user_role, action, summary, changes_json)
-         VALUES (?, ?, ?, ?, 'update', ?, ?)`,
+        `INSERT INTO cashier_report_logs (report_id, branch_id, report_date, user_id, user_name, user_role, action, summary, changes)
+         VALUES (?, ?, ?, ?, ?, ?, 'update', ?, ?)`,
         [
           targetReportId,
+          branchId,
+          dateStr,
           user?.id || null,
           user?.name || user?.email || 'Admin',
           user?.role || 'admin',
@@ -3513,12 +3745,15 @@ class CashierReport {
         items: createdItems,
         report_id: targetReportId,
         report_date: dateStr,
-        transaction_id: createdItems[0].transaction_id
+        transaction_id: omzetTxId || null,
+        attached_to_omzet: Boolean(omzetTxId)
       };
     });
   }
 
   static async updatePiutangItem({ itemId, branchId, payload, user }) {
+    await ensurePiutangDetailIdColumn();
+
     const mitraId = parseInt(payload?.mitra_piutang_id, 10);
     if (!Number.isFinite(mitraId) || mitraId <= 0) {
       const err = new Error('Mitra Piutang wajib dipilih.');
@@ -3539,15 +3774,14 @@ class CashierReport {
       throw err;
     }
 
-    const categoryIdInput = payload?.category_id ? parseInt(payload.category_id, 10) : null;
-    const bankAccountId = payload?.bank_account_id ? parseInt(payload.bank_account_id, 10) : null;
     const notesText = String(payload?.notes || '').trim();
 
     return await dbTransaction(async (conn) => {
       const [itemRows] = await conn.execute(
-        `SELECT crpi.*, cdr.report_date
+        `SELECT crpi.*, cdr.report_date, cdr.omzet_transaction_id, t.external_reference_id as tx_ext_ref
          FROM cashier_report_piutang_items crpi
          INNER JOIN cashier_daily_reports cdr ON crpi.report_id = cdr.id
+         LEFT JOIN transactions t ON crpi.transaction_id = t.id AND t.status_deleted = false
          WHERE crpi.id = ? AND crpi.branch_id = ?
          LIMIT 1`,
         [itemId, branchId]
@@ -3570,8 +3804,25 @@ class CashierReport {
         throw err;
       }
 
+      const dateStr = sanitizeDateOnly(existing.report_date);
+      const isLegacyStandalone =
+        Boolean(existing.transaction_id) &&
+        !existing.transaction_mitra_detail_id &&
+        String(existing.tx_ext_ref || '') === `cashier_report_piutang_${existing.id}`;
+
       let totalRepayments = 0;
-      if (existing.transaction_id) {
+      if (existing.transaction_mitra_detail_id) {
+        const [repayRows] = await conn.execute(
+          `SELECT COALESCE(SUM(amount), 0) as total_repaid
+           FROM transaction_repayments
+           WHERE (
+             transaction_mitra_detail_id = ?
+             OR (transaction_mitra_detail_id IS NULL AND transaction_id = ? AND mitra_piutang_id = ?)
+           ) AND deleted_at IS NULL`,
+          [existing.transaction_mitra_detail_id, existing.transaction_id || 0, existing.mitra_piutang_id]
+        );
+        totalRepayments = round2(repayRows[0]?.total_repaid || 0);
+      } else if (isLegacyStandalone && existing.transaction_id) {
         const [repayRows] = await conn.execute(
           `SELECT COALESCE(SUM(amount), 0) as total_repaid
            FROM transaction_repayments
@@ -3590,38 +3841,97 @@ class CashierReport {
       }
       const remainingDebt = Math.max(0, round2(amount - effectivePaid));
 
-      const category = await this._resolvePiutangCategory(conn, branchId, categoryIdInput);
-      const dateStr = sanitizeDateOnly(existing.report_date);
-      const txNote = notesText || `Piutang Mitra - ${mitra.nama} (Laporan Kasir ${dateStr})`;
+      const omzetTxId = await this._resolveOmzetTransactionForReport(conn, {
+        reportId: existing.report_id,
+        branchId,
+        dateStr
+      });
 
-      await conn.execute(
-        `UPDATE cashier_report_piutang_items
-         SET mitra_piutang_id = ?, category_id = ?, bank_account_id = ?, amount = ?, paid_amount = ?, remaining_debt = ?, notes = ?
-         WHERE id = ?`,
-        [mitraId, category ? category.id : null, bankAccountId, amount, effectivePaid, remainingDebt, notesText || null, itemId]
-      );
+      let finalTxId = existing.transaction_id ? Number(existing.transaction_id) : null;
+      let finalTmdId = existing.transaction_mitra_detail_id ? Number(existing.transaction_mitra_detail_id) : null;
 
-      if (existing.transaction_id) {
+      if (finalTmdId && finalTxId) {
+        const [updTmd] = await conn.execute(
+          `UPDATE transaction_mitra_details
+           SET mitra_piutang_id = ?, amount = ?, paid_amount = ?, remaining_debt = ?
+           WHERE id = ?`,
+          [mitraId, amount, effectivePaid, remainingDebt, finalTmdId]
+        );
+        if (!updTmd.affectedRows) {
+          const targetTxId = omzetTxId || finalTxId;
+          const [insTmd] = await conn.execute(
+            `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
+             VALUES (?, ?, ?, ?, ?)`,
+            [targetTxId, mitraId, amount, effectivePaid, remainingDebt]
+          );
+          finalTxId = targetTxId;
+          finalTmdId = insTmd.insertId;
+        }
+        if (Number(existing.mitra_piutang_id) !== mitraId) {
+          await conn.execute(
+            `UPDATE transaction_repayments
+             SET mitra_piutang_id = ?
+             WHERE transaction_mitra_detail_id = ?
+                OR (transaction_mitra_detail_id IS NULL AND transaction_id = ? AND mitra_piutang_id = ?)`,
+            [mitraId, finalTmdId, finalTxId, existing.mitra_piutang_id]
+          );
+        }
+        await this._recalculateTransactionMitraSummary(conn, finalTxId);
+      } else if (isLegacyStandalone && omzetTxId && totalRepayments === 0) {
+        // Migrate legacy standalone PENDAPATAN LAINNYA transaction onto Omzet Penjualan allocation
+        const nowSql = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        await conn.execute(
+          `UPDATE transactions SET status_deleted = true, deleted_at = ? WHERE id = ?`,
+          [nowSql, finalTxId]
+        );
+        const [insTmd] = await conn.execute(
+          `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
+           VALUES (?, ?, ?, ?, ?)`,
+          [omzetTxId, mitraId, amount, effectivePaid, remainingDebt]
+        );
+        finalTxId = omzetTxId;
+        finalTmdId = insTmd.insertId;
+        await this._recalculateTransactionMitraSummary(conn, omzetTxId);
+      } else if (isLegacyStandalone && finalTxId) {
+        const txNote = notesText || `Piutang Mitra - ${mitra.nama} (Laporan Kasir ${dateStr})`;
         await conn.execute(
           `UPDATE transactions
-           SET category_id = ?, amount = ?, note = ?, paid_amount = ?, remaining_debt = ?, mitra_piutang_id = ?, bank_account_id = ?
+           SET amount = ?, note = ?, paid_amount = ?, remaining_debt = ?, mitra_piutang_id = ?
            WHERE id = ? AND status_deleted = false`,
-          [category ? category.id : null, amount, txNote, effectivePaid, remainingDebt, mitraId, bankAccountId, existing.transaction_id]
+          [amount, txNote, effectivePaid, remainingDebt, mitraId, finalTxId]
         );
-        await conn.execute(`DELETE FROM transaction_mitra_details WHERE transaction_id = ?`, [existing.transaction_id]);
+        await conn.execute(`DELETE FROM transaction_mitra_details WHERE transaction_id = ?`, [finalTxId]);
         await conn.execute(
           `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
            VALUES (?, ?, ?, ?, ?)`,
-          [existing.transaction_id, mitraId, amount, effectivePaid, remainingDebt]
+          [finalTxId, mitraId, amount, effectivePaid, remainingDebt]
         );
+      } else if (!finalTxId && omzetTxId) {
+        const [insTmd] = await conn.execute(
+          `INSERT INTO transaction_mitra_details (transaction_id, mitra_piutang_id, amount, paid_amount, remaining_debt)
+           VALUES (?, ?, ?, ?, ?)`,
+          [omzetTxId, mitraId, amount, effectivePaid, remainingDebt]
+        );
+        finalTxId = omzetTxId;
+        finalTmdId = insTmd.insertId;
+        await this._recalculateTransactionMitraSummary(conn, omzetTxId);
       }
+
+      await conn.execute(
+        `UPDATE cashier_report_piutang_items
+         SET mitra_piutang_id = ?, category_id = NULL, bank_account_id = NULL, transaction_id = ?, transaction_mitra_detail_id = ?, amount = ?, paid_amount = ?, remaining_debt = ?, notes = ?
+         WHERE id = ?`,
+        [mitraId, finalTxId, finalTmdId, amount, effectivePaid, remainingDebt, notesText || null, itemId]
+      );
 
       const summary = `Memperbarui Piutang Mitra "${mitra.nama}" menjadi ${formatCurrencySimple(amount)} (Sisa: ${formatCurrencySimple(remainingDebt)})`;
       await conn.execute(
-        `INSERT INTO cashier_report_logs (report_id, user_id, user_name, user_role, action, summary, changes_json)
-         VALUES (?, ?, ?, ?, 'update', ?, ?)`,
+        `INSERT INTO cashier_report_logs (report_id, branch_id, report_date, user_id, user_name, user_role, action, summary, changes)
+         VALUES (?, ?, ?, ?, ?, ?, 'update', ?, ?)`,
         [
           existing.report_id,
+          branchId,
+          dateStr,
           user?.id || null,
           user?.name || user?.email || 'Admin',
           user?.role || 'admin',
@@ -3630,16 +3940,20 @@ class CashierReport {
         ]
       );
 
-      return { id: itemId, transaction_id: existing.transaction_id };
+      return { id: itemId, transaction_id: finalTxId };
     });
   }
 
   static async deletePiutangItem({ itemId, branchId, user }) {
+    await ensurePiutangDetailIdColumn();
+
     return await dbTransaction(async (conn) => {
       const [itemRows] = await conn.execute(
-        `SELECT crpi.*, mp.nama as mitra_nama
+        `SELECT crpi.*, mp.nama as mitra_nama, cdr.report_date, t.external_reference_id as tx_ext_ref
          FROM cashier_report_piutang_items crpi
+         INNER JOIN cashier_daily_reports cdr ON crpi.report_id = cdr.id
          LEFT JOIN mitra_piutang mp ON crpi.mitra_piutang_id = mp.id
+         LEFT JOIN transactions t ON crpi.transaction_id = t.id AND t.status_deleted = false
          WHERE crpi.id = ? AND crpi.branch_id = ?
          LIMIT 1`,
         [itemId, branchId]
@@ -3651,7 +3965,31 @@ class CashierReport {
         throw err;
       }
 
-      if (existing.transaction_id) {
+      const isLegacyStandalone =
+        Boolean(existing.transaction_id) &&
+        !existing.transaction_mitra_detail_id &&
+        String(existing.tx_ext_ref || '') === `cashier_report_piutang_${existing.id}`;
+
+      if (existing.transaction_mitra_detail_id) {
+        const [repayRows] = await conn.execute(
+          `SELECT COUNT(*) as cnt
+           FROM transaction_repayments
+           WHERE (
+             transaction_mitra_detail_id = ?
+             OR (transaction_mitra_detail_id IS NULL AND transaction_id = ? AND mitra_piutang_id = ?)
+           ) AND deleted_at IS NULL`,
+          [existing.transaction_mitra_detail_id, existing.transaction_id || 0, existing.mitra_piutang_id]
+        );
+        if (Number(repayRows[0]?.cnt || 0) > 0) {
+          const err = new Error('Piutang ini sudah memiliki riwayat cicilan/pelunasan. Hapus cicilan di menu Mitra Piutang terlebih dahulu.');
+          err.statusCode = 400;
+          throw err;
+        }
+        await conn.execute(`DELETE FROM transaction_mitra_details WHERE id = ?`, [existing.transaction_mitra_detail_id]);
+        if (existing.transaction_id) {
+          await this._recalculateTransactionMitraSummary(conn, existing.transaction_id);
+        }
+      } else if (isLegacyStandalone && existing.transaction_id) {
         const [repayRows] = await conn.execute(
           `SELECT COUNT(*) as cnt FROM transaction_repayments WHERE transaction_id = ? AND deleted_at IS NULL`,
           [existing.transaction_id]
@@ -3670,12 +4008,15 @@ class CashierReport {
 
       await conn.execute(`DELETE FROM cashier_report_piutang_items WHERE id = ?`, [itemId]);
 
+      const dateStr = sanitizeDateOnly(existing.report_date);
       const summary = `Menghapus Piutang Mitra "${existing.mitra_nama || '-'}" sebesar ${formatCurrencySimple(existing.amount)}`;
       await conn.execute(
-        `INSERT INTO cashier_report_logs (report_id, user_id, user_name, user_role, action, summary, changes_json)
-         VALUES (?, ?, ?, ?, 'update', ?, ?)`,
+        `INSERT INTO cashier_report_logs (report_id, branch_id, report_date, user_id, user_name, user_role, action, summary, changes)
+         VALUES (?, ?, ?, ?, ?, ?, 'update', ?, ?)`,
         [
           existing.report_id,
+          branchId,
+          dateStr,
           user?.id || null,
           user?.name || user?.email || 'Admin',
           user?.role || 'admin',
