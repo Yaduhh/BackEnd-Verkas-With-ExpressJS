@@ -2300,8 +2300,8 @@ class Transaction {
                 AND (t.is_savings = 0 OR t.is_savings IS NULL)
                 AND (
                   t.type = 'expense' 
-                  OR (t.type = 'income' AND t.category_id IN (
-                     SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false AND (is_draft = false OR is_draft IS NULL)
+                  OR (t.type = 'income' AND c.name IS NOT NULL AND UPPER(c.name) NOT LIKE '%OMZET%' AND UPPER(c.name) NOT LIKE '%OMSET%' AND t.category_id IN (
+                     SELECT DISTINCT category_id FROM transactions WHERE branch_id = ? AND type = 'expense' AND status_deleted = false AND (is_draft = false OR is_draft IS NULL) AND category_id IS NOT NULL
                   ))
                 )
 
