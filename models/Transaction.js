@@ -301,7 +301,7 @@ class Transaction {
              COALESCE(ba.name, tid_agg.bank_account_names) as bank_account_name,
              COALESCE(ba.type, tid_agg.bank_account_type) as bank_account_type,
              tr_notif.transaction_id as parent_transaction_id,
-             t_parent.transaction_date as parent_transaction_date,
+             COALESCE(t_parent.transaction_date, mp_notif.initial_balance_date) as parent_transaction_date,
              COALESCE(tr_sum.total_repayment, 0) as total_repayment,
              COALESCE(t_ref.total_refund, 0) as total_refund,
              COALESCE(t_future_ref.total_future_refund, 0) as future_refund,
@@ -454,6 +454,7 @@ class Transaction {
       ${getTscAggJoinSql('tsc_agg', tscScopeWhere, 't')}
       LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id AND tr_notif.deleted_at IS NULL
       LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
+      LEFT JOIN mitra_piutang mp_notif ON tr_notif.transaction_id IS NULL AND tr_notif.mitra_piutang_id = mp_notif.id
       LEFT JOIN (
         SELECT tr.transaction_id, SUM(tr.amount) as total_repayment 
         FROM transaction_repayments tr
@@ -893,7 +894,7 @@ class Transaction {
              COALESCE(ba.name, tid_agg.bank_account_names) as bank_account_name,
              COALESCE(ba.type, tid_agg.bank_account_type) as bank_account_type,
              tr_notif.transaction_id as parent_transaction_id,
-             t_parent.transaction_date as parent_transaction_date,
+             COALESCE(t_parent.transaction_date, mp_notif.initial_balance_date) as parent_transaction_date,
              COALESCE(tr_sum.total_repayment, 0) as total_repayment,
              COALESCE(t_ref.total_refund, 0) as total_refund,
              COALESCE(t_future_ref.total_future_refund, 0) as future_refund,
@@ -923,6 +924,7 @@ class Transaction {
       ${getTscAggJoinSql('tsc_agg', tscScopeWhere, 't')}
       LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id AND tr_notif.deleted_at IS NULL
       LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
+      LEFT JOIN mitra_piutang mp_notif ON tr_notif.transaction_id IS NULL AND tr_notif.mitra_piutang_id = mp_notif.id
       LEFT JOIN (
         SELECT tr.transaction_id, SUM(tr.amount) as total_repayment
         FROM transaction_repayments tr
@@ -1986,7 +1988,7 @@ class Transaction {
           END), 0) as lain_pb1,
 
           COALESCE(SUM(CASE 
-            WHEN t.type = 'income' AND (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL AND ${startDate ? 't_parent.transaction_date < ?' : 'FALSE'} THEN t.amount
+            WHEN t.type = 'income' AND (t.is_debt_payment = 1 OR t.is_debt_payment = true) AND t.category_id IS NULL AND ${startDate ? '(COALESCE(t_parent.transaction_date, mp_notif.initial_balance_date) < ? OR (tr_notif.transaction_id IS NULL AND tr_notif.mitra_piutang_id IS NOT NULL AND mp_notif.initial_balance_date IS NULL))' : 'FALSE'} THEN t.amount
             ELSE 0
           END), 0) as pelunasan_piutang_lalu,
 
@@ -2018,6 +2020,7 @@ class Transaction {
         ) tr_sum ON t.id = tr_sum.transaction_id
         LEFT JOIN transaction_repayments tr_notif ON t.id = tr_notif.income_transaction_id AND tr_notif.deleted_at IS NULL
         LEFT JOIN transactions t_parent ON tr_notif.transaction_id = t_parent.id
+        LEFT JOIN mitra_piutang mp_notif ON tr_notif.transaction_id IS NULL AND tr_notif.mitra_piutang_id = mp_notif.id
         LEFT JOIN (
           SELECT tref.transaction_id, SUM(tref.amount) as total_refund 
           FROM transaction_refunds tref
@@ -2196,16 +2199,30 @@ class Transaction {
 
         // 1. Pelunasan Piutang Bulan Lalu (exact match with branchReportController.js)
         const debtRepaymentPromise = query(
-          `SELECT SUM(tr.amount) as total
+          `SELECT COALESCE(SUM(tr.amount), 0) as total
            FROM transaction_repayments tr
-           JOIN transactions t ON tr.transaction_id = t.id
+           LEFT JOIN transactions t ON tr.transaction_id = t.id
+           LEFT JOIN mitra_piutang mp ON tr.mitra_piutang_id = mp.id
            WHERE tr.payment_date BETWEEN ? AND ?
              AND tr.deleted_at IS NULL
-             AND t.transaction_date < ?
-             AND t.branch_id = ?
-             AND t.status_deleted = false
-             AND (t.is_draft = false OR t.is_draft IS NULL)`,
-          [startDateOnly, endDateOnly, startDateOnly, branchId]
+             AND (tr.is_writeoff = 0 OR tr.is_writeoff IS NULL)
+             AND (
+               (
+                 tr.transaction_id IS NOT NULL
+                 AND t.transaction_date < ?
+                 AND t.branch_id = ?
+                 AND t.status_deleted = false
+                 AND (t.is_draft = false OR t.is_draft IS NULL)
+               )
+               OR (
+                 tr.transaction_id IS NULL
+                 AND tr.mitra_piutang_id IS NOT NULL
+                 AND mp.branch_id = ?
+                 AND mp.deleted_at IS NULL
+                 AND (mp.initial_balance_date IS NULL OR mp.initial_balance_date < ?)
+               )
+             )`,
+          [startDateOnly, endDateOnly, startDateOnly, branchId, branchId, startDateOnly]
         );
 
         // 2. Income Breakdown & Net Calculation (exact match with branchReportController.js & salesChannelController.js)
