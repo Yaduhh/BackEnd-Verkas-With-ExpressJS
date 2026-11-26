@@ -642,7 +642,8 @@ const cashierReportController = {
         branchId,
         name: req.body.name,
         unit1_label: req.body.unit1_label,
-        unit2_label: req.body.unit2_label
+        unit2_label: req.body.unit2_label,
+        input_type: req.body.input_type
       });
       return res.status(201).json({
         success: true,
@@ -719,6 +720,7 @@ const cashierReportController = {
         name: req.body.name,
         unit1_label: req.body.unit1_label,
         unit2_label: req.body.unit2_label,
+        input_type: req.body.input_type,
         is_active: req.body.is_active
       });
       return res.json({ success: true, message: 'Item laporan terjual berhasil diperbarui.', data: updated });

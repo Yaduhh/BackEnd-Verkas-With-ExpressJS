@@ -754,7 +754,7 @@ class CashierReport {
   static async ensureBranchSoldItems(branchId, conn = null) {
     const exec = conn ? (sql, p) => conn.execute(sql, p).then(([r]) => r) : query;
     let rows = await exec(
-      `SELECT id, branch_id, name, unit1_label, unit2_label, legacy_key, sort_order, is_active
+      `SELECT id, branch_id, name, unit1_label, unit2_label, input_type, legacy_key, sort_order, is_active
        FROM cashier_sold_items
        WHERE branch_id = ?
        ORDER BY sort_order ASC, id ASC`,
@@ -769,7 +769,7 @@ class CashierReport {
         );
       }
       rows = await exec(
-        `SELECT id, branch_id, name, unit1_label, unit2_label, legacy_key, sort_order, is_active
+        `SELECT id, branch_id, name, unit1_label, unit2_label, input_type, legacy_key, sort_order, is_active
          FROM cashier_sold_items
          WHERE branch_id = ?
          ORDER BY sort_order ASC, id ASC`,
@@ -782,6 +782,7 @@ class CashierReport {
       name: r.name,
       unit1_label: r.unit1_label || 'Ekor',
       unit2_label: r.unit2_label ?? null,
+      input_type: r.input_type === 'text' ? 'text' : 'number',
       legacy_key: r.legacy_key || null,
       sort_order: Number(r.sort_order || 0),
       is_active: Boolean(r.is_active)
@@ -793,13 +794,14 @@ class CashierReport {
     return includeInactive ? items : items.filter((i) => i.is_active);
   }
 
-  static async createSoldItemMaster({ branchId, name, unit1_label, unit2_label }) {
+  static async createSoldItemMaster({ branchId, name, unit1_label, unit2_label, input_type }) {
     const trimmedName = String(name || '').trim();
     if (!trimmedName) {
       const err = new Error('Nama item wajib diisi.');
       err.statusCode = 400;
       throw err;
     }
+    const nextInputType = input_type === 'text' ? 'text' : 'number';
     const u1 = String(unit1_label || '').trim() || 'Ekor';
     const u2Raw = unit2_label !== undefined && unit2_label !== null ? String(unit2_label).trim() : '';
     const u2 = u2Raw ? u2Raw : null;
@@ -812,12 +814,12 @@ class CashierReport {
     const nextOrder = Number(maxRow?.max_order || 0) + 1;
 
     const res = await query(
-      `INSERT INTO cashier_sold_items (branch_id, name, unit1_label, unit2_label, sort_order, is_active)
-       VALUES (?, ?, ?, ?, ?, 1)`,
-      [branchId, trimmedName, u1, u2, nextOrder]
+      `INSERT INTO cashier_sold_items (branch_id, name, unit1_label, unit2_label, input_type, sort_order, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, 1)`,
+      [branchId, trimmedName, u1, u2, nextInputType, nextOrder]
     );
     const [created] = await query(
-      `SELECT id, branch_id, name, unit1_label, unit2_label, legacy_key, sort_order, is_active
+      `SELECT id, branch_id, name, unit1_label, unit2_label, input_type, legacy_key, sort_order, is_active
        FROM cashier_sold_items WHERE id = ? LIMIT 1`,
       [res.insertId]
     );
@@ -825,12 +827,13 @@ class CashierReport {
       ...created,
       id: Number(created.id),
       branch_id: Number(created.branch_id),
+      input_type: created.input_type === 'text' ? 'text' : 'number',
       sort_order: Number(created.sort_order || 0),
       is_active: Boolean(created.is_active)
     };
   }
 
-  static async updateSoldItemMaster({ branchId, itemId, name, unit1_label, unit2_label, is_active }) {
+  static async updateSoldItemMaster({ branchId, itemId, name, unit1_label, unit2_label, input_type, is_active }) {
     const existingRows = await query(
       `SELECT * FROM cashier_sold_items WHERE id = ? AND branch_id = ? LIMIT 1`,
       [itemId, branchId]
@@ -853,16 +856,20 @@ class CashierReport {
       unit2_label !== undefined
         ? (unit2_label !== null && String(unit2_label).trim() ? String(unit2_label).trim() : null)
         : existing.unit2_label;
+    const nextInputType =
+      input_type !== undefined
+        ? (input_type === 'text' ? 'text' : 'number')
+        : (existing.input_type === 'text' ? 'text' : 'number');
     const nextActive = is_active !== undefined ? (is_active ? 1 : 0) : existing.is_active;
 
     await query(
       `UPDATE cashier_sold_items
-       SET name = ?, unit1_label = ?, unit2_label = ?, is_active = ?
+       SET name = ?, unit1_label = ?, unit2_label = ?, input_type = ?, is_active = ?
        WHERE id = ? AND branch_id = ?`,
-      [nextName, nextU1, nextU2, nextActive, itemId, branchId]
+      [nextName, nextU1, nextU2, nextInputType, nextActive, itemId, branchId]
     );
     const [updated] = await query(
-      `SELECT id, branch_id, name, unit1_label, unit2_label, legacy_key, sort_order, is_active
+      `SELECT id, branch_id, name, unit1_label, unit2_label, input_type, legacy_key, sort_order, is_active
        FROM cashier_sold_items WHERE id = ? LIMIT 1`,
       [itemId]
     );
@@ -870,6 +877,7 @@ class CashierReport {
       ...updated,
       id: Number(updated.id),
       branch_id: Number(updated.branch_id),
+      input_type: updated.input_type === 'text' ? 'text' : 'number',
       sort_order: Number(updated.sort_order || 0),
       is_active: Boolean(updated.is_active)
     };
@@ -1146,6 +1154,7 @@ class CashierReport {
               COALESCE(csi.name, crsi.item_name) as resolved_name,
               COALESCE(csi.unit1_label, crsi.unit1_label, 'Ekor') as resolved_unit1,
               COALESCE(csi.unit2_label, crsi.unit2_label) as resolved_unit2,
+              COALESCE(csi.input_type, 'number') as resolved_input_type,
               csi.legacy_key as legacy_key,
               COALESCE(csi.sort_order, crsi.sort_order, 0) as resolved_sort_order
        FROM cashier_report_sold_items crsi
@@ -1162,9 +1171,11 @@ class CashierReport {
       item_name: s.resolved_name || s.item_name || '',
       unit1_label: s.resolved_unit1 || s.unit1_label || 'Ekor',
       unit2_label: s.resolved_unit2 ?? s.unit2_label ?? null,
+      input_type: s.resolved_input_type === 'text' ? 'text' : 'number',
       legacy_key: s.legacy_key || null,
       qty1: toNum(s.qty1),
       qty2: toNum(s.qty2),
+      text_value: s.text_value ?? null,
       sort_order: Number(s.resolved_sort_order || s.sort_order || 0)
     }));
 
@@ -2060,14 +2071,23 @@ class CashierReport {
             : (s?.unit2_label !== undefined && s?.unit2_label !== null && String(s.unit2_label).trim()
                 ? String(s.unit2_label).trim()
                 : null);
+          const inputType = m
+            ? (m.input_type === 'text' ? 'text' : 'number')
+            : (s?.input_type === 'text' ? 'text' : 'number');
+          const textVal =
+            inputType === 'text' && s?.text_value !== undefined && s?.text_value !== null
+              ? (String(s.text_value).trim() || null)
+              : null;
           return {
             sold_item_id: m ? m.id : (Number.isFinite(masterId) ? masterId : null),
             item_name: m ? m.name : (String(s?.item_name || '').trim() || `Item ${idx + 1}`),
             unit1_label: u1,
             unit2_label: u2,
+            input_type: inputType,
             legacy_key: m?.legacy_key || s?.legacy_key || null,
-            qty1: round2(s?.qty1),
-            qty2: u2 ? round2(s?.qty2) : 0,
+            qty1: inputType === 'text' ? 0 : round2(s?.qty1),
+            qty2: inputType === 'text' ? 0 : (u2 ? round2(s?.qty2) : 0),
+            text_value: textVal,
             sort_order: m ? m.sort_order : idx + 1
           };
         });
@@ -2273,9 +2293,9 @@ class CashierReport {
       for (const s of soldItems) {
         await conn.execute(
           `INSERT INTO cashier_report_sold_items
-           (report_id, sold_item_id, item_name, unit1_label, unit2_label, qty1, qty2, sort_order)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [reportId, s.sold_item_id, s.item_name, s.unit1_label, s.unit2_label, s.qty1, s.qty2, s.sort_order]
+           (report_id, sold_item_id, item_name, unit1_label, unit2_label, qty1, qty2, text_value, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [reportId, s.sold_item_id, s.item_name, s.unit1_label, s.unit2_label, s.qty1, s.qty2, s.text_value ?? null, s.sort_order]
         );
       }
 
@@ -3095,7 +3115,7 @@ class CashierReport {
         });
 
         const [existingOrder] = await conn.execute(
-          `SELECT id, dp_payment_method_id, settlement_payment_method_id
+          `SELECT id, dp_payment_method_id, settlement_payment_method_id, notes
            FROM cashier_report_orders
            WHERE report_id = ? AND order_section = ? AND external_source = ? AND external_reference_id = ?
            LIMIT 1`,
@@ -3152,6 +3172,16 @@ class CashierReport {
         }
         const extraDataJson = Object.keys(cleanExtra).length > 0 ? JSON.stringify(cleanExtra) : null;
 
+        let resolvedNotes = raw.notes ? String(raw.notes).trim() : null;
+        if (externalSource === 'pesan_bosgil') {
+          if (existingOrder.length > 0) {
+            const existingNotes = existingOrder[0].notes ? String(existingOrder[0].notes).trim() : '';
+            resolvedNotes = existingNotes && !existingNotes.startsWith('[BosGil #') ? existingNotes : null;
+          } else {
+            resolvedNotes = null;
+          }
+        }
+
         const rowParams = [
           String(raw.customer_name || '').trim(),
           raw.planned_pickup_date ? String(raw.planned_pickup_date).trim() : null,
@@ -3173,7 +3203,7 @@ class CashierReport {
           ongkirAmt,
           totalAmt,
           raw.pickup_date ? String(raw.pickup_date).trim() : null,
-          raw.notes ? String(raw.notes).trim() : null,
+          resolvedNotes,
           extraDataJson
         ];
 
