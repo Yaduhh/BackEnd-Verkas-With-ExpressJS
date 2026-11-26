@@ -959,6 +959,7 @@ class CashierReport {
       apc: toNum(r.apc),
       omzet_gross: toNum(r.omzet_gross),
       pb1_amount: toNum(r.pb1_amount),
+      pb1_notes: r.pb1_notes || '',
       pb1_app_amount: toNullableNum(r.pb1_app_amount),
       omzet_net: toNum(r.omzet_net),
       omzet_sales_app: toNullableNum(r.omzet_sales_app),
@@ -1176,6 +1177,7 @@ class CashierReport {
       qty1: toNum(s.qty1),
       qty2: toNum(s.qty2),
       text_value: s.text_value ?? null,
+      text_value_2: s.text_value_2 ?? null,
       sort_order: Number(s.resolved_sort_order || s.sort_order || 0)
     }));
 
@@ -1627,6 +1629,7 @@ class CashierReport {
       apc: toNum(r.apc),
       omzet_gross: toNum(r.omzet_gross),
       pb1_amount: toNum(r.pb1_amount),
+      pb1_notes: r.pb1_notes || '',
       pb1_app_amount: toNullableNum(r.pb1_app_amount),
       omzet_net: toNum(r.omzet_net),
       omzet_sales_app: toNullableNum(r.omzet_sales_app),
@@ -2078,6 +2081,10 @@ class CashierReport {
             inputType === 'text' && s?.text_value !== undefined && s?.text_value !== null
               ? (String(s.text_value).trim() || null)
               : null;
+          const textVal2 =
+            inputType === 'text' && s?.text_value_2 !== undefined && s?.text_value_2 !== null
+              ? (String(s.text_value_2).trim() || null)
+              : null;
           return {
             sold_item_id: m ? m.id : (Number.isFinite(masterId) ? masterId : null),
             item_name: m ? m.name : (String(s?.item_name || '').trim() || `Item ${idx + 1}`),
@@ -2088,6 +2095,7 @@ class CashierReport {
             qty1: inputType === 'text' ? 0 : round2(s?.qty1),
             qty2: inputType === 'text' ? 0 : (u2 ? round2(s?.qty2) : 0),
             text_value: textVal,
+            text_value_2: textVal2,
             sort_order: m ? m.sort_order : idx + 1
           };
         });
@@ -2146,6 +2154,7 @@ class CashierReport {
         omzet_sales_app: toNullableNum(payload.omzet_sales_app),
         omzet_sales_cashier: manualOmzetSalesCashier,
         omzet_sales_notes: payload.omzet_sales_notes ? String(payload.omzet_sales_notes).trim() : null,
+        pb1_notes: payload.pb1_notes ? String(payload.pb1_notes).trim() : null,
         omzet_sales_lampiran: omzetSalesLampiranJson,
         cash_omzet: round2(payload.cash_omzet),
         cash_shift1: round2(payload.cash_shift1),
@@ -2175,7 +2184,7 @@ class CashierReport {
         await conn.execute(
           `UPDATE cashier_daily_reports SET
              created_by_names = ?, submitted_by = ?, status = ?,
-             total_customer = ?, apc = ?, omzet_gross = ?, pb1_amount = ?, pb1_app_amount = ?, omzet_net = ?,
+             total_customer = ?, apc = ?, omzet_gross = ?, pb1_amount = ?, pb1_notes = ?, pb1_app_amount = ?, omzet_net = ?,
              omzet_sales_app = ?, omzet_sales_cashier = ?, omzet_sales_notes = ?, omzet_sales_lampiran = ?,
              cash_omzet = ?, cash_shift1 = ?, cash_shift2 = ?,
              endorse_entertaint_total = ?, admin_pesanan_total = ?,
@@ -2190,7 +2199,7 @@ class CashierReport {
            WHERE id = ?`,
           [
             headerData.created_by_names, headerData.submitted_by, headerData.status,
-            headerData.total_customer, headerData.apc, headerData.omzet_gross, headerData.pb1_amount, headerData.pb1_app_amount, headerData.omzet_net,
+            headerData.total_customer, headerData.apc, headerData.omzet_gross, headerData.pb1_amount, headerData.pb1_notes, headerData.pb1_app_amount, headerData.omzet_net,
             headerData.omzet_sales_app, headerData.omzet_sales_cashier, headerData.omzet_sales_notes, headerData.omzet_sales_lampiran,
             headerData.cash_omzet, headerData.cash_shift1, headerData.cash_shift2,
             headerData.endorse_entertaint_total, headerData.admin_pesanan_total,
@@ -2209,7 +2218,7 @@ class CashierReport {
         const [ins] = await conn.execute(
           `INSERT INTO cashier_daily_reports (
              branch_id, report_date, created_by_names, submitted_by, status,
-             total_customer, apc, omzet_gross, pb1_amount, pb1_app_amount, omzet_net,
+             total_customer, apc, omzet_gross, pb1_amount, pb1_notes, pb1_app_amount, omzet_net,
              omzet_sales_app, omzet_sales_cashier, omzet_sales_notes, omzet_sales_lampiran,
              cash_omzet, cash_shift1, cash_shift2,
              endorse_entertaint_total, admin_pesanan_total,
@@ -2221,10 +2230,10 @@ class CashierReport {
              kambing_dijual_ekor, kambing_dijual_potong,
              kambing_kecil_ekor, kambing_kecil_potong,
              kasir_notes, auto_sync_omzet
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             branchId, dateStr, headerData.created_by_names, headerData.submitted_by, headerData.status,
-            headerData.total_customer, headerData.apc, headerData.omzet_gross, headerData.pb1_amount, headerData.pb1_app_amount, headerData.omzet_net,
+            headerData.total_customer, headerData.apc, headerData.omzet_gross, headerData.pb1_amount, headerData.pb1_notes, headerData.pb1_app_amount, headerData.omzet_net,
             headerData.omzet_sales_app, headerData.omzet_sales_cashier, headerData.omzet_sales_notes, headerData.omzet_sales_lampiran,
             headerData.cash_omzet, headerData.cash_shift1, headerData.cash_shift2,
             headerData.endorse_entertaint_total, headerData.admin_pesanan_total,
@@ -2293,9 +2302,9 @@ class CashierReport {
       for (const s of soldItems) {
         await conn.execute(
           `INSERT INTO cashier_report_sold_items
-           (report_id, sold_item_id, item_name, unit1_label, unit2_label, qty1, qty2, text_value, sort_order)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [reportId, s.sold_item_id, s.item_name, s.unit1_label, s.unit2_label, s.qty1, s.qty2, s.text_value ?? null, s.sort_order]
+           (report_id, sold_item_id, item_name, unit1_label, unit2_label, qty1, qty2, text_value, text_value_2, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [reportId, s.sold_item_id, s.item_name, s.unit1_label, s.unit2_label, s.qty1, s.qty2, s.text_value ?? null, s.text_value_2 ?? null, s.sort_order]
         );
       }
 
