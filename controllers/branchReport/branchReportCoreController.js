@@ -404,7 +404,7 @@ const getReport = async (req, res, next) => {
                   SELECT SUM(tr.amount)
                   FROM transaction_repayments tr
                   WHERE tr.transaction_id = t.id
-                    AND tr.mitra_piutang_id = mp.id
+                    AND (tr.transaction_mitra_detail_id = tmd.id OR (tr.transaction_mitra_detail_id IS NULL AND tr.mitra_piutang_id = mp.id))
                     AND tr.payment_date > ?
                     AND tr.deleted_at IS NULL
                 ), 0)), 0)
@@ -1084,7 +1084,7 @@ const getSingleBranchReportExportData = async (branchId, month, year, workingDay
                   SELECT SUM(tr.amount)
                   FROM transaction_repayments tr
                   WHERE tr.transaction_id = t.id
-                    AND tr.mitra_piutang_id = mp.id
+                    AND (tr.transaction_mitra_detail_id = tmd.id OR (tr.transaction_mitra_detail_id IS NULL AND tr.mitra_piutang_id = mp.id))
                     AND tr.payment_date > ?
                     AND tr.deleted_at IS NULL
                 ), 0)), 0)

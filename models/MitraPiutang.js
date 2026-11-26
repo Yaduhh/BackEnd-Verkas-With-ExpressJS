@@ -54,6 +54,17 @@ class MitraPiutang {
         ), 0)`
       : '0';
 
+    const repayAfterTmdSql = endDate
+      ? `COALESCE((
+          SELECT SUM(tr.amount)
+          FROM transaction_repayments tr
+          WHERE tr.transaction_id = t.id
+          AND (tr.transaction_mitra_detail_id = tmd.id OR (tr.transaction_mitra_detail_id IS NULL AND tr.mitra_piutang_id = mp.id))
+          AND DATE(tr.payment_date) > ?
+          AND tr.deleted_at IS NULL
+        ), 0)`
+      : '0';
+
     const initCutOffCond = endDate
       ? '(mp.initial_balance_date IS NULL OR DATE(mp.initial_balance_date) <= ?)'
       : '1=1';
@@ -134,7 +145,7 @@ class MitraPiutang {
                  AND NOT EXISTS (SELECT 1 FROM transaction_mitra_details WHERE transaction_id = t.id)
                  ${txEndFilter}
                ) + (
-                 SELECT COALESCE(SUM(tmd.remaining_debt + ${repayAfterSql}), 0)
+                 SELECT COALESCE(SUM(tmd.remaining_debt + ${repayAfterTmdSql}), 0)
                  FROM transaction_mitra_details tmd
                  JOIN transactions t ON tmd.transaction_id = t.id
                  WHERE tmd.mitra_piutang_id = mp.id AND t.status_deleted = false
@@ -165,7 +176,9 @@ class MitraPiutang {
                  SELECT COALESCE(SUM(
                    tmd.remaining_debt + COALESCE((
                      SELECT SUM(tr_all.amount) FROM transaction_repayments tr_all
-                     WHERE tr_all.transaction_id = t.id AND tr_all.mitra_piutang_id = mp.id AND tr_all.deleted_at IS NULL
+                     WHERE tr_all.transaction_id = t.id
+                       AND (tr_all.transaction_mitra_detail_id = tmd.id OR (tr_all.transaction_mitra_detail_id IS NULL AND tr_all.mitra_piutang_id = mp.id))
+                       AND tr_all.deleted_at IS NULL
                    ), 0)
                  ), 0)
                  FROM transaction_mitra_details tmd
